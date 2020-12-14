@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path"
@@ -17,7 +16,6 @@ import (
 	"github.com/google/uuid"
 
 	"gorm.io/driver/postgres"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -59,8 +57,6 @@ func InitDatabaseHandler(databaseBackendType BackendType) (*Handler, error) {
 	var err error
 
 	switch databaseBackendType {
-	case SQLite:
-		db, err = createSQLiteDatabase()
 	case Postgres:
 		db, err = createPostgresSQL()
 	}
@@ -81,21 +77,6 @@ func InitDatabaseHandler(databaseBackendType BackendType) (*Handler, error) {
 	}
 
 	return &dbHandler, nil
-}
-
-func createSQLiteDatabase() (*gorm.DB, error) {
-	tmpDir, err := ioutil.TempDir("", "baktadb-*")
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
-	db, err := gorm.Open(sqlite.Open(path.Join(tmpDir, "baktadb.db")), &gorm.Config{})
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
-
-	return db, nil
 }
 
 func createPostgresSQL() (*gorm.DB, error) {
