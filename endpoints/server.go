@@ -114,7 +114,7 @@ func initGrpcUpdateServer(authHandler *AuthHandler) *grpc.Server {
 // unaryInterceptor calls authenticateClient with current context
 func (authHandler *AuthHandler) unaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		if token, ok := md["X-API-Token"]; ok {
+		if token, ok := md["authorization"]; ok {
 			if len(token) == 1 && token[0] == authHandler.token {
 				handler(ctx, req)
 			}
