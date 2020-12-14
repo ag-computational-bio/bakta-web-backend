@@ -17,10 +17,13 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
+//AuthHandler Simple auth handler to check if a grpc call has a token
+//Only for testing purposes
 type AuthHandler struct {
 	token string
 }
 
+//InitAuthHandler Initiates a simple auth handler
 func InitAuthHandler() (*AuthHandler, error) {
 	apiToken := os.Getenv("ApiToken")
 	if apiToken == "" {

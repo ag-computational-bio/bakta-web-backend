@@ -24,6 +24,7 @@ func InitUpdateAPI() *BaktaUpdateAPI {
 	return &BaktaUpdateAPI{}
 }
 
+//UpdateStatus Updates the status of a running job
 func (apiHandler *BaktaUpdateAPI) UpdateStatus(ctx context.Context, request *api.UpdateStatusRequest) (*api.Empty, error) {
 	err := apiHandler.dbHandler.CheckSecret(request.GetJobID(), request.GetSecret())
 	if err != nil {
