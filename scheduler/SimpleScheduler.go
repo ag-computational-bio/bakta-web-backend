@@ -23,7 +23,7 @@ type SimpleScheduler struct {
 }
 
 //InitSimpleScheduler Initiates a scheduler to run bakta jobs
-func InitSimpleScheduler(namespace string) (*SimpleScheduler, error) {
+func InitSimpleScheduler(namespace string, dbHandler *database.Handler) (*SimpleScheduler, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		log.Println(err.Error())
@@ -36,15 +36,9 @@ func InitSimpleScheduler(namespace string) (*SimpleScheduler, error) {
 		return nil, err
 	}
 
-	handler, err := database.InitDatabaseHandler(database.SQLite)
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
-
 	scheduler := SimpleScheduler{
 		k8sClient:       clientset,
-		databaseHandler: handler,
+		databaseHandler: dbHandler,
 		namespace:       namespace,
 	}
 

@@ -20,6 +20,7 @@ require (
 	google.golang.org/genproto v0.0.0-20201207150747-9ee31aac76e7 // indirect
 	google.golang.org/grpc v1.34.0
 	gorm.io/driver/postgres v1.0.5
+	gorm.io/driver/sqlite v1.1.4
 	gorm.io/gorm v1.20.8
 	k8s.io/api v0.19.0
 	k8s.io/apimachinery v0.19.0

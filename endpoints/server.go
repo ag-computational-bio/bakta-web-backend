@@ -51,7 +51,7 @@ func RunGrpcJobServer() error {
 
 	namespace := "bakta-test"
 
-	sched, err := scheduler.InitSimpleScheduler(namespace)
+	sched, err := scheduler.InitSimpleScheduler(namespace, dbHandler)
 	if err != nil {
 		log.Fatalln(err.Error())
 	}
