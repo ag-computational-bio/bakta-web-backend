@@ -44,7 +44,7 @@ func RunGrpcJobServer() error {
 		log.Fatalln(err.Error())
 	}
 
-	dbHandler, err := database.InitDatabaseHandler(database.SQLite)
+	dbHandler, err := database.InitDatabaseHandler(database.Postgres)
 	if err != nil {
 		log.Fatalln(err.Error())
 	}

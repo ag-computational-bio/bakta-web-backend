@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"log"
+	"os"
 	"path"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -24,6 +27,8 @@ type BackendType string
 const (
 	//SQLite Use an sqlite database in the backend
 	SQLite BackendType = "SQLite"
+	//Postgres User a postgres database in the backend
+	Postgres BackendType = "Postgres"
 )
 
 //UploadFileType type of file to upload
@@ -56,6 +61,8 @@ func InitDatabaseHandler(databaseBackendType BackendType) (*Handler, error) {
 	switch databaseBackendType {
 	case SQLite:
 		db, err = createSQLiteDatabase()
+	case Postgres:
+		db, err = createPostgresSQL()
 	}
 
 	if err != nil {
@@ -83,6 +90,23 @@ func createSQLiteDatabase() (*gorm.DB, error) {
 		return nil, err
 	}
 	db, err := gorm.Open(sqlite.Open(path.Join(tmpDir, "baktadb.db")), &gorm.Config{})
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	return db, nil
+}
+
+func createPostgresSQL() (*gorm.DB, error) {
+	host := os.Getenv("DatabaseHost")
+	dbName := os.Getenv("DBName")
+	dbUser := os.Getenv("DBUser")
+	dbPassword := os.Getenv("DBPassword")
+	dbPort := os.Getenv("DBPort")
+
+	dsn := fmt.Sprintf("host=%v user=%v password=%v dbname=%v port=%v sslmode=disable TimeZone=Europe/Berlin", host, dbUser, dbPassword, dbName, dbPort)
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err

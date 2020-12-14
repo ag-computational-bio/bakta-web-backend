@@ -9,7 +9,9 @@ require (
 	github.com/google/uuid v1.1.2
 	github.com/gregjones/httpcache v0.0.0-20180305231024-9cad4c3443a7 // indirect
 	github.com/imdario/mergo v0.3.5 // indirect
+	github.com/jackc/pgx/v4 v4.10.0 // indirect
 	github.com/peterbourgon/diskv v2.0.1+incompatible // indirect
+	golang.org/x/crypto v0.0.0-20201208171446-5f87f3452ae9 // indirect
 	golang.org/x/net v0.0.0-20201202161906-c7110b5ffcbb // indirect
 	golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e
 	golang.org/x/sys v0.0.0-20201204225414-ed752295db88 // indirect
@@ -17,6 +19,7 @@ require (
 	golang.org/x/time v0.0.0-20191024005414-555d28b269f0 // indirect
 	google.golang.org/genproto v0.0.0-20201207150747-9ee31aac76e7 // indirect
 	google.golang.org/grpc v1.34.0
+	gorm.io/driver/postgres v1.0.5
 	gorm.io/driver/sqlite v1.1.4
 	gorm.io/gorm v1.20.8
 	k8s.io/api v0.19.0
