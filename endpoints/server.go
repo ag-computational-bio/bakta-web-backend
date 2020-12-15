@@ -118,8 +118,9 @@ func (authHandler *AuthHandler) unaryInterceptor(ctx context.Context, req interf
 			if len(token) == 1 && token[0] == authHandler.token {
 				return handler(ctx, req)
 			}
+			return "", fmt.Errorf("API key does not match")
 		}
 	}
 
-	return "", fmt.Errorf("missing credentials")
+	return "", fmt.Errorf("error authenticating credentials")
 }
