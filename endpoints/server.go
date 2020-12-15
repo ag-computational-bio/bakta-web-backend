@@ -116,7 +116,7 @@ func (authHandler *AuthHandler) unaryInterceptor(ctx context.Context, req interf
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		if token, ok := md["authorization"]; ok {
 			if len(token) == 1 && token[0] == authHandler.token {
-				handler(ctx, req)
+				return handler(ctx, req)
 			}
 		}
 	}
