@@ -18,14 +18,15 @@ type BaktaJobAPI struct {
 	api.UnimplementedBaktaJobsServer
 	dbHandler *database.Handler
 	scheduler *scheduler.SimpleScheduler
-	s3Handler objectStorage.S3ObjectStorageHandler
+	s3Handler *objectStorage.S3ObjectStorageHandler
 }
 
 //InitBaktaAPI Initiates the Bakta API handler
-func InitBaktaAPI(dbHandler *database.Handler, scheduler *scheduler.SimpleScheduler) *BaktaJobAPI {
+func InitBaktaAPI(dbHandler *database.Handler, scheduler *scheduler.SimpleScheduler, s3Handler *objectStorage.S3ObjectStorageHandler) *BaktaJobAPI {
 	api := &BaktaJobAPI{
 		dbHandler: dbHandler,
 		scheduler: scheduler,
+		s3Handler: s3Handler,
 	}
 
 	return api

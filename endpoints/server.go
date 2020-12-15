@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 
+	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 	"github.com/ag-computational-bio/bakta-web-backend/scheduler"
 
 	"github.com/ag-computational-bio/bakta-web-backend/database"
@@ -68,7 +69,9 @@ func RunGrpcJobServer() error {
 		return err
 	}
 
-	jobServer := initGrpcJobServer(dbHandler, sched, authHandler)
+	s3Handler := objectStorage.InitS3ObjectStorageHandler()
+
+	jobServer := initGrpcJobServer(dbHandler, sched, authHandler, s3Handler)
 	updateServer := initGrpcUpdateServer(authHandler)
 
 	serverErrGrp, _ := errgroup.WithContext(context.Background())
@@ -85,8 +88,8 @@ func RunGrpcJobServer() error {
 }
 
 // initGrpcServer Initializes a new GRPC server that handles bakta-web-api endpoints
-func initGrpcJobServer(dbHandler *database.Handler, sched *scheduler.SimpleScheduler, authHandler *AuthHandler) *grpc.Server {
-	baktaJobsEndpoints := InitBaktaAPI(dbHandler, sched)
+func initGrpcJobServer(dbHandler *database.Handler, sched *scheduler.SimpleScheduler, authHandler *AuthHandler, s3Handler *objectStorage.S3ObjectStorageHandler) *grpc.Server {
+	baktaJobsEndpoints := InitBaktaAPI(dbHandler, sched, s3Handler)
 
 	var opts []grpc.ServerOption
 	opts = append(opts, grpc.UnaryInterceptor(authHandler.unaryInterceptor))
