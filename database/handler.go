@@ -76,8 +76,13 @@ func InitDatabaseHandler(databaseBackendType BackendType) (*Handler, error) {
 		return nil, err
 	}
 
+	bucket := os.Getenv("DataBucket")
+	baseKey := os.Getenv("BaseKey")
+
 	dbHandler := Handler{
-		DB: db,
+		DB:         db,
+		DataBucket: bucket,
+		BaseKey:    baseKey,
 	}
 
 	return &dbHandler, nil
