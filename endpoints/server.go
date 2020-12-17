@@ -45,14 +45,12 @@ func RunGrpcJobServer() error {
 		log.Fatalln(err.Error())
 	}
 
-	dbHandler, err := database.InitDatabaseHandler(database.Postgres)
+	dbHandler, err := database.InitDatabaseHandler()
 	if err != nil {
 		log.Fatalln(err.Error())
 	}
 
-	namespace := "bakta-test"
-
-	sched, err := scheduler.InitSimpleScheduler(namespace, dbHandler)
+	sched, err := scheduler.InitSimpleScheduler(dbHandler)
 	if err != nil {
 		log.Fatalln(err.Error())
 	}

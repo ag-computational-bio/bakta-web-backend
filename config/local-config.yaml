@@ -1,0 +1,9 @@
+Objectstorage:
+  S3:
+    Bucket: baktadata
+    BaseKey: data/dev
+Database:
+  Backend: SQLite
+  SQLite:
+    Path: /tmp
+K8sNamespace: "bakta-dev"

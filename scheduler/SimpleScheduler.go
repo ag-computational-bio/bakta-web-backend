@@ -2,16 +2,24 @@ package scheduler
 
 import (
 	"context"
+	"flag"
 	"log"
+	"os"
+	"path/filepath"
+
+	"github.com/spf13/viper"
 
 	"github.com/ag-computational-bio/bakta-web-api/go/api"
 
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 
+	restclient "k8s.io/client-go/rest"
+
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/homedir"
 )
 
 //SimpleScheduler A simple scheduler to run bakta jobs on a Kubernetes cluster
@@ -23,11 +31,14 @@ type SimpleScheduler struct {
 }
 
 //InitSimpleScheduler Initiates a scheduler to run bakta jobs
-func InitSimpleScheduler(namespace string, dbHandler *database.Handler) (*SimpleScheduler, error) {
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
+func InitSimpleScheduler(dbHandler *database.Handler) (*SimpleScheduler, error) {
+	var config *restclient.Config
+	var err error
+
+	if os.Getenv("InCluster") != "" {
+		config, err = restclient.InClusterConfig()
+	} else {
+		config, err = createOutOfClusterConfig()
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
@@ -35,6 +46,8 @@ func InitSimpleScheduler(namespace string, dbHandler *database.Handler) (*Simple
 		log.Println(err.Error())
 		return nil, err
 	}
+
+	namespace := viper.GetString("K8sNamespace")
 
 	scheduler := SimpleScheduler{
 		k8sClient:       clientset,
@@ -71,7 +84,12 @@ func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfi
 		return nil, err
 	}
 
-	apiJob := createBaseJobConf(jobID, scheduler.namespace, downloadConf, baktaConf, uploadConf)
+	apiJob, err := createBaseJobConf(jobID, scheduler.namespace, downloadConf, baktaConf, uploadConf)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
 	scheduledJob, err := scheduler.k8sClient.BatchV1().Jobs(scheduler.namespace).Create(context.TODO(), apiJob, metav1.CreateOptions{})
 	if err != nil {
 		log.Println(err.Error())
@@ -85,4 +103,22 @@ func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfi
 	}
 
 	return scheduledJob, nil
+}
+
+func createOutOfClusterConfig() (*restclient.Config, error) {
+	var kubeconfig *string
+	if home := homedir.HomeDir(); home != "" {
+		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
+	} else {
+		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+	}
+	flag.Parse()
+
+	// use the current context in kubeconfig
+	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	return config, err
 }

@@ -2,6 +2,9 @@ package scheduler
 
 import (
 	"fmt"
+	"log"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
@@ -13,7 +16,24 @@ func createBaseJobConf(
 	namespace string,
 	downloaderConf string,
 	baktaConf string,
-	uploaderConf string) *batchv1.Job {
+	uploaderConf string) (*batchv1.Job, error) {
+
+	cpuQuantity, err := resource.ParseQuantity("8")
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	memoryQuantity, err := resource.ParseQuantity("8000Mi")
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	resourceRequests := make(map[v1.ResourceName]resource.Quantity)
+	resourceRequests[v1.ResourceCPU] = cpuQuantity
+	resourceRequests[v1.ResourceMemory] = memoryQuantity
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("bakta-job-%v", id),
@@ -22,10 +42,15 @@ func createBaseJobConf(
 		Spec: batchv1.JobSpec{
 			Template: v1.PodTemplateSpec{
 				Spec: v1.PodSpec{
+					RestartPolicy: "Never",
 					Containers: []v1.Container{
 						v1.Container{
 							Name:  "bakta-job",
 							Image: "quay.io/mariusdieckmann/bakta-web-job",
+							Resources: v1.ResourceRequirements{
+								Limits:   resourceRequests,
+								Requests: resourceRequests,
+							},
 							VolumeMounts: []v1.VolumeMount{
 								v1.VolumeMount{
 									Name:      "database",
@@ -43,11 +68,11 @@ func createBaseJobConf(
 								},
 								v1.EnvVar{
 									Name:  "BaktaEnvConfig",
-									Value: downloaderConf,
+									Value: baktaConf,
 								},
 								v1.EnvVar{
 									Name:  "UploaderEnvConfig",
-									Value: downloaderConf,
+									Value: uploaderConf,
 								},
 								v1.EnvVar{
 									Name: "AWS_ACCESS_KEY_ID",
@@ -83,10 +108,10 @@ func createBaseJobConf(
 							},
 						},
 						v1.Volume{
-							Name: "database-pb",
+							Name: "database",
 							VolumeSource: v1.VolumeSource{
 								PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-									ClaimName: "bakta-data",
+									ClaimName: "database",
 								},
 							},
 						},
@@ -97,7 +122,7 @@ func createBaseJobConf(
 		},
 	}
 
-	return job
+	return job, nil
 }
 
 func int32Link(value int) *int32 {

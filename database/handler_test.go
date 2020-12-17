@@ -28,5 +28,11 @@ func TestDatabaseHandler(t *testing.T) {
 	if err != nil {
 		t.Errorf(err.Error())
 	}
+}
 
+func TestRndBytes(t *testing.T) {
+	_, err := randStringBytes(50)
+	if err != nil {
+		t.Errorf(err.Error())
+	}
 }

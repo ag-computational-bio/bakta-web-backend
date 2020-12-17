@@ -27,17 +27,17 @@ func createDownloadConf(job *database.Job, prodigaltf bool, replicontsv bool) (s
 
 //createBaktaConf Creates a bakta config string based on the configuration and job settings provided
 func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
-	confString := "--db /db/prod/db"
+	confString := "--db /db/db-mock --tmp-dir /cache --threads 8"
 
 	_, fastaFileName := path.Split(job.FastaKey)
-	confString = fmt.Sprintf(confString+" %v", fastaFileName)
+	confString = fmt.Sprintf(confString+" /data/%v", fastaFileName)
 
 	return confString, nil
 }
 
 //createUploadConf Creates the configuration string for a bakta job
 func createUploadConf(job *database.Job) (string, error) {
-	confString := fmt.Sprintf("upload -e s3.computational.bio.uni-giessen.de -k %v -b %v -f /results.tar.gz", job.DataBucket, job.ResultKey)
+	confString := fmt.Sprintf("upload -e s3.computational.bio.uni-giessen.de -k %v -b %v -f /results.tar.gz", job.ResultKey, job.DataBucket)
 
 	return confString, nil
 }

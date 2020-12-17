@@ -15,6 +15,7 @@ import (
 	"github.com/ag-computational-bio/bakta-web-api/go/api"
 
 	"github.com/google/uuid"
+	"github.com/spf13/viper"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
@@ -53,15 +54,17 @@ type Handler struct {
 }
 
 // InitDatabaseHandler Initializes the database to store the Job
-func InitDatabaseHandler(databaseBackendType BackendType) (*Handler, error) {
+func InitDatabaseHandler() (*Handler, error) {
 
 	var db *gorm.DB
 	var err error
 
-	switch databaseBackendType {
-	case SQLite:
+	databaseType := viper.GetString("Database.Backend")
+
+	switch databaseType {
+	case string(SQLite):
 		db, err = createSQLiteDatabase()
-	case Postgres:
+	case string(Postgres):
 		db, err = createPostgresSQL()
 	}
 
@@ -76,8 +79,8 @@ func InitDatabaseHandler(databaseBackendType BackendType) (*Handler, error) {
 		return nil, err
 	}
 
-	bucket := os.Getenv("DataBucket")
-	baseKey := os.Getenv("BaseKey")
+	bucket := viper.GetString("Objectstorage.S3.Bucket")
+	baseKey := viper.GetString("Objectstorage.S3.BaseKey")
 
 	dbHandler := Handler{
 		DB:         db,
@@ -156,7 +159,7 @@ func (handler *Handler) CreateJob() (*Job, string, error) {
 		return nil, "", err
 	}
 
-	return &job, "", nil
+	return &job, secretID, nil
 }
 
 //UpdateK8s Updates a job with its k8s id
@@ -172,6 +175,9 @@ func (handler *Handler) UpdateK8s(id string, k8s string) error {
 	}
 
 	job.K8sID = k8s
+	job.Status = api.JobStatusEnum_RUNNING.String()
+
+	handler.DB.Save(&job)
 
 	return nil
 }
@@ -193,16 +199,16 @@ func (handler *Handler) UpdateStatus(id string, status api.JobStatusEnum, errorM
 
 //GetJob Returns the stored config of a job
 func (handler *Handler) GetJob(id string) (*Job, error) {
-	var job *Job
+	job := Job{}
 	job.JobID = id
 
-	result := handler.DB.First(job)
+	result := handler.DB.First(&job)
 	if result.Error != nil {
 		log.Println(result.Error)
 		return nil, result.Error
 	}
 
-	return job, nil
+	return &job, nil
 }
 
 //CheckSecret Compares the provided secret/JobID with a job in the database
