@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path"
 
+	"github.com/spf13/viper"
+
 	"github.com/ag-computational-bio/bakta-web-api/go/api"
 
 	"github.com/ag-computational-bio/bakta-web-backend/database"
@@ -27,7 +29,13 @@ func createDownloadConf(job *database.Job, prodigaltf bool, replicontsv bool) (s
 
 //createBaktaConf Creates a bakta config string based on the configuration and job settings provided
 func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
-	confString := "--db /db/db-mock --tmp-dir /cache --threads 8"
+	var confString string
+
+	if viper.IsSet("Testing") || viper.IsSet("Debug") {
+		confString = "--db /db/db-mock --tmp-dir /cache --threads 8"
+	} else {
+		confString = "--db /db/db --tmp-dir /cache --threads 8"
+	}
 
 	_, fastaFileName := path.Split(job.FastaKey)
 	confString = fmt.Sprintf(confString+" /data/%v", fastaFileName)
