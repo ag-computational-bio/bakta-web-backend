@@ -66,6 +66,8 @@ func InitDatabaseHandler() (*Handler, error) {
 		db, err = createSQLiteDatabase()
 	case string(Postgres):
 		db, err = createPostgresSQL()
+	default:
+		db, err = createSQLiteDatabase()
 	}
 
 	if err != nil {
@@ -107,11 +109,11 @@ func createSQLiteDatabase() (*gorm.DB, error) {
 }
 
 func createPostgresSQL() (*gorm.DB, error) {
-	host := os.Getenv("DatabaseHost")
-	dbName := os.Getenv("DBName")
-	dbUser := os.Getenv("DBUser")
-	dbPassword := os.Getenv("DBPassword")
-	dbPort := os.Getenv("DBPort")
+	host := getEnvOrPanic("DatabaseHost")
+	dbName := getEnvOrPanic("DBName")
+	dbUser := getEnvOrPanic("DBUser")
+	dbPassword := getEnvOrPanic("DBPassword")
+	dbPort := getEnvOrPanic("DBPort")
 
 	dsn := fmt.Sprintf("host=%v user=%v password=%v dbname=%v port=%v sslmode=disable TimeZone=Europe/Berlin", host, dbUser, dbPassword, dbName, dbPort)
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
@@ -233,6 +235,7 @@ func (handler *Handler) CheckSecret(id string, secretKey string) error {
 	return nil
 }
 
+// GetJobsStatus Returns the status of a list of jobs
 func (handler *Handler) GetJobsStatus(jobIDs []string) ([]Job, error) {
 	var jobs []Job
 
@@ -245,6 +248,7 @@ func (handler *Handler) GetJobsStatus(jobIDs []string) ([]Job, error) {
 	return jobs, nil
 }
 
+// GetJobStatus Returns the status of an individual job
 func (handler *Handler) GetJobStatus(jobID string) (*Job, error) {
 	job := Job{
 		JobID: jobID,
@@ -290,4 +294,14 @@ func randStringBytes(n int) (string, error) {
 	data := base64.StdEncoding.EncodeToString(b)
 
 	return data, nil
+}
+
+func getEnvOrPanic(envVarName string) string {
+	value := os.Getenv(envVarName)
+
+	if value == "" {
+		log.Panicln(fmt.Sprintf("Could not find env var %v", envVarName))
+	}
+
+	return value
 }

@@ -5,7 +5,7 @@ import (
 )
 
 func TestDatabaseHandler(t *testing.T) {
-	databaseHandler, err := InitDatabaseHandler(SQLite)
+	databaseHandler, err := InitDatabaseHandler()
 	if err != nil {
 		t.Errorf(err.Error())
 	}

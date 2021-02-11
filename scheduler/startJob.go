@@ -44,7 +44,7 @@ func createBaseJobConf(
 				Spec: v1.PodSpec{
 					RestartPolicy: "Never",
 					Containers: []v1.Container{
-						v1.Container{
+						{
 							Name:  "bakta-job",
 							Image: "quay.io/mariusdieckmann/bakta-web-job",
 							Resources: v1.ResourceRequirements{
@@ -52,29 +52,29 @@ func createBaseJobConf(
 								Requests: resourceRequests,
 							},
 							VolumeMounts: []v1.VolumeMount{
-								v1.VolumeMount{
+								{
 									Name:      "database",
 									MountPath: "/db",
 								},
-								v1.VolumeMount{
+								{
 									Name:      "cache-volume",
 									MountPath: "/cache",
 								},
 							},
 							Env: []v1.EnvVar{
-								v1.EnvVar{
+								{
 									Name:  "DownloaderEnvConfig",
 									Value: downloaderConf,
 								},
-								v1.EnvVar{
+								{
 									Name:  "BaktaEnvConfig",
 									Value: baktaConf,
 								},
-								v1.EnvVar{
+								{
 									Name:  "UploaderEnvConfig",
 									Value: uploaderConf,
 								},
-								v1.EnvVar{
+								{
 									Name: "AWS_ACCESS_KEY_ID",
 									ValueFrom: &v1.EnvVarSource{
 										SecretKeyRef: &v1.SecretKeySelector{
@@ -85,7 +85,7 @@ func createBaseJobConf(
 										},
 									},
 								},
-								v1.EnvVar{
+								{
 									Name: "AWS_SECRET_ACCESS_KEY",
 									ValueFrom: &v1.EnvVarSource{
 										SecretKeyRef: &v1.SecretKeySelector{
@@ -101,13 +101,13 @@ func createBaseJobConf(
 					},
 
 					Volumes: []v1.Volume{
-						v1.Volume{
+						{
 							Name: "cache-volume",
 							VolumeSource: v1.VolumeSource{
 								EmptyDir: &v1.EmptyDirVolumeSource{},
 							},
 						},
-						v1.Volume{
+						{
 							Name: "database",
 							VolumeSource: v1.VolumeSource{
 								PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{

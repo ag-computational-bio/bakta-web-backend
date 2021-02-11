@@ -4,6 +4,4 @@ Objectstorage:
     BaseKey: data/dev
 Database:
   Backend: Postgres
-  Postgres:
-    Path: /tmp
 K8sNamespace: "bakta-dev"

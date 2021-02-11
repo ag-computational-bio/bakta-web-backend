@@ -82,6 +82,8 @@ func RunGrpcJobServer() error {
 		return updateServer.Serve(updateListener)
 	})
 
+	log.Println("Started grpc server")
+
 	return serverErrGrp.Wait()
 }
 
