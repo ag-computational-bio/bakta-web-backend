@@ -73,7 +73,7 @@ jobs:
           docker push $IMAGE_ID:$VERSION
 
       - name: Log into quay.io registry
-        run: echo "${{ secrets.QUAY_WRITE_ROBOT_NAME }}" | docker login quay.io -u ${{ secrets.QUAY_WRITE_ROBOT_PW }} --password-stdin
+        run: echo "${{ secrets.QUAY_WRITE_ROBOT_PW }}" | docker login quay.io -u ${{ secrets.QUAY_WRITE_ROBOT_NAME }} --password-stdin
 
       - name: Push image to github registry
         run: |
