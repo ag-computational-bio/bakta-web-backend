@@ -72,9 +72,6 @@ jobs:
           docker tag $IMAGE_NAME $IMAGE_ID:$VERSION
           docker push $IMAGE_ID:$VERSION
 
-          docker tag $IMAGE_NAME $QUAY_IMAGE_ID:$VERSION
-          docker push $QUAY_IMAGE_ID:$VERSION
-
       - name: Log into quay.io registry
         run: echo "${{ secrets.QUAY_WRITE_ROBOT_NAME }}" | docker login quay.io -u ${{ secrets.QUAY_WRITE_ROBOT_PW }} --password-stdin
 
