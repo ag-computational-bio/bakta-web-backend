@@ -2,10 +2,6 @@ name: Docker
 
 on:
   push:
-    # Publish `main` as Docker `latest` image.
-    branches:
-      - main
-
     # Publish `v1.2.3` tags as releases.
     tags:
       - v*
@@ -15,7 +11,7 @@ on:
 
 env:
   # TODO: Change variable to your image's name.
-  IMAGE_NAME: image
+  IMAGE_NAME: bakta-web-backend
 
 jobs:
   # Run tests.
