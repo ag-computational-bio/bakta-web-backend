@@ -3,7 +3,7 @@ module github.com/ag-computational-bio/bakta-web-backend
 go 1.15
 
 require (
-	github.com/ag-computational-bio/bakta-web-api/go v0.3.1-alpha.0.20201212132546-36c0831acf13
+	github.com/ag-computational-bio/bakta-web-api/go v0.3.3-alpha
 	github.com/aws/aws-sdk-go v1.37.8
 	github.com/google/uuid v1.2.0
 	github.com/imdario/mergo v0.3.11 // indirect

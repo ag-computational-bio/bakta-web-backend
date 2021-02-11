@@ -122,3 +122,11 @@ func createOutOfClusterConfig() (*restclient.Config, error) {
 
 	return config, err
 }
+
+func (scheduler *SimpleScheduler) GetK8sClient() *kubernetes.Clientset {
+	return scheduler.k8sClient
+}
+
+func (scheduler *SimpleScheduler) GetNamespace() string {
+	return scheduler.namespace
+}

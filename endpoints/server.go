@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 
+	"github.com/ag-computational-bio/bakta-web-backend/monitor"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 	"github.com/ag-computational-bio/bakta-web-backend/scheduler"
 
@@ -70,7 +71,15 @@ func RunGrpcJobServer() error {
 	s3Handler := objectStorage.InitS3ObjectStorageHandler()
 
 	jobServer := initGrpcJobServer(dbHandler, sched, authHandler, s3Handler)
-	updateServer := initGrpcUpdateServer(authHandler)
+
+	updateMonitor := monitor.New(sched.GetK8sClient(), sched.GetNamespace())
+
+	updateHandler := BaktaUpdateAPI{
+		dbHandler:     dbHandler,
+		updateMonitor: &updateMonitor,
+	}
+
+	updateServer := initGrpcUpdateServer(&updateHandler)
 
 	serverErrGrp, _ := errgroup.WithContext(context.Background())
 
@@ -101,13 +110,7 @@ func initGrpcJobServer(dbHandler *database.Handler, sched *scheduler.SimpleSched
 }
 
 // initGrpcServer Initializes a new GRPC server that handles bakta-web-api endpoints
-func initGrpcUpdateServer(authHandler *AuthHandler) *grpc.Server {
-
-	baktaUpdateEndpoints := InitUpdateAPI()
-
-	var opts []grpc.ServerOption
-	opts = append(opts, grpc.UnaryInterceptor(authHandler.unaryInterceptor))
-
+func initGrpcUpdateServer(baktaUpdateEndpoints *BaktaUpdateAPI) *grpc.Server {
 	grpcServer := grpc.NewServer()
 	api.RegisterBaktaStatusUpdateServer(grpcServer, baktaUpdateEndpoints)
 

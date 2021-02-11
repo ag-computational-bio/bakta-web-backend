@@ -48,6 +48,26 @@ func createBaseJobConf(
 						{
 							Name:  "bakta-job",
 							Image: "quay.io/mariusdieckmann/bakta-web-job",
+							Lifecycle: &v1.Lifecycle{
+								PostStart: &v1.Handler{
+									Exec: &v1.ExecAction{
+										Command: []string{
+											"/bni/bash",
+											"-c",
+											"/bin/DataStager update",
+										},
+									},
+								},
+								PreStop: &v1.Handler{
+									Exec: &v1.ExecAction{
+										Command: []string{
+											"/bni/bash",
+											"-c",
+											"/bin/DataStager update",
+										},
+									},
+								},
+							},
 							Resources: v1.ResourceRequirements{
 								Limits:   resourceRequests,
 								Requests: resourceRequests,
@@ -76,8 +96,8 @@ func createBaseJobConf(
 									Value: uploaderConf,
 								},
 								{
-									Name:  "JobSecret",
-									Value: secret,
+									Name:  "JobID",
+									Value: id,
 								},
 								{
 									Name: "AWS_ACCESS_KEY_ID",

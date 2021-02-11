@@ -263,6 +263,23 @@ func (handler *Handler) GetJobStatus(jobID string) (*Job, error) {
 	return &job, nil
 }
 
+func (handler *Handler) GetRunningJobs() ([]*Job, error) {
+	running_status := []string{
+		api.JobStatusEnum_RUNNING.String(),
+		api.JobStatusEnum_INIT.String(),
+	}
+
+	jobs := make([]*Job, 0)
+
+	connection := handler.DB.Where("status in ?", running_status).Find(jobs)
+	if connection.Error != nil {
+		log.Println(connection.Error)
+		return nil, connection.Error
+	}
+
+	return jobs, nil
+}
+
 func (handler *Handler) createUploadStoreKey(id string, uploadFileType UploadFileType) string {
 	var filename string
 	switch uploadFileType {

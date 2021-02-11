@@ -46,12 +46,13 @@ jobs:
       - name: Build image
         run: docker build . --file Dockerfile --tag $IMAGE_NAME
 
-      - name: Log into registry
+      - name: Log into github registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login docker.pkg.github.com -u ${{ github.actor }} --password-stdin
 
-      - name: Push image
+      - name: Push image to github registry
         run: |
           IMAGE_ID=docker.pkg.github.com/${{ github.repository }}/$IMAGE_NAME
+          QUAY_IMAGE_ID=quay.io/bakta/backend
 
           # Change all uppercase to lowercase
           IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
@@ -70,3 +71,16 @@ jobs:
 
           docker tag $IMAGE_NAME $IMAGE_ID:$VERSION
           docker push $IMAGE_ID:$VERSION
+
+          docker tag $IMAGE_NAME $QUAY_IMAGE_ID:$VERSION
+          docker push $QUAY_IMAGE_ID:$VERSION
+
+      - name: Log into quay.io registry
+        run: echo "${{ secrets.QUAY_WRITE_ROBOT_NAME }}" | docker login quay.io -u ${{ secrets.QUAY_WRITE_ROBOT_PW }} --password-stdin
+
+      - name: Push image to github registry
+        run: |
+          QUAY_IMAGE_ID=quay.io/bakta/backend
+
+          docker tag $IMAGE_NAME $QUAY_IMAGE_ID:$VERSION
+          docker push $QUAY_IMAGE_ID:$VERSION
