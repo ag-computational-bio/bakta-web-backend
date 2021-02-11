@@ -84,7 +84,7 @@ func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfi
 		return nil, err
 	}
 
-	apiJob, err := createBaseJobConf(jobID, scheduler.namespace, downloadConf, baktaConf, uploadConf)
+	apiJob, err := createBaseJobConf(jobID, scheduler.namespace, downloadConf, baktaConf, uploadConf, job.Secret)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err

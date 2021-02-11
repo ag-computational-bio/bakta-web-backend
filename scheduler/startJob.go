@@ -16,7 +16,8 @@ func createBaseJobConf(
 	namespace string,
 	downloaderConf string,
 	baktaConf string,
-	uploaderConf string) (*batchv1.Job, error) {
+	uploaderConf string,
+	secret string) (*batchv1.Job, error) {
 
 	cpuQuantity, err := resource.ParseQuantity("8")
 	if err != nil {
@@ -73,6 +74,10 @@ func createBaseJobConf(
 								{
 									Name:  "UploaderEnvConfig",
 									Value: uploaderConf,
+								},
+								{
+									Name:  "JobSecret",
+									Value: secret,
 								},
 								{
 									Name: "AWS_ACCESS_KEY_ID",
