@@ -52,7 +52,6 @@ jobs:
       - name: Push image to github registry
         run: |
           IMAGE_ID=docker.pkg.github.com/${{ github.repository }}/$IMAGE_NAME
-          QUAY_IMAGE_ID=quay.io/bakta/backend
 
           # Change all uppercase to lowercase
           IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
@@ -72,11 +71,8 @@ jobs:
           docker tag $IMAGE_NAME $IMAGE_ID:$VERSION
           docker push $IMAGE_ID:$VERSION
 
-      - name: Log into quay.io registry
-        run: echo "${{ secrets.QUAY_WRITE_ROBOT_PW }}" | docker login quay.io -u ${{ secrets.QUAY_WRITE_ROBOT_NAME }} --password-stdin
+          echo "${{ secrets.QUAY_WRITE_ROBOT_PW }}" | docker login quay.io -u ${{ secrets.QUAY_WRITE_ROBOT_NAME }} --password-stdin
 
-      - name: Push image to github registry
-        run: |
           QUAY_IMAGE_ID=quay.io/bakta/backend
 
           docker tag $IMAGE_NAME $QUAY_IMAGE_ID:$VERSION
