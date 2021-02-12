@@ -5,3 +5,6 @@ Objectstorage:
 Database:
   Backend: Postgres
 K8sNamespace: "bakta-dev"
+UpdateService:
+  Name: baktawebbackend
+  Port: "8081"

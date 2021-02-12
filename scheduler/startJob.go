@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/spf13/viper"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -18,6 +19,20 @@ func createBaseJobConf(
 	baktaConf string,
 	uploaderConf string,
 	secret string) (*batchv1.Job, error) {
+
+	updateServiceName := viper.GetString("UpdateService.Name")
+	if updateServiceName == "" {
+		err := fmt.Errorf("Could not find service under config UpdateService.Name")
+		log.Println(err)
+		return nil, err
+	}
+
+	updateServicePort := viper.GetString("UpdateService.Port")
+	if updateServicePort == "" {
+		err := fmt.Errorf("Could not find service under config UpdateService.Port")
+		log.Println(err)
+		return nil, err
+	}
 
 	cpuQuantity, err := resource.ParseQuantity("8")
 	if err != nil {
@@ -98,6 +113,14 @@ func createBaseJobConf(
 								{
 									Name:  "JobID",
 									Value: id,
+								},
+								{
+									Name:  "GRPCUpdaterEndpoint",
+									Value: updateServiceName,
+								},
+								{
+									Name:  "GRPCUpdaterPort",
+									Value: updateServicePort,
 								},
 								{
 									Name: "AWS_ACCESS_KEY_ID",
