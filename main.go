@@ -9,7 +9,7 @@ import (
 )
 
 var opts struct {
-	ConfigFile string `short:"c" long:"configfile" description:"File of the config file" default:"./config/local-config.yaml"`
+	ConfigFile string `short:"c" long:"configfile" description:"File of the config file" default:"./config/config.yaml"`
 }
 
 //Version Version tag
