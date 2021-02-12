@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/ag-computational-bio/bakta-web-api/go/api"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,6 +42,8 @@ func (monitor *SimpleMonitor) GetJobStatus(jobID string) (JobStatus, error) {
 	jobStatus := JobStatus{
 		Status: api.JobStatusEnum_INIT,
 	}
+
+	time.Sleep(2 * time.Second)
 
 	if job.Status.Active >= 1 {
 		jobStatus.Status = api.JobStatusEnum_RUNNING
