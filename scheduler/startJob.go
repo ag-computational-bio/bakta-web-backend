@@ -61,19 +61,11 @@ func createBaseJobConf(
 					RestartPolicy: "Never",
 					Containers: []v1.Container{
 						{
-							Name:  "bakta-job",
-							Image: "quay.io/mariusdieckmann/bakta-web-job:latest",
+							Name:    "bakta-job",
+							Image:   "quay.io/mariusdieckmann/bakta-web-job:latest",
+							Command: []string{"/bin/run.sh", ";", "/bin/DataStager", "update"},
 							Lifecycle: &v1.Lifecycle{
 								PostStart: &v1.Handler{
-									Exec: &v1.ExecAction{
-										Command: []string{
-											"/bin/bash",
-											"-c",
-											"/bin/DataStager update",
-										},
-									},
-								},
-								PreStop: &v1.Handler{
 									Exec: &v1.ExecAction{
 										Command: []string{
 											"/bin/bash",
