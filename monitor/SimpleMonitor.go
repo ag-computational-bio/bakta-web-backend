@@ -30,7 +30,9 @@ func New(k8sClient *kubernetes.Clientset, namespace string) SimpleMonitor {
 
 func (monitor *SimpleMonitor) GetJobStatus(jobID string) (JobStatus, error) {
 
-	job, err := monitor.k8sClient.BatchV1().Jobs(monitor.namespace).Get(context.TODO(), jobID, v1.GetOptions{})
+	k8sJobName := fmt.Sprintf("bakta-job-%s", jobID)
+
+	job, err := monitor.k8sClient.BatchV1().Jobs(monitor.namespace).Get(context.TODO(), k8sJobName, v1.GetOptions{})
 	if err != nil {
 		log.Println(err.Error())
 		return JobStatus{}, err
