@@ -20,17 +20,19 @@ type BaktaUpdateAPI struct {
 
 //UpdateStatus Updates the status of a running job
 func (apiHandler *BaktaUpdateAPI) UpdateStatus(ctx context.Context, request *api.UpdateStatusRequest) (*api.Empty, error) {
-	status, err := apiHandler.updateMonitor.GetJobStatus(request.GetJobID())
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
+	go func() {
+		status, err := apiHandler.updateMonitor.GetJobStatus(request.GetJobID())
+		if err != nil {
+			log.Println(err.Error())
+			return
+		}
 
-	err = apiHandler.dbHandler.UpdateStatus(request.GetJobID(), status.Status, status.ErrorMsg)
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
+		err = apiHandler.dbHandler.UpdateStatus(request.GetJobID(), status.Status, status.ErrorMsg)
+		if err != nil {
+			log.Println(err.Error())
+			return
+		}
+	}()
 
 	return &api.Empty{}, nil
 }
