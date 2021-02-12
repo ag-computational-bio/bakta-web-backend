@@ -45,6 +45,8 @@ func (monitor *SimpleMonitor) GetJobStatus(jobID string) (JobStatus, error) {
 
 	time.Sleep(2 * time.Second)
 
+	log.Println(fmt.Sprintf("Current status: %v : %v : %v", job.Status.Active, job.Status.Failed, job.Status.Active))
+
 	if job.Status.Active >= 1 {
 		jobStatus.Status = api.JobStatusEnum_RUNNING
 	} else if job.Status.Succeeded >= 1 && job.Status.Active == 0 {
