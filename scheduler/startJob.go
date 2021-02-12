@@ -67,7 +67,7 @@ func createBaseJobConf(
 								PostStart: &v1.Handler{
 									Exec: &v1.ExecAction{
 										Command: []string{
-											"/bni/bash",
+											"/bin/bash",
 											"-c",
 											"/bin/DataStager update",
 										},
