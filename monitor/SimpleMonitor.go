@@ -59,7 +59,7 @@ func (monitor *SimpleMonitor) GetJobStatus(jobID string) (JobStatus, error) {
 }
 
 func (monitor *SimpleMonitor) getJobPodError(jobID string) (string, error) {
-	labelSelector := fmt.Sprintf("job-name=%s", jobID)
+	labelSelector := fmt.Sprintf("job-name=%s%s", "bakta-job-", jobID)
 
 	listOptions := metav1.ListOptions{
 		LabelSelector: labelSelector,
