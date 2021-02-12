@@ -62,7 +62,7 @@ func createBaseJobConf(
 					Containers: []v1.Container{
 						{
 							Name:  "bakta-job",
-							Image: "quay.io/mariusdieckmann/bakta-web-job",
+							Image: "quay.io/mariusdieckmann/bakta-web-job:latest",
 							Lifecycle: &v1.Lifecycle{
 								PostStart: &v1.Handler{
 									Exec: &v1.ExecAction{
@@ -76,7 +76,7 @@ func createBaseJobConf(
 								PreStop: &v1.Handler{
 									Exec: &v1.ExecAction{
 										Command: []string{
-											"/bni/bash",
+											"/bin/bash",
 											"-c",
 											"/bin/DataStager update",
 										},
