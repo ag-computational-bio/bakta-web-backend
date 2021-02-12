@@ -12,6 +12,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const JOBTTL = 100
+
 func createBaseJobConf(
 	id string,
 	namespace string,
@@ -50,12 +52,17 @@ func createBaseJobConf(
 	resourceRequests[v1.ResourceCPU] = cpuQuantity
 	resourceRequests[v1.ResourceMemory] = memoryQuantity
 
+	//Required to convert const to int32 ref
+	var TmpTTLValue int32
+	TmpTTLValue = JOBTTL
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("bakta-job-%v", id),
 			Namespace: namespace,
 		},
 		Spec: batchv1.JobSpec{
+			TTLSecondsAfterFinished: &TmpTTLValue,
 			Template: v1.PodTemplateSpec{
 				Spec: v1.PodSpec{
 					RestartPolicy: "Never",
