@@ -33,7 +33,7 @@ func (monitor *SimpleMonitor) GetJobStatus(jobID string) (JobStatus, error) {
 
 	k8sJobName := fmt.Sprintf("bakta-job-%s", jobID)
 
-	time.Sleep(2 * time.Second)
+	time.Sleep(10 * time.Second)
 
 	job, err := monitor.k8sClient.BatchV1().Jobs(monitor.namespace).Get(context.TODO(), k8sJobName, v1.GetOptions{})
 	if err != nil {
