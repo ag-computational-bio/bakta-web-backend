@@ -2,6 +2,7 @@ package objectStorage
 
 import (
 	"log"
+	"path"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -46,9 +47,11 @@ func (handler *S3ObjectStorageHandler) CreateUploadLink(bucket string, key strin
 }
 
 func (handler *S3ObjectStorageHandler) CreateDownloadLink(bucket string, key string) (string, error) {
+	keyWithFilename := path.Join(key, "results.tar.gz")
+
 	req, _ := handler.S3Client.GetObjectRequest(&s3.GetObjectInput{
 		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(keyWithFilename),
 	})
 
 	downloadURL, err := req.Presign(60 * time.Minute)
