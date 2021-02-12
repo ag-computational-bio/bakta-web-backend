@@ -296,7 +296,7 @@ func (handler *Handler) createUploadStoreKey(id string, uploadFileType UploadFil
 }
 
 func (handler *Handler) createResultStoreKey(id string) string {
-	resultKey := path.Join(handler.BaseKey, "results", id, resultFileName)
+	resultKey := path.Join(handler.BaseKey, "results", id)
 	return resultKey
 }
 
