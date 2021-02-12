@@ -33,6 +33,8 @@ func (monitor *SimpleMonitor) GetJobStatus(jobID string) (JobStatus, error) {
 
 	k8sJobName := fmt.Sprintf("bakta-job-%s", jobID)
 
+	time.Sleep(2 * time.Second)
+
 	job, err := monitor.k8sClient.BatchV1().Jobs(monitor.namespace).Get(context.TODO(), k8sJobName, v1.GetOptions{})
 	if err != nil {
 		log.Println(err.Error())
@@ -42,8 +44,6 @@ func (monitor *SimpleMonitor) GetJobStatus(jobID string) (JobStatus, error) {
 	jobStatus := JobStatus{
 		Status: api.JobStatusEnum_INIT,
 	}
-
-	time.Sleep(2 * time.Second)
 
 	log.Println(fmt.Sprintf("Current status: %v : %v : %v", job.Status.Active, job.Status.Failed, job.Status.Succeeded))
 
