@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 	"github.com/ag-computational-bio/bakta-web-backend/scheduler"
@@ -152,14 +153,21 @@ func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.Jo
 		return nil, fmt.Errorf("Could not read job result for job: %v", request.GetJobID())
 	}
 
-	_, err = apiHandler.s3Handler.CreateDownloadLinks(job.DataBucket, job.ResultKey, "result")
+	results, err := apiHandler.s3Handler.CreateDownloadLinks(job.DataBucket, job.ResultKey, "result")
 	if err != nil {
 		log.Println(err.Error())
 		return nil, fmt.Errorf("Could not create download url for job: %v", request.GetJobID())
 	}
 
+	structpb, err := structpb.NewValue(&results)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
 	jobResponse := api.JobResultResponse{
-		JobID: job.JobID,
+		JobID:       job.JobID,
+		ResultFiles: structpb.GetStructValue(),
 	}
 
 	return &jobResponse, nil
