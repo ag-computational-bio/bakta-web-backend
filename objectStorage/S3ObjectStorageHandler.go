@@ -3,6 +3,8 @@ package objectStorage
 import (
 	"log"
 	"path"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -12,6 +14,16 @@ import (
 
 type S3ObjectStorageHandler struct {
 	S3Client *s3.S3
+}
+
+type UploadLinks struct {
+	TSV             string `bakta:"tsv"`
+	GFF3            string `bakta:"gff3"`
+	GBFF            string `bakta:"gbff"`
+	FNA             string `bakta:"fna"`
+	FAA             string `bakta:"faa"`
+	TSVHypothetical string `bakta:"hypotheticals.tsv"`
+	FAAHypothetical string `bakta:"hypotheticals.faa"`
 }
 
 func InitS3ObjectStorageHandler() *S3ObjectStorageHandler {
@@ -46,19 +58,31 @@ func (handler *S3ObjectStorageHandler) CreateUploadLink(bucket string, key strin
 	return uploadURL, nil
 }
 
-func (handler *S3ObjectStorageHandler) CreateDownloadLink(bucket string, key string) (string, error) {
-	keyWithFilename := path.Join(key, "results.tar.gz")
+func (handler *S3ObjectStorageHandler) CreateDownloadLinks(bucket string, key string, prefix string) (*UploadLinks, error) {
+	uploadLinks := UploadLinks{}
 
-	req, _ := handler.S3Client.GetObjectRequest(&s3.GetObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(keyWithFilename),
-	})
+	uploadStructType := reflect.TypeOf(UploadLinks{})
+	uploadStructValue := reflect.ValueOf(&uploadLinks)
 
-	downloadURL, err := req.Presign(60 * time.Minute)
-	if err != nil {
-		log.Println(err.Error())
-		return "", err
+	for i := 0; i < uploadStructType.NumField(); i++ {
+		fieldFileSuffix := uploadStructType.Field(i).Tag.Get("bakta")
+		fullFilename := strings.Join([]string{"result", ".", fieldFileSuffix}, "")
+
+		keyWithFilename := path.Join(key, fullFilename)
+
+		req, _ := handler.S3Client.GetObjectRequest(&s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(keyWithFilename),
+		})
+
+		downloadURL, err := req.Presign(60 * time.Minute)
+		if err != nil {
+			log.Println(err.Error())
+			return nil, err
+		}
+		uploadStructValueElem := uploadStructValue.Elem()
+		uploadStructValueElem.Field(i).SetString(downloadURL)
 	}
 
-	return downloadURL, nil
+	return &uploadLinks, nil
 }

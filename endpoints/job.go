@@ -152,15 +152,14 @@ func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.Jo
 		return nil, fmt.Errorf("Could not read job result for job: %v", request.GetJobID())
 	}
 
-	url, err := apiHandler.s3Handler.CreateDownloadLink(job.DataBucket, job.ResultKey)
+	_, err = apiHandler.s3Handler.CreateDownloadLinks(job.DataBucket, job.ResultKey, "result")
 	if err != nil {
 		log.Println(err.Error())
 		return nil, fmt.Errorf("Could not create download url for job: %v", request.GetJobID())
 	}
 
 	jobResponse := api.JobResultResponse{
-		JobID:      job.JobID,
-		ResultLink: url,
+		JobID: job.JobID,
 	}
 
 	return &jobResponse, nil

@@ -3,12 +3,15 @@ package scheduler
 import (
 	"fmt"
 	"path"
+	"reflect"
+	"strings"
 
 	"github.com/spf13/viper"
 
 	"github.com/ag-computational-bio/bakta-web-api/go/api"
 
 	"github.com/ag-computational-bio/bakta-web-backend/database"
+	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 )
 
 //createDownloadConf Creates the configuration string for the download part of a bakta job
@@ -45,7 +48,20 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
 
 //createUploadConf Creates the configuration string for a bakta job
 func createUploadConf(job *database.Job) (string, error) {
-	confString := fmt.Sprintf("upload -e s3.computational.bio.uni-giessen.de -k %v -b %v -f /results.tar.gz", job.ResultKey, job.DataBucket)
+	uploadStructType := reflect.TypeOf(objectStorage.UploadLinks{})
+
+	var fields []string
+
+	for i := 0; i < uploadStructType.NumField(); i++ {
+		fieldFileSuffix := uploadStructType.Field(i).Tag.Get("bakta")
+		fullFilename := strings.Join([]string{"result", ".", fieldFileSuffix}, "")
+		fields = append(fields, fullFilename)
+
+	}
+
+	allFiles := strings.Join(fields, ",")
+
+	confString := fmt.Sprintf("upload -e s3.computational.bio.uni-giessen.de -k %v -b %v -f %v", job.ResultKey, job.DataBucket, allFiles)
 
 	return confString, nil
 }
