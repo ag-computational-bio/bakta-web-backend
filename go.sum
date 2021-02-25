@@ -49,6 +49,8 @@ github.com/PuerkitoBio/purell v1.1.1/go.mod h1:c11w/QuzBsJSee3cPx9rAFu61PvFxuPbt
 github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578/go.mod h1:uGdkoq3SwY9Y+13GIhn11/XLaGBb4BfwItxLd5jeuXE=
 github.com/ag-computational-bio/bakta-web-api/go v0.3.3-alpha.0.20210217233522-cade1d72c670 h1:agtQldIQGIj/7d5OMqC1crLKaEWqH4Dm1rzZOHFmhYA=
 github.com/ag-computational-bio/bakta-web-api/go v0.3.3-alpha.0.20210217233522-cade1d72c670/go.mod h1:qf1ntO7rrTAT675b22+ZQNbHJI5/YpCOGk24XL0scIA=
+github.com/ag-computational-bio/bakta-web-api/go v0.3.3-alpha.0.20210225093122-22d3730791fd h1:y9/NCs4YBTQO09gOCRmh2csGKgepnd/W8B0952loczo=
+github.com/ag-computational-bio/bakta-web-api/go v0.3.3-alpha.0.20210225093122-22d3730791fd/go.mod h1:qf1ntO7rrTAT675b22+ZQNbHJI5/YpCOGk24XL0scIA=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/units v0.0.0-20151022065526-2efee857e7cf/go.mod h1:ybxpYRFXyAe+OPACYpWeL0wqObRcbAqCMya13uyzqw0=
 github.com/antihax/optional v1.0.0/go.mod h1:uupD/76wgC+ih3iEmQUL+0Ugr19nfwCT1kdvxnR2qWY=

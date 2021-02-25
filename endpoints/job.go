@@ -172,3 +172,12 @@ func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.Jo
 
 	return &jobResponse, nil
 }
+
+func (apiHandler *BaktaJobAPI) Version(ctx context.Context, request *api.Empty) (*api.VersionResponse, error) {
+	version := api.VersionResponse{
+		ToolVersion: "0.0.1",
+		DbVersion:   "1.1.x",
+	}
+
+	return &version, nil
+}
