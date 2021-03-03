@@ -30,7 +30,7 @@ type UploadLinks struct {
 }
 
 func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) {
-	endpoint := "s3.computational.bio.uni-giessen.de"
+	endpoint := "https://s3.computational.bio.uni-giessen.de"
 
 	hostnameImmutable := false
 	if strings.HasSuffix(os.Args[0], ".test") {
@@ -42,7 +42,10 @@ func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) 
 		config.WithRegion("RegionOne"),
 		config.WithEndpointResolver(aws.EndpointResolverFunc(
 			func(service, region string) (aws.Endpoint, error) {
-				return aws.Endpoint{URL: endpoint, HostnameImmutable: hostnameImmutable}, nil
+				return aws.Endpoint{
+					URL:               endpoint,
+					HostnameImmutable: hostnameImmutable,
+				}, nil
 			})),
 	)
 
@@ -65,6 +68,7 @@ func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) 
 }
 
 func (handler *S3ObjectStorageHandler) CreateUploadLink(bucket string, key string) (string, error) {
+
 	presignedRequestURL, err := handler.PresignClient.PresignPutObject(context.Background(), &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),

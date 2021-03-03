@@ -1,6 +1,6 @@
 module github.com/ag-computational-bio/bakta-web-backend
 
-go 1.15
+go 1.16
 
 require (
 	github.com/ag-computational-bio/bakta-web-api/go v0.3.3-alpha.0.20210225093122-22d3730791fd
