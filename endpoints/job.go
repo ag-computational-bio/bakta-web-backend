@@ -2,6 +2,7 @@ package endpoints
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -159,7 +160,14 @@ func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.Jo
 		return nil, fmt.Errorf("Could not create download url for job: %v", request.GetJobID())
 	}
 
-	structpb, err := structpb.NewValue(results)
+	intermediateByteData, err := json.Marshal(results)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	var structData structpb.Struct
+	err = structData.UnmarshalJSON(intermediateByteData)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
@@ -167,7 +175,7 @@ func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.Jo
 
 	jobResponse := api.JobResultResponse{
 		JobID:       job.JobID,
-		ResultFiles: structpb.GetStructValue(),
+		ResultFiles: &structData,
 	}
 
 	return &jobResponse, nil
