@@ -40,24 +40,6 @@ func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) 
 		S3Client: s3Client,
 	}
 
-	corsRule := s3.CORSRule{
-		AllowedOrigins: aws.StringSlice([]string{"https://ui.bakta.ingress.rancher2.computational.bio", "http://localhost:*"}),
-		AllowedHeaders: aws.StringSlice([]string{"*"}),
-		AllowedMethods: aws.StringSlice([]string{"GET", "PUT"}),
-	}
-
-	_, err := s3Client.PutBucketCors(&s3.PutBucketCorsInput{
-		Bucket: &bucket,
-		CORSConfiguration: &s3.CORSConfiguration{
-			CORSRules: []*s3.CORSRule{&corsRule},
-		},
-	})
-
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
-
 	return &objectHandler, nil
 }
 
