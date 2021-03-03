@@ -11,10 +11,11 @@ func TestInitS3ObjectStorageHandler(t *testing.T) {
 		t.Fatal(err.Error())
 	}
 
-	url, err := handler.CreateUploadLink("baktadata", "test/data/foo.json")
+	url, err := handler.CreateUploadLink("baktatest2", "test/data/foo")
 	if err != nil {
 		t.Fatal(err.Error())
 	}
 
 	log.Fatalln(url)
+
 }

@@ -48,9 +48,10 @@ const resultFileName = "results.tar.gz"
 
 //Handler Wraps the database with convinence methods
 type Handler struct {
-	DB         *gorm.DB
-	BaseKey    string
-	DataBucket string
+	DB             *gorm.DB
+	BaseKey        string
+	UserDataBucket string
+	DBBucket       string
 }
 
 // InitDatabaseHandler Initializes the database to store the Job
@@ -81,13 +82,15 @@ func InitDatabaseHandler() (*Handler, error) {
 		return nil, err
 	}
 
-	bucket := viper.GetString("Objectstorage.S3.Bucket")
+	userBucket := viper.GetString("Objectstorage.S3.UserBucket")
+	dbBucket := viper.GetString("Objectstorage.S3.DBBucket")
 	baseKey := viper.GetString("Objectstorage.S3.BaseKey")
 
 	dbHandler := Handler{
-		DB:         db,
-		DataBucket: bucket,
-		BaseKey:    baseKey,
+		DB:             db,
+		UserDataBucket: userBucket,
+		DBBucket:       dbBucket,
+		BaseKey:        baseKey,
 	}
 
 	return &dbHandler, nil
@@ -140,7 +143,7 @@ func (handler *Handler) CreateJob() (*Job, string, error) {
 	job := Job{
 		JobID:       jobID.String(),
 		Secret:      secretSHABase64,
-		DataBucket:  handler.DataBucket,
+		DataBucket:  handler.UserDataBucket,
 		FastaKey:    handler.createUploadStoreKey(jobID.String(), Fasta),
 		ProdigalKey: handler.createUploadStoreKey(jobID.String(), Prodigal),
 		RepliconKey: handler.createUploadStoreKey(jobID.String(), Replicon),

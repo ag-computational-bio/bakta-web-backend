@@ -3,7 +3,6 @@ package objectStorage
 import (
 	"context"
 	"log"
-	"os"
 	"path"
 	"reflect"
 	"strings"
@@ -32,19 +31,13 @@ type UploadLinks struct {
 func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) {
 	endpoint := "https://s3.computational.bio.uni-giessen.de"
 
-	hostnameImmutable := false
-	if strings.HasSuffix(os.Args[0], ".test") {
-		hostnameImmutable = true
-	}
-
 	cfg, err := config.LoadDefaultConfig(
 		context.Background(),
 		config.WithRegion("RegionOne"),
 		config.WithEndpointResolver(aws.EndpointResolverFunc(
 			func(service, region string) (aws.Endpoint, error) {
 				return aws.Endpoint{
-					URL:               endpoint,
-					HostnameImmutable: hostnameImmutable,
+					URL: endpoint,
 				}, nil
 			})),
 	)
