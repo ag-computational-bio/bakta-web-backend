@@ -159,7 +159,7 @@ func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.Jo
 		return nil, fmt.Errorf("Could not create download url for job: %v", request.GetJobID())
 	}
 
-	structpb, err := structpb.NewValue(&results)
+	structpb, err := structpb.NewValue(results)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
