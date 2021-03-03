@@ -86,7 +86,7 @@ func (apiHandler *BaktaJobAPI) StartJob(ctx context.Context, request *api.StartJ
 		return nil, err
 	}
 
-	err = apiHandler.dbHandler.UpdateK8s(request.Job.GetJobID(), string(k8sJob.GetUID()))
+	err = apiHandler.dbHandler.UpdateK8s(request.Job.GetJobID(), string(k8sJob.GetUID()), request.GetJobConfigString())
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err

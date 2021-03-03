@@ -168,7 +168,7 @@ func (handler *Handler) CreateJob() (*Job, string, error) {
 }
 
 //UpdateK8s Updates a job with its k8s id
-func (handler *Handler) UpdateK8s(id string, k8s string) error {
+func (handler *Handler) UpdateK8s(id string, k8s string, conf string) error {
 	job := Job{
 		JobID: id,
 	}

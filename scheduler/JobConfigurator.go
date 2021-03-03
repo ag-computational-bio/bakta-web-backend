@@ -31,14 +31,24 @@ func createDownloadConf(job *database.Job, prodigaltf bool, replicontsv bool) (s
 }
 
 //createBaktaConf Creates a bakta config string based on the configuration and job settings provided
-func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
-	var confString string
+func createBaktaConf(job *database.Job, conf *api.JobConfig, rawConfString string) (string, error) {
+	var confStringElements []string
+
+	if rawConfString != "" {
+		confStringElements = append(confStringElements, rawConfString)
+	}
+
+	confStringElements = append(confStringElements, "--tmp-dir /cache")
+	confStringElements = append(confStringElements, "--threads 8")
+	confStringElements = append(confStringElements, "--prefix result")
 
 	if viper.IsSet("Testing") || viper.IsSet("Debug") {
-		confString = "--db /db/db-mock --tmp-dir /cache --threads 8"
+		confStringElements = append(confStringElements, "--db /db/db-mock")
 	} else {
-		confString = "--db /db/db --tmp-dir /cache --threads 8"
+		confStringElements = append(confStringElements, "--db /db/db")
 	}
+
+	confString := strings.Join(confStringElements, " ")
 
 	_, fastaFileName := path.Split(job.FastaKey)
 	confString = fmt.Sprintf(confString+" /data/%v", fastaFileName)

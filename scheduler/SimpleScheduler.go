@@ -72,7 +72,7 @@ func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfi
 		return nil, err
 	}
 
-	baktaConf, err := createBaktaConf(job, jobConfig)
+	baktaConf, err := createBaktaConf(job, jobConfig, job.ConfString)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
@@ -96,7 +96,7 @@ func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfi
 		return nil, err
 	}
 
-	err = scheduler.databaseHandler.UpdateK8s(jobID, string(scheduledJob.UID))
+	err = scheduler.databaseHandler.UpdateK8s(jobID, string(scheduledJob.UID), job.ConfString)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err

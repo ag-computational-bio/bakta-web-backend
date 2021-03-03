@@ -17,4 +17,5 @@ type Job struct {
 	ResultKey   string
 	Error       string
 	ExpiryDate  time.Time
+	ConfString  string
 }
