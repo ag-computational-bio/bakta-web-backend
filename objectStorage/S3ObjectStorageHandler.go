@@ -28,9 +28,9 @@ type UploadLinks struct {
 
 func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) {
 	s3Config := &aws.Config{
-		Endpoint:         aws.String("s3.computational.bio.uni-giessen.de"),
-		Region:           aws.String("RegionOne"),
-		S3ForcePathStyle: aws.Bool(true),
+		Endpoint: aws.String("s3.computational.bio.uni-giessen.de"),
+		Region:   aws.String("RegionOne"),
+		//S3ForcePathStyle: aws.Bool(true),
 	}
 
 	sess := session.Must(session.NewSession(s3Config))
