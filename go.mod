@@ -5,6 +5,10 @@ go 1.15
 require (
 	github.com/ag-computational-bio/bakta-web-api/go v0.3.3-alpha.0.20210225093122-22d3730791fd
 	github.com/aws/aws-sdk-go v1.37.8
+	github.com/aws/aws-sdk-go-v2 v1.2.0 // indirect
+	github.com/aws/aws-sdk-go-v2/config v1.1.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.2.0 // indirect
+	github.com/awslabs/smithy-go v0.3.0 // indirect
 	github.com/google/uuid v1.2.0
 	github.com/imdario/mergo v0.3.11 // indirect
 	github.com/jessevdk/go-flags v1.4.0

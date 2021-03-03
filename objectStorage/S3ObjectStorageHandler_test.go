@@ -1,17 +1,20 @@
 package objectStorage
 
 import (
+	"log"
 	"testing"
 )
 
 func TestInitS3ObjectStorageHandler(t *testing.T) {
-	handler, err := InitS3ObjectStorageHandler("foo")
+	handler, err := InitS3ObjectStorageHandler("baktadata")
 	if err != nil {
 		t.Fatal(err.Error())
 	}
 
-	_, err = handler.CreateDownloadLinks("foo", "baa", "test")
+	url, err := handler.CreateUploadLink("baktadata", "test/data")
 	if err != nil {
 		t.Fatal(err.Error())
 	}
+
+	log.Fatalln(url)
 }

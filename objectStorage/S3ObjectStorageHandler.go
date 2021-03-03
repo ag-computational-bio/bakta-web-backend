@@ -1,19 +1,22 @@
 package objectStorage
 
 import (
+	"context"
 	"log"
+	"os"
 	"path"
 	"reflect"
 	"strings"
-	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 type S3ObjectStorageHandler struct {
-	S3Client *s3.S3
+	S3Client      *s3.Client
+	PresignClient *s3.PresignClient
+	S3Endpoint    string
 }
 
 type UploadLinks struct {
@@ -27,36 +30,52 @@ type UploadLinks struct {
 }
 
 func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) {
-	s3Config := &aws.Config{
-		Endpoint: aws.String("s3.computational.bio.uni-giessen.de"),
-		Region:   aws.String("RegionOne"),
-		//S3ForcePathStyle: aws.Bool(true),
+	endpoint := "s3.computational.bio.uni-giessen.de"
+
+	hostnameImmutable := false
+	if strings.HasSuffix(os.Args[0], ".test") {
+		hostnameImmutable = true
 	}
 
-	sess := session.Must(session.NewSession(s3Config))
-	s3Client := s3.New(sess)
+	cfg, err := config.LoadDefaultConfig(
+		context.Background(),
+		config.WithRegion("RegionOne"),
+		config.WithEndpointResolver(aws.EndpointResolverFunc(
+			func(service, region string) (aws.Endpoint, error) {
+				return aws.Endpoint{URL: endpoint, HostnameImmutable: hostnameImmutable}, nil
+			})),
+	)
 
-	objectHandler := S3ObjectStorageHandler{
-		S3Client: s3Client,
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
 	}
 
-	return &objectHandler, nil
+	client := s3.NewFromConfig(cfg)
+
+	presignClient := s3.NewPresignClient(client)
+
+	handler := S3ObjectStorageHandler{
+		S3Client:      client,
+		PresignClient: presignClient,
+		S3Endpoint:    endpoint,
+	}
+
+	return &handler, nil
 }
 
 func (handler *S3ObjectStorageHandler) CreateUploadLink(bucket string, key string) (string, error) {
-	req, _ := handler.S3Client.PutObjectRequest(&s3.PutObjectInput{
-		Bucket:      aws.String(bucket),
-		Key:         aws.String(key),
-		ContentType: aws.String("application/octet-stream"),
+	presignedRequestURL, err := handler.PresignClient.PresignPutObject(context.Background(), &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
 	})
 
-	uploadURL, err := req.Presign(60 * time.Minute)
 	if err != nil {
 		log.Println(err.Error())
 		return "", err
 	}
 
-	return uploadURL, nil
+	return presignedRequestURL.URL, nil
 }
 
 func (handler *S3ObjectStorageHandler) CreateDownloadLinks(bucket string, key string, prefix string) (*UploadLinks, error) {
@@ -71,18 +90,18 @@ func (handler *S3ObjectStorageHandler) CreateDownloadLinks(bucket string, key st
 
 		keyWithFilename := path.Join(key, fullFilename)
 
-		req, _ := handler.S3Client.GetObjectRequest(&s3.GetObjectInput{
+		presignedRequestURL, err := handler.PresignClient.PresignGetObject(context.Background(), &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(keyWithFilename),
 		})
 
-		downloadURL, err := req.Presign(60 * time.Minute)
 		if err != nil {
 			log.Println(err.Error())
 			return nil, err
 		}
+
 		uploadStructValueElem := uploadStructValue.Elem()
-		uploadStructValueElem.Field(i).SetString(downloadURL)
+		uploadStructValueElem.Field(i).SetString(presignedRequestURL.URL)
 	}
 
 	return &uploadLinks, nil
