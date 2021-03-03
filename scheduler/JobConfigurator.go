@@ -41,6 +41,7 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig, rawConfString strin
 	confStringElements = append(confStringElements, "--tmp-dir /cache")
 	confStringElements = append(confStringElements, "--threads 8")
 	confStringElements = append(confStringElements, "--prefix result")
+	confStringElements = append(confStringElements, "-o /output")
 
 	if viper.IsSet("Testing") || viper.IsSet("Debug") {
 		confStringElements = append(confStringElements, "--db /db/db-mock")
@@ -64,7 +65,7 @@ func createUploadConf(job *database.Job) (string, error) {
 
 	for i := 0; i < uploadStructType.NumField(); i++ {
 		fieldFileSuffix := uploadStructType.Field(i).Tag.Get("bakta")
-		fullFilename := strings.Join([]string{"result", ".", fieldFileSuffix}, "")
+		fullFilename := strings.Join([]string{"/output/result", ".", fieldFileSuffix}, "")
 		fields = append(fields, fullFilename)
 
 	}
