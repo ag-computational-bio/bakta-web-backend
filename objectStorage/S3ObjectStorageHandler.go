@@ -63,8 +63,9 @@ func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) 
 
 func (handler *S3ObjectStorageHandler) CreateUploadLink(bucket string, key string) (string, error) {
 	req, _ := handler.S3Client.PutObjectRequest(&s3.PutObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(key),
+		ContentType: aws.String("application/octet-stream"),
 	})
 
 	uploadURL, err := req.Presign(60 * time.Minute)
