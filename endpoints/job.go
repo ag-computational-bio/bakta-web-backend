@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 
+	"github.com/ag-computational-bio/bakta-web-api-go/api"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 	"github.com/ag-computational-bio/bakta-web-backend/scheduler"
-
-	"github.com/ag-computational-bio/bakta-web-api/go/api"
 )
 
 //BaktaJobAPI implements the job endpoints of the bakta-web-api
@@ -174,9 +174,12 @@ func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.Jo
 }
 
 func (apiHandler *BaktaJobAPI) Version(ctx context.Context, request *api.Empty) (*api.VersionResponse, error) {
+	shaVersion := os.Getenv("GITHUB_SHA")
+
 	version := api.VersionResponse{
-		ToolVersion: "0.0.1",
-		DbVersion:   "1.1.x",
+		ToolVersion:    "0.0.1",
+		DbVersion:      "1.1.x",
+		BackendVersion: shaVersion,
 	}
 
 	return &version, nil

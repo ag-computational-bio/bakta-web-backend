@@ -12,8 +12,7 @@ import (
 	"path"
 	"time"
 
-	"github.com/ag-computational-bio/bakta-web-api/go/api"
-
+	"github.com/ag-computational-bio/bakta-web-api-go/api"
 	"github.com/google/uuid"
 	"github.com/spf13/viper"
 

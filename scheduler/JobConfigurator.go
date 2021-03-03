@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/viper"
 
-	"github.com/ag-computational-bio/bakta-web-api/go/api"
+	"github.com/ag-computational-bio/bakta-web-api-go/api"
 
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"

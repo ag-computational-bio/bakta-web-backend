@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 
+	"github.com/ag-computational-bio/bakta-web-api-go/api"
 	"github.com/ag-computational-bio/bakta-web-backend/monitor"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 	"github.com/ag-computational-bio/bakta-web-backend/scheduler"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 
-	"github.com/ag-computational-bio/bakta-web-api/go/api"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
