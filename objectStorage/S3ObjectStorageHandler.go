@@ -26,7 +26,7 @@ type UploadLinks struct {
 	FAAHypothetical string `bakta:"hypotheticals.faa"`
 }
 
-func InitS3ObjectStorageHandler() *S3ObjectStorageHandler {
+func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) {
 	s3Config := &aws.Config{
 		Endpoint:         aws.String("s3.computational.bio.uni-giessen.de"),
 		Region:           aws.String("RegionOne"),
@@ -40,7 +40,25 @@ func InitS3ObjectStorageHandler() *S3ObjectStorageHandler {
 		S3Client: s3Client,
 	}
 
-	return &objectHandler
+	corsRule := s3.CORSRule{
+		AllowedOrigins: aws.StringSlice([]string{"https://ui.bakta.ingress.rancher2.computational.bio", "http://localhost:*"}),
+		AllowedHeaders: aws.StringSlice([]string{"*"}),
+		AllowedMethods: aws.StringSlice([]string{"GET", "PUT"}),
+	}
+
+	_, err := s3Client.PutBucketCors(&s3.PutBucketCorsInput{
+		Bucket: &bucket,
+		CORSConfiguration: &s3.CORSConfiguration{
+			CORSRules: []*s3.CORSRule{&corsRule},
+		},
+	})
+
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	return &objectHandler, nil
 }
 
 func (handler *S3ObjectStorageHandler) CreateUploadLink(bucket string, key string) (string, error) {

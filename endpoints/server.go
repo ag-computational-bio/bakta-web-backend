@@ -10,6 +10,7 @@ import (
 	"github.com/ag-computational-bio/bakta-web-backend/monitor"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 	"github.com/ag-computational-bio/bakta-web-backend/scheduler"
+	"github.com/spf13/viper"
 
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 
@@ -68,7 +69,13 @@ func RunGrpcJobServer() error {
 		return err
 	}
 
-	s3Handler := objectStorage.InitS3ObjectStorageHandler()
+	bucket := viper.GetString("Objectstorage.S3.Bucket")
+
+	s3Handler, err := objectStorage.InitS3ObjectStorageHandler(bucket)
+	if err != nil {
+		log.Println(fmt.Sprintf("failed to listen: %v", err))
+		return err
+	}
 
 	jobServer := initGrpcJobServer(dbHandler, sched, authHandler, s3Handler)
 
@@ -124,9 +131,13 @@ func (authHandler *AuthHandler) unaryInterceptor(ctx context.Context, req interf
 			if len(token) == 1 && token[0] == authHandler.token {
 				return handler(ctx, req)
 			}
-			return "", fmt.Errorf("API key does not match")
+			err := fmt.Errorf("API key does not match")
+			log.Println(err.Error())
+			return "", err
 		}
 	}
 
-	return "", fmt.Errorf("error authenticating credentials")
+	err := fmt.Errorf("error authenticating credentials")
+	log.Println(err.Error())
+	return "", err
 }
