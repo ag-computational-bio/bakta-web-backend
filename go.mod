@@ -3,12 +3,10 @@ module github.com/ag-computational-bio/bakta-web-backend
 go 1.16
 
 require (
-	github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210303193734-0c148f9a32b5
+	github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210511164724-debd1af1ed2a
 	github.com/aws/aws-sdk-go-v2 v1.4.0
 	github.com/aws/aws-sdk-go-v2/config v1.1.7
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.6.0
-	github.com/aws/smithy-go v1.4.0
-	github.com/docker/spdystream v0.0.0-20160310174837-449fdfce4d96 // indirect
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
 	github.com/google/uuid v1.2.0

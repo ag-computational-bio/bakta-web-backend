@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/ag-computational-bio/bakta-web-api-go/api"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 	"github.com/ag-computational-bio/bakta-web-backend/scheduler"
@@ -125,9 +127,14 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 
 		statusEnum := api.JobStatusEnum(statusNumber)
 
+		created_time := timestamppb.New(time.Unix(job.Created, 0))
+		updated_time := timestamppb.New(time.Unix(job.Updated, 0))
+
 		statusResponse := api.JobStatusResponse{
 			JobID:     job.JobID,
 			JobStatus: statusEnum,
+			Started:   created_time,
+			Updated:   updated_time,
 		}
 
 		jobsStatus = append(jobsStatus, &statusResponse)
@@ -173,9 +180,14 @@ func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.Jo
 		return nil, err
 	}
 
+	created_time := timestamppb.New(time.Unix(job.Created, 0))
+	updated_time := timestamppb.New(time.Unix(job.Updated, 0))
+
 	jobResponse := api.JobResultResponse{
 		JobID:       job.JobID,
 		ResultFiles: &structData,
+		Started:     created_time,
+		Updated:     updated_time,
 	}
 
 	return &jobResponse, nil
