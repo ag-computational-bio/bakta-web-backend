@@ -3,6 +3,7 @@ package scheduler
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/spf13/viper"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -56,6 +57,8 @@ func createBaseJobConf(
 	var TmpTTLValue int32
 	TmpTTLValue = JOBTTL
 
+	job_image := os.Getenv("JobContainer")
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("bakta-job-%v", id),
@@ -69,7 +72,7 @@ func createBaseJobConf(
 					Containers: []v1.Container{
 						{
 							Name:  "bakta-job",
-							Image: "quay.io/mariusdieckmann/bakta-web-job:latest",
+							Image: job_image,
 							Lifecycle: &v1.Lifecycle{
 								PostStart: &v1.Handler{
 									Exec: &v1.ExecAction{
