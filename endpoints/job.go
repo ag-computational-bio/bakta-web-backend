@@ -50,13 +50,13 @@ func (apiHandler *BaktaJobAPI) InitJob(ctx context.Context, request *api.InitJob
 		return nil, err
 	}
 
-	prodigalUploadKey, err := apiHandler.s3Handler.CreateUploadLink(job.DataBucket, job.FastaKey)
+	prodigalUploadKey, err := apiHandler.s3Handler.CreateUploadLink(job.DataBucket, job.ProdigalKey)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
 	}
 
-	repliconsUploadKey, err := apiHandler.s3Handler.CreateUploadLink(job.DataBucket, job.FastaKey)
+	repliconsUploadKey, err := apiHandler.s3Handler.CreateUploadLink(job.DataBucket, job.RepliconKey)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
