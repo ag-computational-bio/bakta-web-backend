@@ -48,7 +48,7 @@ func (monitor *SimpleMonitor) GetJobStatus(jobID string) (JobStatus, error) {
 	if job.Status.Active >= 1 {
 		jobStatus.Status = api.JobStatusEnum_RUNNING
 	} else if job.Status.Succeeded >= 1 && job.Status.Active == 0 {
-		jobStatus.Status = api.JobStatusEnum_SUCCESFULL
+		jobStatus.Status = api.JobStatusEnum_SUCCESSFULL
 	} else if job.Status.Failed >= 1 && job.Status.Active == 0 {
 		jobStatus.Status = api.JobStatusEnum_ERROR
 	} else {

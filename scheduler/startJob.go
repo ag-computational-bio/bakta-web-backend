@@ -167,7 +167,7 @@ func createBaseJobConf(
 					},
 				},
 			},
-			BackoffLimit: int32Link(4),
+			BackoffLimit: int32Link(1),
 		},
 	}
 

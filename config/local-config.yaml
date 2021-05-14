@@ -1,9 +1,14 @@
 Objectstorage:
   S3:
-    Bucket: baktadata
+    UserBucket: baktauserdata
+    DBBucket: baktadbs
     BaseKey: data/dev
 Database:
   Backend: SQLite
   SQLite:
     Path: /tmp
 K8sNamespace: "bakta-dev"
+UpdateService:
+  Name: baktawebbackend
+  Port: "8081"
+Testing: true

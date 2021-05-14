@@ -18,14 +18,17 @@ import (
 //The job has to be provided along with two bools that indicate if a prodigal training file and/or a replicon file are present
 func createDownloadConf(job *database.Job, prodigaltf bool, replicontsv bool) (string, error) {
 	keyString := job.FastaKey
+	bucketString := job.DataBucket
 	if prodigaltf {
 		keyString = fmt.Sprintf(keyString+",%v", job.ProdigalKey)
+		bucketString = fmt.Sprintf(bucketString+",%v", job.DataBucket)
 	}
 	if replicontsv {
 		keyString = fmt.Sprintf(keyString+",%v", job.RepliconKey)
+		bucketString = fmt.Sprintf(bucketString+",%v", job.DataBucket)
 	}
 
-	confString := fmt.Sprintf("download -b %v -k %v -d /data -e s3.computational.bio.uni-giessen.de", job.DataBucket, keyString)
+	confString := fmt.Sprintf("download -b %v -k %v -d /data -e s3.computational.bio.uni-giessen.de", bucketString, keyString)
 
 	return confString, nil
 }
@@ -42,6 +45,14 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig, rawConfString strin
 	confStringElements = append(confStringElements, "--threads 8")
 	confStringElements = append(confStringElements, "--prefix result")
 	confStringElements = append(confStringElements, "-o /output")
+
+	if conf.HasProdigal {
+		confStringElements = append(confStringElements, "--prodigal-tf prodigaltraining.protf")
+	}
+
+	if conf.HasReplicons {
+		confStringElements = append(confStringElements, "--replicons replicons.tsv")
+	}
 
 	if viper.IsSet("Testing") || viper.IsSet("Debug") {
 		confStringElements = append(confStringElements, "--db /db/db-mock")

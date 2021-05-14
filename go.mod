@@ -3,7 +3,7 @@ module github.com/ag-computational-bio/bakta-web-backend
 go 1.16
 
 require (
-	github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210511164724-debd1af1ed2a
+	github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210512084259-ad07339c1e85
 	github.com/aws/aws-sdk-go-v2 v1.4.0
 	github.com/aws/aws-sdk-go-v2/config v1.1.7
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.6.0
@@ -31,7 +31,7 @@ require (
 	golang.org/x/term v0.0.0-20210503060354-a79de5458b56 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/genproto v0.0.0-20210510173355-fb37daa5cd7a // indirect
-	google.golang.org/grpc v1.37.0
+	google.golang.org/grpc v1.37.1
 	google.golang.org/protobuf v1.26.0
 	gopkg.in/ini.v1 v1.62.0 // indirect
 	gorm.io/driver/postgres v1.1.0

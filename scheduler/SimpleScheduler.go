@@ -58,20 +58,20 @@ func InitSimpleScheduler(dbHandler *database.Handler) (*SimpleScheduler, error) 
 }
 
 //StartJob Starts a bakta job on Kubernetes
-func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfig) (*batchv1.Job, error) {
+func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfig, baktaConfString string) (*batchv1.Job, error) {
 	job, err := scheduler.databaseHandler.GetJob(jobID)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
 	}
 
-	downloadConf, err := createDownloadConf(job, false, false)
+	downloadConf, err := createDownloadConf(job, jobConfig.HasProdigal, jobConfig.HasReplicons)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
 	}
 
-	baktaConf, err := createBaktaConf(job, jobConfig, job.ConfString)
+	baktaConf, err := createBaktaConf(job, jobConfig, baktaConfString)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
