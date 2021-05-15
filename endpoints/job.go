@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ag-computational-bio/bakta-web-api-go/api"
+	"github.com/ag-computational-bio/bakta-web-backend/monitor"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -23,14 +24,16 @@ type BaktaJobAPI struct {
 	dbHandler *database.Handler
 	scheduler *scheduler.SimpleScheduler
 	s3Handler *objectStorage.S3ObjectStorageHandler
+	monitor   *monitor.SimpleMonitor
 }
 
 //InitBaktaAPI Initiates the Bakta API handler
-func InitBaktaAPI(dbHandler *database.Handler, scheduler *scheduler.SimpleScheduler, s3Handler *objectStorage.S3ObjectStorageHandler) *BaktaJobAPI {
+func InitBaktaAPI(dbHandler *database.Handler, scheduler *scheduler.SimpleScheduler, s3Handler *objectStorage.S3ObjectStorageHandler, monitor *monitor.SimpleMonitor) *BaktaJobAPI {
 	api := &BaktaJobAPI{
 		dbHandler: dbHandler,
 		scheduler: scheduler,
 		s3Handler: s3Handler,
+		monitor:   monitor,
 	}
 
 	return api
@@ -108,6 +111,17 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 			err = fmt.Errorf("JobID does not match secret ID")
 			return nil, err
 		}
+		newStatus, err := apiHandler.monitor.GetJobStatus(jobID.GetJobID())
+		if err != nil {
+			err = fmt.Errorf("could not get updated job status")
+			return nil, err
+		}
+		err = apiHandler.dbHandler.UpdateStatus(jobID.GetJobID(), newStatus.Status, newStatus.ErrorMsg)
+		if err != nil {
+			err = fmt.Errorf("could not update job status")
+			return nil, err
+		}
+
 		jobIDs = append(jobIDs, jobID.JobID)
 	}
 
@@ -198,7 +212,7 @@ func (apiHandler *BaktaJobAPI) Version(ctx context.Context, request *api.Empty) 
 
 	version := api.VersionResponse{
 		ToolVersion:    "0.0.1",
-		DbVersion:      "1.1.x",
+		DbVersion:      "2.0.0",
 		BackendVersion: shaVersion,
 	}
 

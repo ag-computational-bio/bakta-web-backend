@@ -77,9 +77,9 @@ func RunGrpcJobServer() error {
 		return err
 	}
 
-	jobServer := initGrpcJobServer(dbHandler, sched, authHandler, s3Handler)
-
 	updateMonitor := monitor.New(sched.GetK8sClient(), sched.GetNamespace())
+
+	jobServer := initGrpcJobServer(dbHandler, sched, authHandler, s3Handler, &updateMonitor)
 
 	updateHandler := BaktaUpdateAPI{
 		dbHandler:     dbHandler,
@@ -104,8 +104,8 @@ func RunGrpcJobServer() error {
 }
 
 // initGrpcServer Initializes a new GRPC server that handles bakta-web-api endpoints
-func initGrpcJobServer(dbHandler *database.Handler, sched *scheduler.SimpleScheduler, authHandler *AuthHandler, s3Handler *objectStorage.S3ObjectStorageHandler) *grpc.Server {
-	baktaJobsEndpoints := InitBaktaAPI(dbHandler, sched, s3Handler)
+func initGrpcJobServer(dbHandler *database.Handler, sched *scheduler.SimpleScheduler, authHandler *AuthHandler, s3Handler *objectStorage.S3ObjectStorageHandler, updateMonitor *monitor.SimpleMonitor) *grpc.Server {
+	baktaJobsEndpoints := InitBaktaAPI(dbHandler, sched, s3Handler, updateMonitor)
 
 	var opts []grpc.ServerOption
 	opts = append(opts, grpc.UnaryInterceptor(authHandler.unaryInterceptor))
