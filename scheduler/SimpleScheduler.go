@@ -108,7 +108,11 @@ func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfi
 func (scheduler *SimpleScheduler) DeleteJob(jobName string) error {
 	k8sJobName := fmt.Sprintf("%s%s", "bakta-job-", jobName)
 
-	err := scheduler.k8sClient.BatchV1().Jobs(scheduler.namespace).Delete(context.TODO(), k8sJobName, metav1.DeleteOptions{})
+	delProp := metav1.DeletePropagationForeground
+
+	err := scheduler.k8sClient.BatchV1().Jobs(scheduler.namespace).Delete(context.TODO(), k8sJobName, metav1.DeleteOptions{
+		PropagationPolicy: &delProp,
+	})
 	if err != nil && !errors.IsNotFound(err) {
 		log.Println(err.Error())
 		return err
