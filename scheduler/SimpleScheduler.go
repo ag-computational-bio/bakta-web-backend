@@ -114,6 +114,10 @@ func (scheduler *SimpleScheduler) DeleteJob(jobName string) error {
 		return err
 	}
 
+	if errors.IsNotFound(err) {
+		log.Println(err.Error())
+	}
+
 	return nil
 }
 
