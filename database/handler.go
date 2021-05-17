@@ -51,6 +51,7 @@ type Handler struct {
 	BaseKey        string
 	UserDataBucket string
 	DBBucket       string
+	ExpiryTime     int64
 }
 
 // InitDatabaseHandler Initializes the database to store the Job
@@ -85,11 +86,14 @@ func InitDatabaseHandler() (*Handler, error) {
 	dbBucket := viper.GetString("Objectstorage.S3.DBBucket")
 	baseKey := viper.GetString("Objectstorage.S3.BaseKey")
 
+	expiryTime := viper.GetInt64("ExpiryTime")
+
 	dbHandler := Handler{
 		DB:             db,
 		UserDataBucket: userBucket,
 		DBBucket:       dbBucket,
 		BaseKey:        baseKey,
+		ExpiryTime:     expiryTime,
 	}
 
 	return &dbHandler, nil
@@ -242,7 +246,9 @@ func (handler *Handler) CheckSecret(id string, secretKey string) error {
 func (handler *Handler) GetJobsStatus(jobIDs []string) ([]Job, error) {
 	var jobs []Job
 
-	connection := handler.DB.Where("job_id IN ?", jobIDs).Find(&jobs)
+	current_time := time.Now().Unix() - handler.ExpiryTime
+
+	connection := handler.DB.Where("job_id IN ? AND created > ?", jobIDs, current_time).Find(&jobs)
 	if connection.Error != nil {
 		log.Println(connection.Error)
 		return nil, connection.Error
@@ -253,11 +259,11 @@ func (handler *Handler) GetJobsStatus(jobIDs []string) ([]Job, error) {
 
 // GetJobStatus Returns the status of an individual job
 func (handler *Handler) GetJobStatus(jobID string) (*Job, error) {
-	job := Job{
-		JobID: jobID,
-	}
+	job := Job{}
 
-	connection := handler.DB.First(&job)
+	current_time := time.Now().Unix() - handler.ExpiryTime
+
+	connection := handler.DB.Where("job_id=? AND created > ?", jobID, current_time).Find(&job)
 	if connection.Error != nil {
 		log.Println(connection.Error)
 		return nil, connection.Error

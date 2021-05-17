@@ -10,3 +10,4 @@ UpdateService:
   Name: baktawebbackend
   Port: "8081"
 Testing: true
+ExpiryTime: 345600
