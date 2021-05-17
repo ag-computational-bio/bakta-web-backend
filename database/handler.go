@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/viper"
 
+	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -29,6 +30,8 @@ const (
 	SQLite BackendType = "SQLite"
 	//Postgres User a postgres database in the backend
 	Postgres BackendType = "Postgres"
+	//Mysql Use a myswql database in the backend
+	Mysql BackendType = "MySQl"
 )
 
 //UploadFileType type of file to upload
@@ -67,6 +70,8 @@ func InitDatabaseHandler() (*Handler, error) {
 		db, err = createSQLiteDatabase()
 	case string(Postgres):
 		db, err = createPostgresSQL()
+	case string(Mysql):
+		db, err = createMySQL()
 	default:
 		db, err = createSQLiteDatabase()
 	}
@@ -111,6 +116,17 @@ func createSQLiteDatabase() (*gorm.DB, error) {
 	}
 
 	return db, nil
+}
+
+func createMySQL() (*gorm.DB, error) {
+	host := getEnvOrPanic("DatabaseHost")
+	dbName := getEnvOrPanic("DBName")
+	dbUser := getEnvOrPanic("DBUser")
+	dbPassword := getEnvOrPanic("DBPassword")
+	dbPort := getEnvOrPanic("DBPort")
+
+	dsn := fmt.Sprintf("%v:%v@tcp(%v:%v)/%v?charset=utf8mb4&parseTime=True&loc=Local", dbUser, dbPassword, host, dbPort, dbName)
+	return gorm.Open(mysql.Open(dsn), &gorm.Config{})
 }
 
 func createPostgresSQL() (*gorm.DB, error) {
