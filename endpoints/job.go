@@ -111,15 +111,25 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 			err = fmt.Errorf("JobID does not match secret ID")
 			return nil, err
 		}
+
+		job, err := apiHandler.dbHandler.GetJob(jobID.GetJobID())
+		if err != nil {
+			err = fmt.Errorf("could not find job")
+			return nil, err
+		}
+
 		newStatus, err := apiHandler.monitor.GetJobStatus(jobID.GetJobID())
 		if err != nil {
 			err = fmt.Errorf("could not get updated job status")
 			return nil, err
 		}
-		err = apiHandler.dbHandler.UpdateStatus(jobID.GetJobID(), newStatus.Status, newStatus.ErrorMsg)
-		if err != nil {
-			err = fmt.Errorf("could not update job status")
-			return nil, err
+
+		if job.Status != newStatus.Status.String() {
+			err = apiHandler.dbHandler.UpdateStatus(jobID.GetJobID(), newStatus.Status, newStatus.ErrorMsg)
+			if err != nil {
+				err = fmt.Errorf("could not update job status")
+				return nil, err
+			}
 		}
 
 		jobIDs = append(jobIDs, jobID.JobID)
