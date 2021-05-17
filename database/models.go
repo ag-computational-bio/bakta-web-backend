@@ -18,4 +18,5 @@ type Job struct {
 	Error       string
 	ExpiryDate  time.Time
 	ConfString  string
+	IsDeleted   bool
 }

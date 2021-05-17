@@ -27,11 +27,31 @@ func (apiHandler *BaktaUpdateAPI) UpdateStatus(ctx context.Context, request *api
 			return
 		}
 
-		err = apiHandler.dbHandler.UpdateStatus(request.GetJobID(), status.Status, status.ErrorMsg)
+		isDeleted := false
+
+		if status.Status == api.JobStatusEnum_SUCCESSFULL || status.Status == api.JobStatusEnum_ERROR {
+			job, err := apiHandler.dbHandler.GetJob(request.GetJobID())
+			if err != nil {
+				log.Println(err.Error())
+				return
+			}
+			if !job.IsDeleted {
+				err = apiHandler.scheduler.DeleteJob(job.K8sID)
+				if err != nil {
+					log.Println(err.Error())
+					return
+				}
+
+				isDeleted = true
+			}
+		}
+
+		err = apiHandler.dbHandler.UpdateStatus(request.GetJobID(), status.Status, status.ErrorMsg, isDeleted)
 		if err != nil {
 			log.Println(err.Error())
 			return
 		}
+
 	}()
 
 	return &api.Empty{}, nil

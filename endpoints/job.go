@@ -106,6 +106,8 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 	var jobIDs []string
 
 	for _, jobID := range request.GetJobs() {
+		isDeleted := false
+
 		err := apiHandler.dbHandler.CheckSecret(jobID.GetJobID(), jobID.GetSecret())
 		if err != nil {
 			err = fmt.Errorf("JobID does not match secret ID")
@@ -124,8 +126,18 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 			return nil, err
 		}
 
+		if newStatus.Status == api.JobStatusEnum_SUCCESSFULL || newStatus.Status == api.JobStatusEnum_ERROR {
+			err := apiHandler.scheduler.DeleteJob(job.K8sID)
+			if err != nil {
+				err = fmt.Errorf("could not get updated job status")
+				return nil, err
+			}
+
+			isDeleted = true
+		}
+
 		if job.Status != newStatus.Status.String() {
-			err = apiHandler.dbHandler.UpdateStatus(jobID.GetJobID(), newStatus.Status, newStatus.ErrorMsg)
+			err = apiHandler.dbHandler.UpdateStatus(jobID.GetJobID(), newStatus.Status, newStatus.ErrorMsg, isDeleted)
 			if err != nil {
 				err = fmt.Errorf("could not update job status")
 				return nil, err

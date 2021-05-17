@@ -192,9 +192,13 @@ func (handler *Handler) UpdateK8s(id string, k8s string, conf string) error {
 }
 
 //UpdateStatus Updates the status of a job
-func (handler *Handler) UpdateStatus(id string, status api.JobStatusEnum, errorMsg string) error {
+func (handler *Handler) UpdateStatus(id string, status api.JobStatusEnum, errorMsg string, isDeleted bool) error {
 	job := Job{
 		JobID: id,
+	}
+
+	if isDeleted {
+		job.IsDeleted = true
 	}
 
 	updateResult := handler.DB.Model(&job).Updates(Job{Status: status.String(), Error: errorMsg})

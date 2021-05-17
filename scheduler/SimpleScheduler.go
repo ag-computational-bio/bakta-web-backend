@@ -12,11 +12,11 @@ import (
 	"github.com/ag-computational-bio/bakta-web-api-go/api"
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 
-	restclient "k8s.io/client-go/rest"
-
 	batchv1 "k8s.io/api/batch/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 )
@@ -102,6 +102,16 @@ func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfi
 	}
 
 	return scheduledJob, nil
+}
+
+func (scheduler *SimpleScheduler) DeleteJob(jobName string) error {
+	err := scheduler.k8sClient.BatchV1().Jobs(scheduler.namespace).Delete(context.TODO(), jobName, metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		log.Println(err.Error())
+		return err
+	}
+
+	return nil
 }
 
 func createOutOfClusterConfig() (*restclient.Config, error) {
