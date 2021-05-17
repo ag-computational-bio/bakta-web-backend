@@ -211,7 +211,7 @@ func (apiHandler *BaktaJobAPI) Version(ctx context.Context, request *api.Empty) 
 	shaVersion := os.Getenv("GITHUB_SHA")
 
 	version := api.VersionResponse{
-		ToolVersion:    "0.0.1",
+		ToolVersion:    "1.0.0",
 		DbVersion:      "2.0.0",
 		BackendVersion: shaVersion,
 	}
