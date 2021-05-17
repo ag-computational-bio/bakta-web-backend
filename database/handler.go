@@ -85,7 +85,6 @@ func InitDatabaseHandler() (*Handler, error) {
 	userBucket := viper.GetString("Objectstorage.S3.UserBucket")
 	dbBucket := viper.GetString("Objectstorage.S3.DBBucket")
 	baseKey := viper.GetString("Objectstorage.S3.BaseKey")
-
 	expiryTime := viper.GetInt64("ExpiryTime")
 
 	dbHandler := Handler{

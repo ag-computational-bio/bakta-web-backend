@@ -84,6 +84,7 @@ func RunGrpcJobServer() error {
 	updateHandler := BaktaUpdateAPI{
 		dbHandler:     dbHandler,
 		updateMonitor: &updateMonitor,
+		scheduler:     sched,
 	}
 
 	updateServer := initGrpcUpdateServer(&updateHandler)
