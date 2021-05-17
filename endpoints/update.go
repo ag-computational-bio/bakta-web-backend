@@ -36,7 +36,7 @@ func (apiHandler *BaktaUpdateAPI) UpdateStatus(ctx context.Context, request *api
 				return
 			}
 			if !job.IsDeleted {
-				err = apiHandler.scheduler.DeleteJob(job.K8sID)
+				err = apiHandler.scheduler.DeleteJob(job.JobID)
 				if err != nil {
 					log.Println(err.Error())
 					return

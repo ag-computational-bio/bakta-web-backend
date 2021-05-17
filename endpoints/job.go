@@ -127,7 +127,7 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 		}
 
 		if newStatus.Status == api.JobStatusEnum_SUCCESSFULL || newStatus.Status == api.JobStatusEnum_ERROR {
-			err := apiHandler.scheduler.DeleteJob(job.K8sID)
+			err := apiHandler.scheduler.DeleteJob(job.JobID)
 			if err != nil {
 				err = fmt.Errorf("could not get updated job status")
 				return nil, err
