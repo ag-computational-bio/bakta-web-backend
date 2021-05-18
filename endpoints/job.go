@@ -120,6 +120,10 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 			return nil, err
 		}
 
+		if job.IsDeleted {
+			continue
+		}
+
 		newStatus, err := apiHandler.monitor.GetJobStatus(jobID.GetJobID())
 		if err != nil {
 			err = fmt.Errorf("could not get updated job status")

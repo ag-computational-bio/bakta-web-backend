@@ -21,6 +21,16 @@ type BaktaUpdateAPI struct {
 //UpdateStatus Updates the status of a running job
 func (apiHandler *BaktaUpdateAPI) UpdateStatus(ctx context.Context, request *api.UpdateStatusRequest) (*api.Empty, error) {
 	go func() {
+		job, err := apiHandler.dbHandler.GetJob(request.GetJobID())
+		if err != nil {
+			log.Println(err.Error())
+			return
+		}
+
+		if job.IsDeleted {
+			return
+		}
+
 		status, err := apiHandler.updateMonitor.GetJobStatus(request.GetJobID())
 		if err != nil {
 			log.Println(err.Error())
@@ -30,11 +40,6 @@ func (apiHandler *BaktaUpdateAPI) UpdateStatus(ctx context.Context, request *api
 		isDeleted := false
 
 		if status.Status == api.JobStatusEnum_SUCCESSFULL || status.Status == api.JobStatusEnum_ERROR {
-			job, err := apiHandler.dbHandler.GetJob(request.GetJobID())
-			if err != nil {
-				log.Println(err.Error())
-				return
-			}
 			if !job.IsDeleted {
 				err = apiHandler.scheduler.DeleteJob(job.JobID)
 				if err != nil {
