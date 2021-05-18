@@ -41,7 +41,7 @@ func InitBaktaAPI(dbHandler *database.Handler, scheduler *scheduler.SimpleSchedu
 
 //InitJob Initiates a bakta job and returns upload links for the fasta, prodigal training and replicon file
 func (apiHandler *BaktaJobAPI) InitJob(ctx context.Context, request *api.InitJobRequest) (*api.InitJobResponse, error) {
-	job, secret, err := apiHandler.dbHandler.CreateJob()
+	job, secret, err := apiHandler.dbHandler.CreateJob(request.RepliconTableType)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err

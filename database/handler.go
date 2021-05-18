@@ -41,7 +41,8 @@ const (
 	//Fasta fasta file
 	Fasta UploadFileType = "fasta"
 	//Replicon replicon file as tsv, see bakta documentation for further details
-	Replicon UploadFileType = "replicons"
+	RepliconCSV UploadFileType = "repliconcsv"
+	RepliconTSV UploadFileType = "replicontsv"
 	//Prodigal Prodigal training file, see bakta documentation for further details
 	Prodigal UploadFileType = "prodigal"
 )
@@ -147,7 +148,7 @@ func createPostgresSQL() (*gorm.DB, error) {
 }
 
 //CreateJob Creates a new bakta job in init mode
-func (handler *Handler) CreateJob() (*Job, string, error) {
+func (handler *Handler) CreateJob(repliconTypeAPI api.RepliconTableType) (*Job, string, error) {
 	jobID := uuid.New()
 	secretID, err := randStringBytes(50)
 	if err != nil {
@@ -158,13 +159,22 @@ func (handler *Handler) CreateJob() (*Job, string, error) {
 	secretSHA := sha256.Sum256([]byte(secretID))
 	secretSHABase64 := base64.StdEncoding.EncodeToString(secretSHA[:])
 
+	repliconType := RepliconTSV
+
+	switch repliconTypeAPI {
+	case api.RepliconTableType_csv:
+		repliconType = RepliconCSV
+	case api.RepliconTableType_tsv:
+		repliconType = RepliconTSV
+	}
+
 	job := Job{
 		JobID:       jobID.String(),
 		Secret:      secretSHABase64,
 		DataBucket:  handler.UserDataBucket,
 		FastaKey:    handler.createUploadStoreKey(jobID.String(), Fasta),
 		ProdigalKey: handler.createUploadStoreKey(jobID.String(), Prodigal),
-		RepliconKey: handler.createUploadStoreKey(jobID.String(), Replicon),
+		RepliconKey: handler.createUploadStoreKey(jobID.String(), repliconType),
 		ResultKey:   handler.createResultStoreKey(jobID.String()),
 		Status:      api.JobStatusEnum_INIT.String(),
 		ExpiryDate:  time.Now().AddDate(0, 0, 10),
@@ -313,7 +323,9 @@ func (handler *Handler) createUploadStoreKey(id string, uploadFileType UploadFil
 	switch uploadFileType {
 	case Fasta:
 		filename = "fastadata.fasta"
-	case Replicon:
+	case RepliconTSV:
+		filename = "replicons.tsv"
+	case RepliconCSV:
 		filename = "replicons.tsv"
 	case Prodigal:
 		filename = "prodigaltraining.protf"

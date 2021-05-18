@@ -2,6 +2,8 @@ package database
 
 import (
 	"testing"
+
+	"github.com/ag-computational-bio/bakta-web-api-go/api"
 )
 
 func TestDatabaseHandler(t *testing.T) {
@@ -10,12 +12,12 @@ func TestDatabaseHandler(t *testing.T) {
 		t.Errorf(err.Error())
 	}
 
-	job1, _, err := databaseHandler.CreateJob()
+	job1, _, err := databaseHandler.CreateJob(api.RepliconTableType_csv)
 	if err != nil {
 		t.Errorf(err.Error())
 	}
 
-	job2, _, err := databaseHandler.CreateJob()
+	job2, _, err := databaseHandler.CreateJob(api.RepliconTableType_csv)
 	if err != nil {
 		t.Errorf(err.Error())
 	}
