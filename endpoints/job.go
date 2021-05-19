@@ -105,19 +105,30 @@ func (apiHandler *BaktaJobAPI) StartJob(ctx context.Context, request *api.StartJ
 func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.JobStatusRequestList) (*api.JobStatusReponseList, error) {
 	var jobIDs []string
 
+	var failedJobs []*api.FailedJob
+
 	for _, jobID := range request.GetJobs() {
 		isDeleted := false
 
 		err := apiHandler.dbHandler.CheckSecret(jobID.GetJobID(), jobID.GetSecret())
 		if err != nil {
 			err = fmt.Errorf("JobID does not match secret ID")
-			return nil, err
+			failedJob := api.FailedJob{
+				JobID:     jobID.JobID,
+				JobStatus: api.JobFailedStatus_UNAUTHORIZED,
+			}
+			failedJobs = append(failedJobs, &failedJob)
+			continue
 		}
 
 		job, err := apiHandler.dbHandler.GetJob(jobID.GetJobID())
 		if err != nil {
-			err = fmt.Errorf("could not find job")
-			return nil, err
+			failedJob := api.FailedJob{
+				JobID:     jobID.JobID,
+				JobStatus: api.JobFailedStatus_NOT_FOUND,
+			}
+			failedJobs = append(failedJobs, &failedJob)
+			continue
 		}
 
 		if job.IsDeleted {
@@ -181,7 +192,8 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 	}
 
 	reponse := api.JobStatusReponseList{
-		Jobs: jobsStatus,
+		Jobs:       jobsStatus,
+		FailedJobs: failedJobs,
 	}
 
 	return &reponse, nil
