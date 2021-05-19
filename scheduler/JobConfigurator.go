@@ -43,14 +43,14 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig, rawConfString strin
 	confStringElements = append(confStringElements, "-o /output")
 
 	if conf.HasProdigal {
-		confStringElements = append(confStringElements, "--prodigal-tf prodigaltraining.tf")
+		confStringElements = append(confStringElements, "--prodigal-tf /data/prodigaltraining.tf")
 	}
 
 	if conf.HasReplicons {
 		if strings.HasSuffix(job.ProdigalKey, "csv") {
-			confStringElements = append(confStringElements, "--replicons replicons.csv")
+			confStringElements = append(confStringElements, "--replicons /data/replicons.csv")
 		} else if strings.HasSuffix(job.ProdigalKey, "csv") {
-			confStringElements = append(confStringElements, "--replicons replicons.tsv")
+			confStringElements = append(confStringElements, "--replicons /data/replicons.tsv")
 		}
 	}
 
