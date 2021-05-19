@@ -13,6 +13,7 @@ import (
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 	"github.com/ag-computational-bio/bakta-web-backend/scheduler"
@@ -112,7 +113,6 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 
 		err := apiHandler.dbHandler.CheckSecret(jobID.GetJobID(), jobID.GetSecret())
 		if err != nil {
-			err = fmt.Errorf("JobID does not match secret ID")
 			failedJob := api.FailedJob{
 				JobID:     jobID.JobID,
 				JobStatus: api.JobFailedStatus_UNAUTHORIZED,
@@ -131,11 +131,17 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 			continue
 		}
 
+		jobIDs = append(jobIDs, jobID.JobID)
+
 		if job.IsDeleted {
 			continue
 		}
 
 		newStatus, err := apiHandler.monitor.GetJobStatus(jobID.GetJobID())
+		if err != nil && errors.IsNotFound(err) {
+			continue
+		}
+
 		if err != nil {
 			err = fmt.Errorf("could not get updated job status")
 			return nil, err
@@ -158,8 +164,6 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 				return nil, err
 			}
 		}
-
-		jobIDs = append(jobIDs, jobID.JobID)
 	}
 
 	jobs, err := apiHandler.dbHandler.GetJobsStatus(jobIDs)
