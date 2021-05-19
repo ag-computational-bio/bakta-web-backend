@@ -37,10 +37,6 @@ func createDownloadConf(job *database.Job, prodigaltf bool, replicontsv bool) (s
 func createBaktaConf(job *database.Job, conf *api.JobConfig, rawConfString string) (string, error) {
 	var confStringElements []string
 
-	if rawConfString != "" {
-		confStringElements = append(confStringElements, rawConfString)
-	}
-
 	confStringElements = append(confStringElements, "--tmp-dir /cache")
 	confStringElements = append(confStringElements, "--threads 8")
 	confStringElements = append(confStringElements, "--prefix result")
@@ -51,7 +47,11 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig, rawConfString strin
 	}
 
 	if conf.HasReplicons {
-		confStringElements = append(confStringElements, "--replicons replicons.tsv")
+		if strings.HasSuffix(job.ProdigalKey, "csv") {
+			confStringElements = append(confStringElements, "--replicons replicons.csv")
+		} else if strings.HasSuffix(job.ProdigalKey, "csv") {
+			confStringElements = append(confStringElements, "--replicons replicons.tsv")
+		}
 	}
 
 	if viper.IsSet("Testing") || viper.IsSet("Debug") {
@@ -59,6 +59,55 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig, rawConfString strin
 	} else {
 		confStringElements = append(confStringElements, "--db /db/db")
 	}
+
+	if conf.CompleteGenome {
+		confStringElements = append(confStringElements, "--complete")
+	}
+
+	if conf.Locus != "" {
+		confStringElements = append(confStringElements, fmt.Sprintf("--locus %v", conf.Locus))
+	}
+
+	if conf.LocusTag != "" {
+		confStringElements = append(confStringElements, fmt.Sprintf("--locus-tag %v", conf.LocusTag))
+	}
+
+	if conf.KeepContigHeaders {
+		confStringElements = append(confStringElements, "--keep-contig-headers")
+	}
+
+	if conf.Genus != "" {
+		confStringElements = append(confStringElements, fmt.Sprintf("--genus %v", conf.Genus))
+	}
+
+	if conf.Species != "" {
+		confStringElements = append(confStringElements, fmt.Sprintf("--species %v", conf.Species))
+	}
+
+	if conf.Strain != "" {
+		confStringElements = append(confStringElements, fmt.Sprintf("--strain %v", conf.Strain))
+	}
+
+	if conf.Plasmid != "" {
+		confStringElements = append(confStringElements, fmt.Sprintf("--plasmid %v", conf.Plasmid))
+	}
+
+	if conf.TranslationalTable == 4 || conf.TranslationalTable == 11 {
+		confStringElements = append(confStringElements, fmt.Sprintf("--translation-table %v", conf.TranslationalTable))
+	}
+
+	dermtype := "?"
+
+	switch conf.DermType {
+	case api.DermType_UNKNOWN:
+		dermtype = "?"
+	case api.DermType_monoderm:
+		dermtype = "+"
+	case api.DermType_diderm:
+		dermtype = "-"
+	}
+
+	confStringElements = append(confStringElements, fmt.Sprintf("--gram %s", dermtype))
 
 	confString := strings.Join(confStringElements, " ")
 

@@ -3,7 +3,7 @@ module github.com/ag-computational-bio/bakta-web-backend
 go 1.16
 
 require (
-	github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210518113154-dcfabedac530
+	github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210519082005-4b37d53a8d18
 	github.com/aws/aws-sdk-go-v2 v1.5.0
 	github.com/aws/aws-sdk-go-v2/config v1.2.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.7.0
@@ -31,7 +31,7 @@ require (
 	golang.org/x/sys v0.0.0-20210514084401-e8d321eab015 // indirect
 	golang.org/x/term v0.0.0-20210503060354-a79de5458b56 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
-	google.golang.org/genproto v0.0.0-20210517163617-5e0236093d7a // indirect
+	google.golang.org/genproto v0.0.0-20210518161634-ec7691c0a37d // indirect
 	google.golang.org/grpc v1.37.1
 	google.golang.org/protobuf v1.26.0
 	gopkg.in/ini.v1 v1.62.0 // indirect
@@ -39,9 +39,9 @@ require (
 	gorm.io/driver/postgres v1.1.0
 	gorm.io/driver/sqlite v1.1.4
 	gorm.io/gorm v1.21.10
-	k8s.io/api v0.21.0
-	k8s.io/apimachinery v0.21.0
-	k8s.io/client-go v0.21.0
+	k8s.io/api v0.21.1
+	k8s.io/apimachinery v0.21.1
+	k8s.io/client-go v0.21.1
 	k8s.io/utils v0.0.0-20210517184530-5a248b5acedc // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.1.1 // indirect
 )
