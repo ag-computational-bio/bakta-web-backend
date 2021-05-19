@@ -43,7 +43,7 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig, rawConfString strin
 	confStringElements = append(confStringElements, "-o /output")
 
 	if conf.HasProdigal {
-		confStringElements = append(confStringElements, "--prodigal-tf prodigaltraining.protf")
+		confStringElements = append(confStringElements, "--prodigal-tf prodigaltraining.tf")
 	}
 
 	if conf.HasReplicons {
