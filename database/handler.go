@@ -144,6 +144,8 @@ func createPostgresSQL() (*gorm.DB, error) {
 		return nil, err
 	}
 
+	db.AutoMigrate(&Job{})
+
 	return db, nil
 }
 
