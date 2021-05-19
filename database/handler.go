@@ -328,7 +328,7 @@ func (handler *Handler) createUploadStoreKey(id string, uploadFileType UploadFil
 	case RepliconCSV:
 		filename = "replicons.tsv"
 	case Prodigal:
-		filename = "prodigaltraining.protf"
+		filename = "prodigaltraining.tf"
 	}
 
 	resultKey := path.Join(handler.BaseKey, "uploaddata", id, filename)
