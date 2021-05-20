@@ -13,7 +13,6 @@ import (
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 	"github.com/ag-computational-bio/bakta-web-backend/scheduler"
@@ -104,69 +103,9 @@ func (apiHandler *BaktaJobAPI) StartJob(ctx context.Context, request *api.StartJ
 
 //GetJobsStatus Get the job status of the provided list of jobs
 func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.JobStatusRequestList) (*api.JobStatusReponseList, error) {
-	var jobIDs []string
-
 	var failedJobs []*api.FailedJob
 
-	for _, jobID := range request.GetJobs() {
-		isDeleted := false
-
-		err := apiHandler.dbHandler.CheckSecret(jobID.GetJobID(), jobID.GetSecret())
-		if err != nil {
-			failedJob := api.FailedJob{
-				JobID:     jobID.JobID,
-				JobStatus: api.JobFailedStatus_UNAUTHORIZED,
-			}
-			failedJobs = append(failedJobs, &failedJob)
-			continue
-		}
-
-		job, err := apiHandler.dbHandler.GetJob(jobID.GetJobID())
-		if err != nil {
-			failedJob := api.FailedJob{
-				JobID:     jobID.JobID,
-				JobStatus: api.JobFailedStatus_NOT_FOUND,
-			}
-			failedJobs = append(failedJobs, &failedJob)
-			continue
-		}
-
-		jobIDs = append(jobIDs, jobID.JobID)
-
-		if job.IsDeleted {
-			continue
-		}
-
-		newStatus, err := apiHandler.monitor.GetJobStatus(jobID.GetJobID())
-		if err != nil && errors.IsNotFound(err) {
-			continue
-		}
-
-		if err != nil {
-			err = fmt.Errorf("could not get updated job status")
-			return nil, err
-		}
-
-		if newStatus.Status == api.JobStatusEnum_SUCCESSFULL || newStatus.Status == api.JobStatusEnum_ERROR {
-			err := apiHandler.scheduler.DeleteJob(job.JobID)
-			if err != nil {
-				err = fmt.Errorf("could not get updated job status")
-				return nil, err
-			}
-
-			isDeleted = true
-		}
-
-		if job.Status != newStatus.Status.String() {
-			err = apiHandler.dbHandler.UpdateStatus(jobID.GetJobID(), newStatus.Status, newStatus.ErrorMsg, isDeleted)
-			if err != nil {
-				err = fmt.Errorf("could not update job status")
-				return nil, err
-			}
-		}
-	}
-
-	jobs, err := apiHandler.dbHandler.GetJobsStatus(jobIDs)
+	jobs, err := apiHandler.dbHandler.GetJobs(request.GetJobs())
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
@@ -182,8 +121,8 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 
 		statusEnum := api.JobStatusEnum(statusNumber)
 
-		created_time := timestamppb.New(time.Unix(job.Created, 0))
-		updated_time := timestamppb.New(time.Unix(job.Updated, 0))
+		created_time := timestamppb.New(time.Unix(int64(job.Created.T), 0))
+		updated_time := timestamppb.New(time.Unix(int64(job.Updated.T), 0))
 
 		statusResponse := api.JobStatusResponse{
 			JobID:     job.JobID,
@@ -236,8 +175,8 @@ func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.Jo
 		return nil, err
 	}
 
-	created_time := timestamppb.New(time.Unix(job.Created, 0))
-	updated_time := timestamppb.New(time.Unix(job.Updated, 0))
+	created_time := timestamppb.New(time.Unix(int64(job.Created.T), 0))
+	updated_time := timestamppb.New(time.Unix(int64(job.Updated.T), 0))
 
 	jobResponse := api.JobResultResponse{
 		JobID:       job.JobID,
