@@ -272,9 +272,12 @@ func (handler *Handler) GetJobs(jobIDs []*api.JobAuth) ([]Job, error) {
 	var jobRequests []bson.M
 
 	for _, jobRequest := range jobIDs {
+		secretSHA := sha256.Sum256([]byte(jobRequest.Secret))
+		secretSHABase64 := base64.StdEncoding.EncodeToString(secretSHA[:])
+
 		jobRequests = append(jobRequests, bson.M{
 			"jobid":  jobRequest.JobID,
-			"secret": jobRequest.Secret,
+			"secret": secretSHABase64,
 		})
 	}
 
