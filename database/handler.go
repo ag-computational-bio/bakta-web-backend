@@ -203,7 +203,7 @@ func (handler *Handler) UpdateStatus(id string, status api.JobStatusEnum, errorM
 	update := bson.M{
 		"$set": bson.M{
 			"error":  errorMsg,
-			"status": api.JobStatusEnum_RUNNING.String(),
+			"status": status.String(),
 		},
 	}
 
@@ -213,7 +213,7 @@ func (handler *Handler) UpdateStatus(id string, status api.JobStatusEnum, errorM
 		return err
 	}
 
-	if result.ModifiedCount != 1 {
+	if result.MatchedCount != 1 {
 		err := fmt.Errorf("wrong number of updated job entries found when updating job: %v", id)
 		log.Println(err.Error())
 		return err
