@@ -60,7 +60,7 @@ func InitDatabaseHandler() (*Handler, error) {
 	dbPassword := getEnvOrPanic("MongoPassword")
 	dbPort := viper.GetString("MongoPort")
 
-	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(fmt.Sprintf("mongodb://%v:%v", host, dbPort)).SetAuth(
 		options.Credential{
 			AuthSource: dbAuthSource,
@@ -134,7 +134,6 @@ func (handler *Handler) CreateJob(repliconTypeAPI api.RepliconTableType) (*Job, 
 	}
 
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
-
 	inserted, err := handler.Collection.InsertOne(ctx, job)
 	if err != nil {
 		log.Println(err.Error())
@@ -266,14 +265,21 @@ func (handler *Handler) CheckSecret(id string, secretKey string) error {
 }
 
 // GetJobsStatus Returns the status of a list of jobs
-func (handler *Handler) GetJobs(jobIDs []string) ([]Job, error) {
+func (handler *Handler) GetJobs(jobIDs []*api.JobAuth) ([]Job, error) {
 	var jobs []Job
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 
+	var jobRequests []bson.M
+
+	for _, jobRequest := range jobIDs {
+		jobRequests = append(jobRequests, bson.M{
+			"jobid":  jobRequest.JobID,
+			"secret": jobRequest.Secret,
+		})
+	}
+
 	find_query := bson.M{
-		"jobid": bson.M{
-			"$in": jobIDs,
-		},
+		"$or": jobRequests,
 	}
 
 	csr, err := handler.Collection.Find(ctx, find_query)
