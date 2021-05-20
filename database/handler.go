@@ -171,8 +171,10 @@ func (handler *Handler) UpdateK8s(id string, k8s string, conf string) error {
 	}
 
 	update := bson.M{
-		"k8sid":  k8s,
-		"status": api.JobStatusEnum_RUNNING.String(),
+		"$set": bson.M{
+			"k8sid":  k8s,
+			"status": api.JobStatusEnum_RUNNING.String(),
+		},
 	}
 
 	result, err := handler.Collection.UpdateOne(ctx, update_filter, update)
@@ -199,8 +201,10 @@ func (handler *Handler) UpdateStatus(id string, status api.JobStatusEnum, errorM
 	}
 
 	update := bson.M{
-		"error":  errorMsg,
-		"status": api.JobStatusEnum_RUNNING.String(),
+		"$set": bson.M{
+			"error":  errorMsg,
+			"status": api.JobStatusEnum_RUNNING.String(),
+		},
 	}
 
 	result, err := handler.Collection.UpdateOne(ctx, update_filter, update)
