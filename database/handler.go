@@ -183,7 +183,7 @@ func (handler *Handler) UpdateK8s(id string, k8s string, conf string) error {
 		return err
 	}
 
-	if result.ModifiedCount != 1 {
+	if result.MatchedCount != 1 {
 		err := fmt.Errorf("wrong number of updated job entries found when updating job: %v", id)
 		log.Println(err.Error())
 		return err
