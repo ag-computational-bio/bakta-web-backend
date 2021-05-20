@@ -1,22 +1,25 @@
 package database
 
-import "time"
+import (
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
 
 // Job The database model for a bakta job
 type Job struct {
-	JobID       string `gorm:"primaryKey"`
+	_id         primitive.ObjectID
+	JobID       string
 	Secret      string
-	K8sID       string `gorm:"index"`
-	Updated     int64  `gorm:"autoUpdateTime"` // Use unix milli seconds as updating time
-	Created     int64  `gorm:"autoCreateTime"` // Use unix seconds as creating time
-	Status      string `gorm:"index"`
+	K8sID       string
+	Updated     primitive.Timestamp
+	Created     primitive.Timestamp
+	Status      string
 	DataBucket  string
 	FastaKey    string
 	ProdigalKey string
 	RepliconKey string
 	ResultKey   string
 	Error       string
-	ExpiryDate  time.Time
+	ExpiryDate  primitive.Timestamp
 	ConfString  string
 	IsDeleted   bool
 }

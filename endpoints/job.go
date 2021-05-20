@@ -166,7 +166,7 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 		}
 	}
 
-	jobs, err := apiHandler.dbHandler.GetJobsStatus(jobIDs)
+	jobs, err := apiHandler.dbHandler.GetJobs(jobIDs)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
@@ -182,8 +182,8 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 
 		statusEnum := api.JobStatusEnum(statusNumber)
 
-		created_time := timestamppb.New(time.Unix(job.Created, 0))
-		updated_time := timestamppb.New(time.Unix(job.Updated, 0))
+		created_time := timestamppb.New(time.Unix(int64(job.Created.T), 0))
+		updated_time := timestamppb.New(time.Unix(int64(job.Updated.T), 0))
 
 		statusResponse := api.JobStatusResponse{
 			JobID:     job.JobID,
@@ -236,8 +236,8 @@ func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.Jo
 		return nil, err
 	}
 
-	created_time := timestamppb.New(time.Unix(job.Created, 0))
-	updated_time := timestamppb.New(time.Unix(job.Updated, 0))
+	created_time := timestamppb.New(time.Unix(int64(job.Created.T), 0))
+	updated_time := timestamppb.New(time.Unix(int64(job.Updated.T), 0))
 
 	jobResponse := api.JobResultResponse{
 		JobID:       job.JobID,

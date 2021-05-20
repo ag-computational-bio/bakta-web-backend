@@ -4,7 +4,11 @@ Objectstorage:
     DBBucket: baktadbs
     BaseKey: data/dev
 Database:
-  Backend: Postgres
+  MongoHost: bakta-mongo-mongodb
+  MongoDBName: bakta
+  MongoUser: bakta
+  MongoUserAuthSource: admin
+  MongoPort: 27017
 K8sNamespace: "bakta-dev"
 UpdateService:
   Name: baktawebbackend

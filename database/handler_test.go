@@ -26,7 +26,7 @@ func TestDatabaseHandler(t *testing.T) {
 	jobIDs = append(jobIDs, job1.JobID)
 	jobIDs = append(jobIDs, job2.JobID)
 
-	_, err = databaseHandler.GetJobsStatus(jobIDs)
+	_, err = databaseHandler.GetJobs(jobIDs)
 	if err != nil {
 		t.Errorf(err.Error())
 	}

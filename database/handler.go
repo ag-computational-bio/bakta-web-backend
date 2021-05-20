@@ -1,12 +1,12 @@
 package database
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path"
@@ -15,24 +15,18 @@ import (
 	"github.com/ag-computational-bio/bakta-web-api-go/api"
 	"github.com/google/uuid"
 	"github.com/spf13/viper"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
 
 	"gorm.io/driver/mysql"
-	"gorm.io/driver/postgres"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
 // BackendType The type of the database backend to use
 type BackendType string
-
-const (
-	//SQLite Use an sqlite database in the backend
-	SQLite BackendType = "SQLite"
-	//Postgres User a postgres database in the backend
-	Postgres BackendType = "Postgres"
-	//Mysql Use a myswql database in the backend
-	Mysql BackendType = "MySQl"
-)
 
 //UploadFileType type of file to upload
 type UploadFileType string
@@ -48,10 +42,12 @@ const (
 )
 
 const resultFileName = "results.tar.gz"
+const COLLECTIONNAME = "jobs"
 
 //Handler Wraps the database with convinence methods
 type Handler struct {
-	DB             *gorm.DB
+	DB             *mongo.Client
+	Collection     *mongo.Collection
 	BaseKey        string
 	UserDataBucket string
 	DBBucket       string
@@ -60,33 +56,33 @@ type Handler struct {
 
 // InitDatabaseHandler Initializes the database to store the Job
 func InitDatabaseHandler() (*Handler, error) {
+	host := viper.GetString("MongoHost")
+	dbName := viper.GetString("MongoDBName")
+	dbUser := viper.GetString("MongoUser")
+	dbAuthSource := viper.GetString("MongoUserAuthSource")
+	dbPassword := getEnvOrPanic("MongoPassword")
+	dbPort := viper.GetString("MongoPort")
 
-	var db *gorm.DB
-	var err error
-
-	databaseType := viper.GetString("Database.Backend")
-
-	switch databaseType {
-	case string(SQLite):
-		db, err = createSQLiteDatabase()
-	case string(Postgres):
-		db, err = createPostgresSQL()
-	case string(Mysql):
-		db, err = createMySQL()
-	default:
-		db, err = createSQLiteDatabase()
-	}
-
+	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(fmt.Sprintf("mongodb://%v:%v", host, dbPort)).SetAuth(
+		options.Credential{
+			AuthSource: dbAuthSource,
+			Username:   dbUser,
+			Password:   dbPassword,
+		},
+	))
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
 	}
 
-	err = db.AutoMigrate(&Job{})
+	err = client.Ping(ctx, readpref.Primary())
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
 	}
+
+	collection := client.Database(dbName).Collection(COLLECTIONNAME)
 
 	userBucket := viper.GetString("Objectstorage.S3.UserBucket")
 	dbBucket := viper.GetString("Objectstorage.S3.DBBucket")
@@ -94,7 +90,8 @@ func InitDatabaseHandler() (*Handler, error) {
 	expiryTime := viper.GetInt64("ExpiryTime")
 
 	dbHandler := Handler{
-		DB:             db,
+		DB:             client,
+		Collection:     collection,
 		UserDataBucket: userBucket,
 		DBBucket:       dbBucket,
 		BaseKey:        baseKey,
@@ -102,21 +99,6 @@ func InitDatabaseHandler() (*Handler, error) {
 	}
 
 	return &dbHandler, nil
-}
-
-func createSQLiteDatabase() (*gorm.DB, error) {
-	tmpDir, err := ioutil.TempDir("", "baktadb-*")
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
-	db, err := gorm.Open(sqlite.Open(path.Join(tmpDir, "baktadb.db")), &gorm.Config{})
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
-
-	return db, nil
 }
 
 func createMySQL() (*gorm.DB, error) {
@@ -128,23 +110,6 @@ func createMySQL() (*gorm.DB, error) {
 
 	dsn := fmt.Sprintf("%v:%v@tcp(%v:%v)/%v?charset=utf8mb4&parseTime=True&loc=Local", dbUser, dbPassword, host, dbPort, dbName)
 	return gorm.Open(mysql.Open(dsn), &gorm.Config{})
-}
-
-func createPostgresSQL() (*gorm.DB, error) {
-	host := getEnvOrPanic("DatabaseHost")
-	dbName := getEnvOrPanic("DBName")
-	dbUser := getEnvOrPanic("DBUser")
-	dbPassword := getEnvOrPanic("DBPassword")
-	dbPort := getEnvOrPanic("DBPort")
-
-	dsn := fmt.Sprintf("host=%v user=%v password=%v dbname=%v port=%v sslmode=disable TimeZone=Europe/Berlin", host, dbUser, dbPassword, dbName, dbPort)
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
-
-	return db, nil
 }
 
 //CreateJob Creates a new bakta job in init mode
@@ -177,59 +142,91 @@ func (handler *Handler) CreateJob(repliconTypeAPI api.RepliconTableType) (*Job, 
 		RepliconKey: handler.createUploadStoreKey(jobID.String(), repliconType),
 		ResultKey:   handler.createResultStoreKey(jobID.String()),
 		Status:      api.JobStatusEnum_INIT.String(),
-		ExpiryDate:  time.Now().AddDate(0, 0, 10),
+		ExpiryDate:  primitive.Timestamp{T: uint32(time.Now().AddDate(0, 0, 10).Unix())},
+		Created:     primitive.Timestamp{T: uint32(time.Now().Unix())},
+		Updated:     primitive.Timestamp{T: uint32(time.Now().Unix())},
 	}
 
-	result := handler.DB.Create(&job)
-	if result.Error != nil {
-		log.Println(result.Error)
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+
+	inserted, err := handler.Collection.InsertOne(ctx, job)
+	if err != nil {
+		log.Println(err.Error())
 		return nil, "", err
 	}
 
-	getDataResult := handler.DB.First(&job)
-	if getDataResult.Error != nil {
-		log.Println(getDataResult.Error)
+	inserted_query := bson.M{
+		"_id": inserted.InsertedID,
+	}
+
+	result := handler.Collection.FindOne(ctx, inserted_query)
+	if result.Err() != nil {
+		log.Println(result.Err().Error())
+		return nil, "", result.Err()
+	}
+
+	inserted_Job := Job{}
+
+	err = result.Decode(&inserted_Job)
+	if err != nil {
+		log.Println(err.Error())
 		return nil, "", err
 	}
 
-	return &job, secretID, nil
+	return &inserted_Job, secretID, nil
 }
 
 //UpdateK8s Updates a job with its k8s id
 func (handler *Handler) UpdateK8s(id string, k8s string, conf string) error {
-	job := Job{
-		JobID:      id,
-		ConfString: conf,
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+
+	update_filter := bson.M{
+		"JobID": id,
 	}
 
-	getDataResult := handler.DB.First(&job)
-	if getDataResult.Error != nil {
-		log.Println(getDataResult.Error)
-		return getDataResult.Error
+	update := bson.M{
+		"K8sID":  k8s,
+		"Status": api.JobStatusEnum_RUNNING.String(),
 	}
 
-	job.K8sID = k8s
-	job.Status = api.JobStatusEnum_RUNNING.String()
+	result, err := handler.Collection.UpdateOne(ctx, update_filter, update)
+	if err != nil {
+		log.Println(err.Error())
+		return err
+	}
 
-	handler.DB.Save(&job)
+	if result.ModifiedCount != 1 {
+		err := fmt.Errorf("wrong number of updated job entries found when updating job: %v", id)
+		log.Println(err.Error())
+		return err
+	}
 
 	return nil
 }
 
 //UpdateStatus Updates the status of a job
 func (handler *Handler) UpdateStatus(id string, status api.JobStatusEnum, errorMsg string, isDeleted bool) error {
-	job := Job{
-		JobID: id,
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+
+	update_filter := bson.M{
+		"JobID": id,
 	}
 
-	if isDeleted {
-		job.IsDeleted = true
+	update := bson.M{
+		"Error":  errorMsg,
+		"Status": api.JobStatusEnum_RUNNING.String(),
 	}
 
-	updateResult := handler.DB.Model(&job).Updates(Job{Status: status.String(), Error: errorMsg})
-	if updateResult.Error != nil {
-		log.Println(updateResult.Error)
-		return updateResult.Error
+	result, err := handler.Collection.UpdateOne(ctx, update_filter, update)
+	if err != nil {
+		log.Println(err.Error())
+		return err
+	}
+
+	if result.ModifiedCount != 1 {
+		err := fmt.Errorf("wrong number of updated job entries found when updating job: %v", id)
+		log.Println(err.Error())
+		return err
 	}
 
 	return nil
@@ -237,13 +234,24 @@ func (handler *Handler) UpdateStatus(id string, status api.JobStatusEnum, errorM
 
 //GetJob Returns the stored config of a job
 func (handler *Handler) GetJob(id string) (*Job, error) {
-	job := Job{}
-	job.JobID = id
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 
-	result := handler.DB.First(&job)
-	if result.Error != nil {
-		log.Println(result.Error)
-		return nil, result.Error
+	find_query := bson.M{
+		"JobID": id,
+	}
+
+	result := handler.Collection.FindOne(ctx, find_query)
+	if result.Err() != nil {
+		log.Println(result.Err().Error())
+		return nil, result.Err()
+	}
+
+	job := Job{}
+
+	err := result.Decode(&job)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
 	}
 
 	return &job, nil
@@ -251,14 +259,10 @@ func (handler *Handler) GetJob(id string) (*Job, error) {
 
 //CheckSecret Compares the provided secret/JobID with a job in the database
 func (handler *Handler) CheckSecret(id string, secretKey string) error {
-	job := Job{
-		JobID: id,
-	}
-
-	getDataResult := handler.DB.First(&job)
-	if getDataResult.Error != nil {
-		log.Println(getDataResult.Error)
-		return getDataResult.Error
+	job, err := handler.GetJob(id)
+	if err != nil {
+		log.Println(err.Error())
+		return err
 	}
 
 	secretSHA := sha256.Sum256([]byte(secretKey))
@@ -272,15 +276,25 @@ func (handler *Handler) CheckSecret(id string, secretKey string) error {
 }
 
 // GetJobsStatus Returns the status of a list of jobs
-func (handler *Handler) GetJobsStatus(jobIDs []string) ([]Job, error) {
+func (handler *Handler) GetJobs(jobIDs []string) ([]Job, error) {
 	var jobs []Job
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 
-	current_time := time.Now().Unix() - handler.ExpiryTime
+	find_query := bson.M{
+		"JobID": bson.M{
+			"$in": jobIDs,
+		},
+	}
 
-	connection := handler.DB.Where("job_id IN ? AND created > ?", jobIDs, current_time).Find(&jobs)
-	if connection.Error != nil {
-		log.Println(connection.Error)
-		return nil, connection.Error
+	csr, err := handler.Collection.Find(ctx, find_query)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	if err = csr.All(ctx, &jobs); err != nil {
+		log.Println(err.Error())
+		return nil, err
 	}
 
 	return jobs, nil
@@ -288,34 +302,13 @@ func (handler *Handler) GetJobsStatus(jobIDs []string) ([]Job, error) {
 
 // GetJobStatus Returns the status of an individual job
 func (handler *Handler) GetJobStatus(jobID string) (*Job, error) {
-	job := Job{}
-
-	current_time := time.Now().Unix() - handler.ExpiryTime
-
-	connection := handler.DB.Where("job_id=? AND created > ?", jobID, current_time).Find(&job)
-	if connection.Error != nil {
-		log.Println(connection.Error)
-		return nil, connection.Error
+	job, err := handler.GetJob(jobID)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
 	}
 
-	return &job, nil
-}
-
-func (handler *Handler) GetRunningJobs() ([]*Job, error) {
-	running_status := []string{
-		api.JobStatusEnum_RUNNING.String(),
-		api.JobStatusEnum_INIT.String(),
-	}
-
-	jobs := make([]*Job, 0)
-
-	connection := handler.DB.Where("status in ?", running_status).Find(jobs)
-	if connection.Error != nil {
-		log.Println(connection.Error)
-		return nil, connection.Error
-	}
-
-	return jobs, nil
+	return job, nil
 }
 
 func (handler *Handler) createUploadStoreKey(id string, uploadFileType UploadFileType) string {
