@@ -3,6 +3,7 @@ package endpoints
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/ag-computational-bio/bakta-web-api-go/api"
 	"github.com/ag-computational-bio/bakta-web-backend/database"
@@ -31,7 +32,7 @@ func (apiHandler *BaktaUpdateAPI) UpdateStatus(ctx context.Context, request *api
 			return
 		}
 
-		status, err := apiHandler.updateMonitor.GetJobStatus(job.K8sID)
+		status, err := apiHandler.updateMonitor.GetJobStatus(job.JobID)
 		if err != nil {
 			log.Println(err.Error())
 			return
@@ -39,9 +40,23 @@ func (apiHandler *BaktaUpdateAPI) UpdateStatus(ctx context.Context, request *api
 
 		isDeleted := false
 
+		for {
+			status, err = apiHandler.updateMonitor.GetJobStatus(job.JobID)
+			if err != nil {
+				log.Println(err.Error())
+				return
+			}
+
+			if status.Status != api.JobStatusEnum_RUNNING {
+				break
+			}
+
+			time.Sleep(500 * time.Millisecond)
+		}
+
 		if status.Status == api.JobStatusEnum_SUCCESSFULL || status.Status == api.JobStatusEnum_ERROR {
 			if !job.IsDeleted {
-				err = apiHandler.scheduler.DeleteJob(job.K8sID)
+				err = apiHandler.scheduler.DeleteJob(job.JobID)
 				if err != nil {
 					log.Println(err.Error())
 					return
