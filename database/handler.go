@@ -20,9 +20,6 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
-
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
 )
 
 // BackendType The type of the database backend to use
@@ -101,17 +98,6 @@ func InitDatabaseHandler() (*Handler, error) {
 	return &dbHandler, nil
 }
 
-func createMySQL() (*gorm.DB, error) {
-	host := getEnvOrPanic("DatabaseHost")
-	dbName := getEnvOrPanic("DBName")
-	dbUser := getEnvOrPanic("DBUser")
-	dbPassword := getEnvOrPanic("DBPassword")
-	dbPort := getEnvOrPanic("DBPort")
-
-	dsn := fmt.Sprintf("%v:%v@tcp(%v:%v)/%v?charset=utf8mb4&parseTime=True&loc=Local", dbUser, dbPassword, host, dbPort, dbName)
-	return gorm.Open(mysql.Open(dsn), &gorm.Config{})
-}
-
 //CreateJob Creates a new bakta job in init mode
 func (handler *Handler) CreateJob(repliconTypeAPI api.RepliconTableType) (*Job, string, error) {
 	jobID := uuid.New()
@@ -181,12 +167,12 @@ func (handler *Handler) UpdateK8s(id string, k8s string, conf string) error {
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 
 	update_filter := bson.M{
-		"JobID": id,
+		"jobid": id,
 	}
 
 	update := bson.M{
-		"K8sID":  k8s,
-		"Status": api.JobStatusEnum_RUNNING.String(),
+		"k8sid":  k8s,
+		"status": api.JobStatusEnum_RUNNING.String(),
 	}
 
 	result, err := handler.Collection.UpdateOne(ctx, update_filter, update)
@@ -209,12 +195,12 @@ func (handler *Handler) UpdateStatus(id string, status api.JobStatusEnum, errorM
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 
 	update_filter := bson.M{
-		"JobID": id,
+		"jobid": id,
 	}
 
 	update := bson.M{
-		"Error":  errorMsg,
-		"Status": api.JobStatusEnum_RUNNING.String(),
+		"error":  errorMsg,
+		"status": api.JobStatusEnum_RUNNING.String(),
 	}
 
 	result, err := handler.Collection.UpdateOne(ctx, update_filter, update)
@@ -237,7 +223,7 @@ func (handler *Handler) GetJob(id string) (*Job, error) {
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 
 	find_query := bson.M{
-		"JobID": id,
+		"jobid": id,
 	}
 
 	result := handler.Collection.FindOne(ctx, find_query)
@@ -281,7 +267,7 @@ func (handler *Handler) GetJobs(jobIDs []string) ([]Job, error) {
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 
 	find_query := bson.M{
-		"JobID": bson.M{
+		"jobid": bson.M{
 			"$in": jobIDs,
 		},
 	}
