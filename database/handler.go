@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/viper"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -48,7 +47,7 @@ type Handler struct {
 	BaseKey        string
 	UserDataBucket string
 	DBBucket       string
-	ExpiryTime     int64
+	ExpiryTime     time.Duration
 }
 
 // InitDatabaseHandler Initializes the database to store the Job
@@ -86,13 +85,19 @@ func InitDatabaseHandler() (*Handler, error) {
 	baseKey := viper.GetString("Objectstorage.S3.BaseKey")
 	expiryTime := viper.GetInt64("ExpiryTime")
 
+	expiryTimeDuration, err := time.ParseDuration(fmt.Sprintf("-%vs", expiryTime))
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
 	dbHandler := Handler{
 		DB:             client,
 		Collection:     collection,
 		UserDataBucket: userBucket,
 		DBBucket:       dbBucket,
 		BaseKey:        baseKey,
-		ExpiryTime:     expiryTime,
+		ExpiryTime:     expiryTimeDuration,
 	}
 
 	return &dbHandler, nil
@@ -128,9 +133,8 @@ func (handler *Handler) CreateJob(repliconTypeAPI api.RepliconTableType) (*Job, 
 		RepliconKey: handler.createUploadStoreKey(jobID.String(), repliconType),
 		ResultKey:   handler.createResultStoreKey(jobID.String()),
 		Status:      api.JobStatusEnum_INIT.String(),
-		ExpiryDate:  primitive.Timestamp{T: uint32(time.Now().AddDate(0, 0, 10).Unix())},
-		Created:     primitive.Timestamp{T: uint32(time.Now().Unix())},
-		Updated:     primitive.Timestamp{T: uint32(time.Now().Unix())},
+		Created:     time.Now(),
+		Updated:     time.Now(),
 	}
 
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
@@ -162,7 +166,7 @@ func (handler *Handler) CreateJob(repliconTypeAPI api.RepliconTableType) (*Job, 
 }
 
 //UpdateK8s Updates a job with its k8s id
-func (handler *Handler) UpdateK8s(id string, k8s string, conf string) error {
+func (handler *Handler) UpdateK8s(id string, k8s string) error {
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 
 	update_filter := bson.M{
@@ -308,6 +312,28 @@ func (handler *Handler) GetJobStatus(jobID string) (*Job, error) {
 	}
 
 	return job, nil
+}
+
+func (handler *Handler) DeleteExpiredJobs() error {
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+
+	beforeDeleteTime := time.Now().Add(handler.ExpiryTime)
+
+	filter := bson.M{
+		"created": bson.M{
+			"$lt": beforeDeleteTime,
+		},
+	}
+
+	deleteOptions := options.DeleteOptions{}
+
+	_, err := handler.Collection.DeleteMany(ctx, filter, &deleteOptions)
+	if err != nil {
+		log.Println(err.Error())
+		return err
+	}
+
+	return nil
 }
 
 func (handler *Handler) createUploadStoreKey(id string, uploadFileType UploadFileType) string {

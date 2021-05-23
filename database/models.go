@@ -1,6 +1,8 @@
 package database
 
 import (
+	"time"
+
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -10,8 +12,8 @@ type Job struct {
 	JobID       string
 	Secret      string
 	K8sID       string
-	Updated     primitive.Timestamp
-	Created     primitive.Timestamp
+	Updated     time.Time
+	Created     time.Time
 	Status      string
 	DataBucket  string
 	FastaKey    string
@@ -19,7 +21,6 @@ type Job struct {
 	RepliconKey string
 	ResultKey   string
 	Error       string
-	ExpiryDate  primitive.Timestamp
 	ConfString  string
 	IsDeleted   bool
 }

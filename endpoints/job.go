@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"time"
 
 	"github.com/ag-computational-bio/bakta-web-api-go/api"
 	"github.com/ag-computational-bio/bakta-web-backend/monitor"
@@ -92,7 +91,7 @@ func (apiHandler *BaktaJobAPI) StartJob(ctx context.Context, request *api.StartJ
 		return nil, err
 	}
 
-	err = apiHandler.dbHandler.UpdateK8s(request.Job.GetJobID(), string(k8sJob.GetUID()), request.GetJobConfigString())
+	err = apiHandler.dbHandler.UpdateK8s(request.Job.GetJobID(), string(k8sJob.GetUID()))
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
@@ -121,8 +120,8 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 
 		statusEnum := api.JobStatusEnum(statusNumber)
 
-		created_time := timestamppb.New(time.Unix(int64(job.Created.T), 0))
-		updated_time := timestamppb.New(time.Unix(int64(job.Updated.T), 0))
+		created_time := timestamppb.New(job.Created)
+		updated_time := timestamppb.New(job.Updated)
 
 		statusResponse := api.JobStatusResponse{
 			JobID:     job.JobID,
@@ -175,8 +174,8 @@ func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.Jo
 		return nil, err
 	}
 
-	created_time := timestamppb.New(time.Unix(int64(job.Created.T), 0))
-	updated_time := timestamppb.New(time.Unix(int64(job.Updated.T), 0))
+	created_time := timestamppb.New(job.Created)
+	updated_time := timestamppb.New(job.Updated)
 
 	jobResponse := api.JobResultResponse{
 		JobID:       job.JobID,

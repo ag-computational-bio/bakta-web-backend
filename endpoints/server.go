@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"time"
 
 	"github.com/ag-computational-bio/bakta-web-api-go/api"
 	"github.com/ag-computational-bio/bakta-web-backend/monitor"
@@ -99,6 +100,8 @@ func RunGrpcJobServer() error {
 		return updateServer.Serve(updateListener)
 	})
 
+	go deleteCycle(dbHandler)
+
 	log.Println("Started grpc server")
 
 	return serverErrGrp.Wait()
@@ -141,4 +144,14 @@ func (authHandler *AuthHandler) unaryInterceptor(ctx context.Context, req interf
 	err := fmt.Errorf("error authenticating credentials")
 	log.Println(err.Error())
 	return "", err
+}
+
+func deleteCycle(databaseHandler *database.Handler) {
+	for {
+		time.Sleep(1 * time.Hour)
+		err := databaseHandler.DeleteExpiredJobs()
+		if err != nil {
+			log.Println(err.Error())
+		}
+	}
 }
