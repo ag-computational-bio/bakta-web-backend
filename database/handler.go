@@ -201,8 +201,9 @@ func (handler *Handler) UpdateStatus(id string, status api.JobStatusEnum, errorM
 
 	update := bson.M{
 		"$set": bson.M{
-			"error":  errorMsg,
-			"status": status.String(),
+			"error":   errorMsg,
+			"status":  status.String(),
+			"updated": primitive.Timestamp{T: uint32(time.Now().Unix())},
 		},
 	}
 

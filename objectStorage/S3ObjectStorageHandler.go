@@ -25,6 +25,7 @@ type UploadLinks struct {
 	FNA             string `bakta:"fna"`
 	FAA             string `bakta:"faa"`
 	JSON            string `bakta:"json"`
+	EMBL            string `bakta:"embl"`
 	TSVHypothetical string `bakta:"hypotheticals.tsv"`
 	FAAHypothetical string `bakta:"hypotheticals.faa"`
 }
