@@ -2,6 +2,8 @@ package endpoints
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -111,8 +113,34 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 		return nil, err
 	}
 
+	foundJob := make(map[string]*database.Job)
+
 	var jobsStatus []*api.JobStatusResponse
 	for _, job := range jobs {
+		foundJob[job.JobID] = &job
+
+	}
+
+	for _, expectedJob := range jobs {
+		job, ok := foundJob[expectedJob.JobID]
+		if !ok {
+			failedJobs = append(failedJobs, &api.FailedJob{
+				JobID:     expectedJob.JobID,
+				JobStatus: api.JobFailedStatus_NOT_FOUND,
+			})
+			continue
+		}
+		secretSHA := sha256.Sum256([]byte(job.Secret))
+		secretSHABase64 := base64.StdEncoding.EncodeToString(secretSHA[:])
+
+		if secretSHABase64 != expectedJob.Secret {
+			failedJobs = append(failedJobs, &api.FailedJob{
+				JobID:     expectedJob.JobID,
+				JobStatus: api.JobFailedStatus_UNAUTHORIZED,
+			})
+			continue
+		}
+
 		statusNumber, ok := api.JobStatusEnum_value[job.Status]
 		if !ok {
 			err = fmt.Errorf("%v not a valid status", job.Status)
