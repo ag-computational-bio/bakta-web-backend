@@ -22,4 +22,5 @@ type Job struct {
 	ExpiryDate  primitive.Timestamp
 	ConfString  string
 	IsDeleted   bool
+	Jobname     string
 }

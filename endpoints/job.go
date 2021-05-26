@@ -41,7 +41,7 @@ func InitBaktaAPI(dbHandler *database.Handler, scheduler *scheduler.SimpleSchedu
 
 //InitJob Initiates a bakta job and returns upload links for the fasta, prodigal training and replicon file
 func (apiHandler *BaktaJobAPI) InitJob(ctx context.Context, request *api.InitJobRequest) (*api.InitJobResponse, error) {
-	job, secret, err := apiHandler.dbHandler.CreateJob(request.RepliconTableType)
+	job, secret, err := apiHandler.dbHandler.CreateJob(request.RepliconTableType, request.GetName())
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
@@ -129,6 +129,7 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 			JobStatus: statusEnum,
 			Started:   created_time,
 			Updated:   updated_time,
+			Name:      job.Jobname,
 		}
 
 		jobsStatus = append(jobsStatus, &statusResponse)
@@ -183,6 +184,7 @@ func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.Jo
 		ResultFiles: &structData,
 		Started:     created_time,
 		Updated:     updated_time,
+		Name:        job.Jobname,
 	}
 
 	return &jobResponse, nil

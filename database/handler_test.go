@@ -12,12 +12,12 @@ func TestDatabaseHandler(t *testing.T) {
 		t.Errorf(err.Error())
 	}
 
-	job1, _, err := databaseHandler.CreateJob(api.RepliconTableType_csv)
+	job1, _, err := databaseHandler.CreateJob(api.RepliconTableType_csv, "test1")
 	if err != nil {
 		t.Errorf(err.Error())
 	}
 
-	job2, _, err := databaseHandler.CreateJob(api.RepliconTableType_csv)
+	job2, _, err := databaseHandler.CreateJob(api.RepliconTableType_csv, "test2")
 	if err != nil {
 		t.Errorf(err.Error())
 	}

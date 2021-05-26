@@ -99,7 +99,7 @@ func InitDatabaseHandler() (*Handler, error) {
 }
 
 //CreateJob Creates a new bakta job in init mode
-func (handler *Handler) CreateJob(repliconTypeAPI api.RepliconTableType) (*Job, string, error) {
+func (handler *Handler) CreateJob(repliconTypeAPI api.RepliconTableType, jobname string) (*Job, string, error) {
 	jobID := uuid.New()
 	secretID, err := randStringBytes(50)
 	if err != nil {
@@ -131,6 +131,7 @@ func (handler *Handler) CreateJob(repliconTypeAPI api.RepliconTableType) (*Job, 
 		ExpiryDate:  primitive.Timestamp{T: uint32(time.Now().AddDate(0, 0, 10).Unix())},
 		Created:     primitive.Timestamp{T: uint32(time.Now().Unix())},
 		Updated:     primitive.Timestamp{T: uint32(time.Now().Unix())},
+		Jobname:     jobname,
 	}
 
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
