@@ -30,7 +30,7 @@ type AuthHandler struct {
 func InitAuthHandler() (*AuthHandler, error) {
 	apiToken := os.Getenv("ApiToken")
 	if apiToken == "" {
-		return nil, fmt.Errorf("Invalid API Token")
+		return nil, fmt.Errorf("invalid API Token")
 	}
 
 	authHandler := AuthHandler{
