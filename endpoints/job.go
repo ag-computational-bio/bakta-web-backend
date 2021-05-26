@@ -106,6 +106,7 @@ func (apiHandler *BaktaJobAPI) StartJob(ctx context.Context, request *api.StartJ
 //GetJobsStatus Get the job status of the provided list of jobs
 func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.JobStatusRequestList) (*api.JobStatusReponseList, error) {
 	var failedJobs []*api.FailedJob
+	var jobsStatus []*api.JobStatusResponse
 
 	jobs, err := apiHandler.dbHandler.GetJobs(request.GetJobs())
 	if err != nil {
@@ -113,16 +114,14 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 		return nil, err
 	}
 
-	foundJob := make(map[string]*database.Job)
-
-	var jobsStatus []*api.JobStatusResponse
+	foundJobs := make(map[string]database.Job)
 	for _, job := range jobs {
-		foundJob[job.JobID] = &job
+		foundJobs[job.JobID] = job
 
 	}
 
-	for _, expectedJob := range jobs {
-		job, ok := foundJob[expectedJob.JobID]
+	for _, expectedJob := range request.GetJobs() {
+		job, ok := foundJobs[expectedJob.JobID]
 		if !ok {
 			failedJobs = append(failedJobs, &api.FailedJob{
 				JobID:     expectedJob.JobID,
@@ -130,10 +129,11 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 			})
 			continue
 		}
-		secretSHA := sha256.Sum256([]byte(job.Secret))
+
+		secretSHA := sha256.Sum256([]byte(expectedJob.Secret))
 		secretSHABase64 := base64.StdEncoding.EncodeToString(secretSHA[:])
 
-		if secretSHABase64 != expectedJob.Secret {
+		if secretSHABase64 != job.Secret {
 			failedJobs = append(failedJobs, &api.FailedJob{
 				JobID:     expectedJob.JobID,
 				JobStatus: api.JobFailedStatus_UNAUTHORIZED,
@@ -163,12 +163,12 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 		jobsStatus = append(jobsStatus, &statusResponse)
 	}
 
-	reponse := api.JobStatusReponseList{
+	response := api.JobStatusReponseList{
 		Jobs:       jobsStatus,
 		FailedJobs: failedJobs,
 	}
 
-	return &reponse, nil
+	return &response, nil
 }
 
 //GetJobResult Returns the results for a specific jobs
@@ -228,4 +228,12 @@ func (apiHandler *BaktaJobAPI) Version(ctx context.Context, request *api.Empty) 
 	}
 
 	return &version, nil
+}
+
+func pretty(value interface{}) {
+	empJSON, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		log.Fatalf(err.Error())
+	}
+	fmt.Printf("%s\n", string(empJSON))
 }

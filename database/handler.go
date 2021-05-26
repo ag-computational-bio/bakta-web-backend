@@ -268,19 +268,19 @@ func (handler *Handler) CheckSecret(id string, secretKey string) error {
 
 // GetJobsStatus Returns the status of a list of jobs
 func (handler *Handler) GetJobs(jobIDs []*api.JobAuth) ([]Job, error) {
+	var ids []string
 	var jobs []Job
+
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 
-	var jobRequests []bson.M
-
-	for _, jobRequest := range jobIDs {
-		jobRequests = append(jobRequests, bson.M{
-			"jobid": jobRequest.JobID,
-		})
+	for _, id := range jobIDs {
+		ids = append(ids, id.JobID)
 	}
 
 	find_query := bson.M{
-		"$or": jobRequests,
+		"jobid": bson.M{
+			"$in": ids,
+		},
 	}
 
 	csr, err := handler.Collection.Find(ctx, find_query)

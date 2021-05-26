@@ -5,8 +5,8 @@ Objectstorage:
     BaseKey: data/dev
 MongoHost: localhost
 MongoDBName: bakta
-MongoUser: bakta
-MongoUserAuthSource: bakta
+MongoUser: root
+MongoUserAuthSource: admin
 MongoPort: 27017
 K8sNamespace: "bakta-dev"
 UpdateService:
