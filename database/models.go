@@ -6,7 +6,6 @@ import (
 
 // Job The database model for a bakta job
 type Job struct {
-	_id         primitive.ObjectID
 	JobID       string
 	Secret      string
 	K8sID       string

@@ -4,11 +4,14 @@ Objectstorage:
     DBBucket: baktadbs
     BaseKey: data/dev
 Database:
-  Backend: SQLite
-  SQLite:
-    Path: /tmp
+  MongoHost: localhost
+  MongoDBName: bakta
+  MongoUser: root
+  MongoUserAuthSource: admin
+  MongoPort: 27017
 K8sNamespace: "bakta-dev"
 UpdateService:
   Name: baktawebbackend
   Port: "8081"
 Testing: true
+ExpiryTime: 345600

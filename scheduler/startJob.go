@@ -3,7 +3,6 @@ package scheduler
 import (
 	"fmt"
 	"log"
-	"os"
 
 	"github.com/spf13/viper"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -13,8 +12,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const JOBTTL = 100
-
+// createBaseJobConf
+// Create the configured bakta kubernetes job from the configration
 func createBaseJobConf(
 	id string,
 	namespace string,
@@ -25,14 +24,14 @@ func createBaseJobConf(
 
 	updateServiceName := viper.GetString("UpdateService.Name")
 	if updateServiceName == "" {
-		err := fmt.Errorf("Could not find service under config UpdateService.Name")
+		err := fmt.Errorf("could not find service under config UpdateService.Name")
 		log.Println(err)
 		return nil, err
 	}
 
 	updateServicePort := viper.GetString("UpdateService.Port")
 	if updateServicePort == "" {
-		err := fmt.Errorf("Could not find service under config UpdateService.Port")
+		err := fmt.Errorf("could not find service under config UpdateService.Port")
 		log.Println(err)
 		return nil, err
 	}
@@ -54,10 +53,7 @@ func createBaseJobConf(
 	resourceRequests[v1.ResourceMemory] = memoryQuantity
 
 	//Required to convert const to int32 ref
-	var TmpTTLValue int32
-	TmpTTLValue = JOBTTL
-
-	job_image := os.Getenv("JobContainer")
+	job_image := viper.GetString("JobContainer")
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -65,7 +61,6 @@ func createBaseJobConf(
 			Namespace: namespace,
 		},
 		Spec: batchv1.JobSpec{
-			TTLSecondsAfterFinished: &TmpTTLValue,
 			Template: v1.PodTemplateSpec{
 				Spec: v1.PodSpec{
 					RestartPolicy: "Never",

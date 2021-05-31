@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 
 	"github.com/spf13/viper"
@@ -30,15 +29,21 @@ type SimpleScheduler struct {
 	namespace       string
 }
 
-//InitSimpleScheduler Initiates a scheduler to run bakta jobs
+// InitSimpleScheduler Initiates a scheduler to run bakta jobs
+// Can run inside a cluster or outside and will pick up the required Kubernetes configuration
+// automatically
 func InitSimpleScheduler(dbHandler *database.Handler) (*SimpleScheduler, error) {
 	var config *restclient.Config
 	var err error
 
-	if os.Getenv("InCluster") != "" {
+	if viper.GetBool("InCluster") {
 		config, err = restclient.InClusterConfig()
 	} else {
 		config, err = createOutOfClusterConfig()
+	}
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
@@ -58,7 +63,7 @@ func InitSimpleScheduler(dbHandler *database.Handler) (*SimpleScheduler, error) 
 	return &scheduler, nil
 }
 
-//StartJob Starts a bakta job on Kubernetes
+//StartJob Starts a pre-configurated bakta job on Kubernetes and returns the started job configuration
 func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfig, baktaConfString string) (*batchv1.Job, error) {
 	job, err := scheduler.databaseHandler.GetJob(jobID)
 	if err != nil {
@@ -105,6 +110,7 @@ func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfi
 	return scheduledJob, nil
 }
 
+// Deletes a given bakta job
 func (scheduler *SimpleScheduler) DeleteJob(jobName string) error {
 	k8sJobName := fmt.Sprintf("%s%s", "bakta-job-", jobName)
 
@@ -125,6 +131,7 @@ func (scheduler *SimpleScheduler) DeleteJob(jobName string) error {
 	return nil
 }
 
+//createOutOfClusterConfig tries to create the required k8s configuration from well known config paths
 func createOutOfClusterConfig() (*restclient.Config, error) {
 	var kubeconfig *string
 	if home := homedir.HomeDir(); home != "" {

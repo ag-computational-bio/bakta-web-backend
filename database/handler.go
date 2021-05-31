@@ -38,7 +38,7 @@ const (
 	Prodigal UploadFileType = "prodigal"
 )
 
-const resultFileName = "results.tar.gz"
+const RESULTFILENAME = "results.tar.gz"
 const COLLECTIONNAME = "jobs"
 
 //Handler Wraps the database with convinence methods
@@ -53,12 +53,16 @@ type Handler struct {
 
 // InitDatabaseHandler Initializes the database to store the Job
 func InitDatabaseHandler() (*Handler, error) {
-	host := viper.GetString("MongoHost")
-	dbName := viper.GetString("MongoDBName")
-	dbUser := viper.GetString("MongoUser")
-	dbAuthSource := viper.GetString("MongoUserAuthSource")
-	dbPassword := getEnvOrPanic("MongoPassword")
-	dbPort := viper.GetString("MongoPort")
+	host := viper.GetString("Database.MongoHost")
+	dbName := viper.GetString("Database.MongoDBName")
+	dbUser := viper.GetString("Database.MongoUser")
+	dbAuthSource := viper.GetString("Database.MongoUserAuthSource")
+	dbPassword := os.Getenv("MongoPassword")
+	dbPort := viper.GetString("Database.MongoPort")
+
+	if dbPassword == "" {
+		return nil, fmt.Errorf("password for mongodb required, can be set with env var MongoPassword")
+	}
 
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(fmt.Sprintf("mongodb://%v:%v", host, dbPort)).SetAuth(
@@ -260,7 +264,7 @@ func (handler *Handler) CheckSecret(id string, secretKey string) error {
 	secretSHABase64 := base64.StdEncoding.EncodeToString(secretSHA[:])
 
 	if secretSHABase64 != job.Secret {
-		return errors.New("Wrong secret provided")
+		return errors.New("wrong secret provided")
 	}
 
 	return nil
@@ -341,14 +345,4 @@ func randStringBytes(n int) (string, error) {
 	data := base64.StdEncoding.EncodeToString(b)
 
 	return data, nil
-}
-
-func getEnvOrPanic(envVarName string) string {
-	value := os.Getenv(envVarName)
-
-	if value == "" {
-		log.Panicln(fmt.Sprintf("Could not find env var %v", envVarName))
-	}
-
-	return value
 }

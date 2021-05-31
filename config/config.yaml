@@ -3,14 +3,17 @@ Objectstorage:
     UserBucket: baktauserdata
     DBBucket: baktadbs
     BaseKey: data/dev
-MongoHost: localhost
-MongoDBName: bakta
-MongoUser: root
-MongoUserAuthSource: admin
-MongoPort: 27017
+Database:
+  MongoHost: localhost
+  MongoDBName: bakta
+  MongoUser: root
+  MongoUserAuthSource: admin
+  MongoPort: 27017
 K8sNamespace: "bakta-dev"
 UpdateService:
   Name: baktawebbackend
   Port: "8081"
 Testing: true
-ExpiryTime: 345600
+ExpiryTime: 34560
+JobContainer: "harbor.computational.bio.uni-giessen.de/bakta/bakta-web-job:0.1.0-beta.11"
+InCluster: true
