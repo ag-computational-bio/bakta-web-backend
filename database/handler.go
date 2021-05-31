@@ -56,7 +56,7 @@ func InitDatabaseHandler() (*Handler, error) {
 	host := viper.GetString("Database.MongoHost")
 	dbName := viper.GetString("Database.MongoDBName")
 	dbUser := viper.GetString("Database.MongoUser")
-	dbAuthSource := viper.GetString("Database.MongoUserAuthSource")
+	dbAuthSource := viper.GetString("Database.MongoAuthSource")
 	dbPassword := os.Getenv("MongoPassword")
 	dbPort := viper.GetString("Database.MongoPort")
 

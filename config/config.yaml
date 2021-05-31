@@ -7,7 +7,7 @@ Database:
   MongoHost: localhost
   MongoDBName: bakta
   MongoUser: root
-  MongoUserAuthSource: admin
+  MongoAuthSource: admin
   MongoPort: 27017
 K8sNamespace: "bakta-dev"
 UpdateService:
