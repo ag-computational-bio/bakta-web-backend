@@ -230,6 +230,10 @@ func (apiHandler *BaktaJobAPI) Version(ctx context.Context, request *api.Empty) 
 	return &version, nil
 }
 
+func (apiHandler *BaktaJobAPI) Delete(context.Context, *api.JobAuth) (*api.Empty, error) {
+	return &api.Empty{}, nil
+}
+
 func pretty(value interface{}) {
 	empJSON, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {

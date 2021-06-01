@@ -3,8 +3,8 @@ module github.com/ag-computational-bio/bakta-web-backend
 go 1.16
 
 require (
-	github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210601113916-cb9b7fd99843
-	github.com/aws/aws-sdk-go v1.38.47 // indirect
+	github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210601135617-4c8a371e2298
+	github.com/aws/aws-sdk-go v1.38.51 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.6.0
 	github.com/aws/aws-sdk-go-v2/config v1.3.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.9.0
@@ -37,6 +37,7 @@ require (
 	k8s.io/api v0.21.1
 	k8s.io/apimachinery v0.21.1
 	k8s.io/client-go v0.21.1
-	k8s.io/utils v0.0.0-20210521133846-da695404a2bc // indirect
+	k8s.io/klog/v2 v2.9.0 // indirect
+	k8s.io/utils v0.0.0-20210527160623-6fdb442a123b // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.1.1 // indirect
 )
