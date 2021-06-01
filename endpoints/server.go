@@ -7,7 +7,7 @@ import (
 	"net"
 	"os"
 
-	"github.com/ag-computational-bio/bakta-web-api-go/api"
+	api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 	"github.com/ag-computational-bio/bakta-web-backend/monitor"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 	"github.com/ag-computational-bio/bakta-web-backend/scheduler"

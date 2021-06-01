@@ -8,8 +8,7 @@ import (
 
 	"github.com/spf13/viper"
 
-	"github.com/ag-computational-bio/bakta-web-api-go/api"
-
+	api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 )
@@ -101,9 +100,9 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig, rawConfString strin
 	switch conf.DermType {
 	case api.DermType_UNKNOWN:
 		dermtype = "?"
-	case api.DermType_monoderm:
+	case api.DermType_MONODERM:
 		dermtype = "+"
-	case api.DermType_diderm:
+	case api.DermType_DIDERM:
 		dermtype = "-"
 	}
 

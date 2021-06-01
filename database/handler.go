@@ -12,7 +12,7 @@ import (
 	"path"
 	"time"
 
-	"github.com/ag-computational-bio/bakta-web-api-go/api"
+	api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 	"github.com/google/uuid"
 	"github.com/spf13/viper"
 	"go.mongodb.org/mongo-driver/bson"
@@ -117,9 +117,9 @@ func (handler *Handler) CreateJob(repliconTypeAPI api.RepliconTableType, jobname
 	repliconType := RepliconTSV
 
 	switch repliconTypeAPI {
-	case api.RepliconTableType_csv:
+	case api.RepliconTableType_CSV:
 		repliconType = RepliconCSV
-	case api.RepliconTableType_tsv:
+	case api.RepliconTableType_TSV:
 		repliconType = RepliconTSV
 	}
 

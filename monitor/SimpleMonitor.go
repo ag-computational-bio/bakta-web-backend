@@ -6,7 +6,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/ag-computational-bio/bakta-web-api-go/api"
+	api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
