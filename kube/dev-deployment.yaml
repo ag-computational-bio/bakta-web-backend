@@ -44,7 +44,14 @@ spec:
             secretKeyRef:
               key: Token
               name: authhandler
-        image: harbor.computational.bio.uni-giessen.de/bakta/bakta-web-backend:0.2.9-beta.38
+        image: harbor.computational.bio.uni-giessen.de/bakta/bakta-web-backend:latest
+        resources:
+          limits:
+            cpu: 2000m
+            memory: 2000Mi
+          requests:
+            cpu: 2000m
+            memory: 2000Mi
         imagePullPolicy: Always
         name: baktabackend
         ports:

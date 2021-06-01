@@ -104,7 +104,7 @@ func (apiHandler *BaktaJobAPI) StartJob(ctx context.Context, request *api.StartJ
 }
 
 //GetJobsStatus Get the job status of the provided list of jobs
-func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.JobStatusRequestList) (*api.JobStatusReponseList, error) {
+func (apiHandler *BaktaJobAPI) JobsStatus(ctx context.Context, request *api.JobStatusRequestList) (*api.JobStatusReponseList, error) {
 	var failedJobs []*api.FailedJob
 	var jobsStatus []*api.JobStatusResponse
 
@@ -172,7 +172,7 @@ func (apiHandler *BaktaJobAPI) GetJobsStatus(ctx context.Context, request *api.J
 }
 
 //GetJobResult Returns the results for a specific jobs
-func (apiHandler *BaktaJobAPI) GetJobResult(ctx context.Context, request *api.JobAuth) (*api.JobResultResponse, error) {
+func (apiHandler *BaktaJobAPI) JobResult(ctx context.Context, request *api.JobAuth) (*api.JobResultResponse, error) {
 	err := apiHandler.dbHandler.CheckSecret(request.GetJobID(), request.GetSecret())
 	if err != nil {
 		err = fmt.Errorf("JobID does not match secret ID")
