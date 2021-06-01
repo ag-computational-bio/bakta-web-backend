@@ -22,7 +22,6 @@ import (
 
 //BaktaJobAPI implements the job endpoints of the bakta-web-api
 type BaktaJobAPI struct {
-	api.UnimplementedBaktaJobsServer
 	dbHandler *database.Handler
 	scheduler *scheduler.SimpleScheduler
 	s3Handler *objectStorage.S3ObjectStorageHandler

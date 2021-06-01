@@ -49,6 +49,8 @@ github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210601113916-cb9b7fd99
 github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210601113916-cb9b7fd99843/go.mod h1:0q3flyPR0FyTs/HG65du8W24eCjknYvMjSLn5lNTc3E=
 github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210601135617-4c8a371e2298 h1:4xdefCZ49lZWepfWH6utTAv1naxRyssXRF++bairGEo=
 github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210601135617-4c8a371e2298/go.mod h1:0q3flyPR0FyTs/HG65du8W24eCjknYvMjSLn5lNTc3E=
+github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210601150242-66592223b39f h1:S5ijsh9X6wmAyIhq67Dju9/LtdHORwga5wnS/Q56ftc=
+github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210601150242-66592223b39f/go.mod h1:0q3flyPR0FyTs/HG65du8W24eCjknYvMjSLn5lNTc3E=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/units v0.0.0-20151022065526-2efee857e7cf/go.mod h1:ybxpYRFXyAe+OPACYpWeL0wqObRcbAqCMya13uyzqw0=
 github.com/antihax/optional v1.0.0/go.mod h1:uupD/76wgC+ih3iEmQUL+0Ugr19nfwCT1kdvxnR2qWY=
@@ -770,6 +772,8 @@ google.golang.org/genproto v0.0.0-20210207032614-bba0dbe2a9ea/go.mod h1:FWY/as6D
 google.golang.org/genproto v0.0.0-20210426193834-eac7f76ac494/go.mod h1:P3QM42oQyzQSnHPnZ/vqoCdDmzH28fzWByN9asMeM8A=
 google.golang.org/genproto v0.0.0-20210524171403-669157292da3 h1:xFyh6GBb+NO1L0xqb978I3sBPQpk6FrKO0jJGRvdj/0=
 google.golang.org/genproto v0.0.0-20210524171403-669157292da3/go.mod h1:P3QM42oQyzQSnHPnZ/vqoCdDmzH28fzWByN9asMeM8A=
+google.golang.org/genproto v0.0.0-20210601144548-a796c710e9b6 h1:zWmI+1Z2ZiKs1ceiAn4gjBd1v/d/AuWf/b+bLPe9aNw=
+google.golang.org/genproto v0.0.0-20210601144548-a796c710e9b6/go.mod h1:P3QM42oQyzQSnHPnZ/vqoCdDmzH28fzWByN9asMeM8A=
 google.golang.org/grpc v1.19.0/go.mod h1:mqu4LbDTu4XGKhr4mRzUsmM4RtVoemTSY81AxZiDr8c=
 google.golang.org/grpc v1.20.1/go.mod h1:10oTOabMzJvdu6/UiuZezV6QK5dSlG84ov/aaiqXj38=
 google.golang.org/grpc v1.21.1/go.mod h1:oYelfM1adQP15Ek0mdvEgi9Df8B9CZIaU1084ijfRaM=
