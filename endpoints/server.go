@@ -79,7 +79,8 @@ func RunGrpcJobServer() error {
 
 	updateMonitor := monitor.New(sched.GetK8sClient(), sched.GetNamespace(), dbHandler)
 
-	updateMonitor.RunFindStragglersLoop()
+	//TODO: write tests before activating
+	//updateMonitor.RunFindStragglersLoop()
 
 	jobServer := initGrpcJobServer(dbHandler, sched, authHandler, s3Handler, &updateMonitor)
 
