@@ -52,7 +52,13 @@ func RunGrpcJobServer() error {
 		log.Fatalln(err.Error())
 	}
 
-	sched, err := scheduler.InitSimpleScheduler(dbHandler)
+	clientset, err := scheduler.CreateClientSet()
+
+	if err != nil {
+		log.Fatalln(err.Error())
+	}
+
+	sched, err := scheduler.InitSimpleScheduler(dbHandler, clientset)
 	if err != nil {
 		log.Fatalln(err.Error())
 	}

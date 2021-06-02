@@ -32,7 +32,20 @@ type SimpleScheduler struct {
 // InitSimpleScheduler Initiates a scheduler to run bakta jobs
 // Can run inside a cluster or outside and will pick up the required Kubernetes configuration
 // automatically
-func InitSimpleScheduler(dbHandler *database.Handler) (*SimpleScheduler, error) {
+func InitSimpleScheduler(dbHandler *database.Handler, clientset *kubernetes.Clientset) (*SimpleScheduler, error) {
+
+	namespace := viper.GetString("K8sNamespace")
+
+	scheduler := SimpleScheduler{
+		k8sClient:       clientset,
+		databaseHandler: dbHandler,
+		namespace:       namespace,
+	}
+
+	return &scheduler, nil
+}
+
+func CreateClientSet() (*kubernetes.Clientset, error) {
 	var config *restclient.Config
 	var err error
 
@@ -47,20 +60,7 @@ func InitSimpleScheduler(dbHandler *database.Handler) (*SimpleScheduler, error) 
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
-
-	namespace := viper.GetString("K8sNamespace")
-
-	scheduler := SimpleScheduler{
-		k8sClient:       clientset,
-		databaseHandler: dbHandler,
-		namespace:       namespace,
-	}
-
-	return &scheduler, nil
+	return clientset, err
 }
 
 //StartJob Starts a pre-configurated bakta job on Kubernetes and returns the started job configuration
