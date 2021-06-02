@@ -86,7 +86,6 @@ func InitDatabaseHandler() (*Handler, error) {
 	collection := client.Database(dbName).Collection(COLLECTIONNAME)
 
 	userBucket := viper.GetString("Objectstorage.S3.UserBucket")
-	dbBucket := viper.GetString("Objectstorage.S3.DBBucket")
 	baseKey := viper.GetString("Objectstorage.S3.BaseKey")
 	expiryTime := viper.GetInt64("ExpiryTime")
 
@@ -94,7 +93,6 @@ func InitDatabaseHandler() (*Handler, error) {
 		DB:             client,
 		Collection:     collection,
 		UserDataBucket: userBucket,
-		DBBucket:       dbBucket,
 		BaseKey:        baseKey,
 		ExpiryTime:     expiryTime,
 	}
@@ -310,6 +308,28 @@ func (handler *Handler) GetJobStatus(jobID string) (*Job, error) {
 	}
 
 	return job, nil
+}
+
+func (handler *Handler) GetRunningJobs() ([]*Job, error) {
+	var runningJobs []*Job
+	running_jobs_query := bson.M{
+		"Status": api.JobStatusEnum_RUNNING.String(),
+	}
+
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+
+	csr, err := handler.Collection.Find(ctx, running_jobs_query)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	if err = csr.All(ctx, &runningJobs); err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	return runningJobs, nil
 }
 
 func (handler *Handler) createUploadStoreKey(id string, uploadFileType UploadFileType) string {
