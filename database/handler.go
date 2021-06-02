@@ -97,6 +97,12 @@ func InitDatabaseHandler() (*Handler, error) {
 		ExpiryTime:     expiryTime,
 	}
 
+	err = dbHandler.createExpiryIndex()
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
 	return &dbHandler, nil
 }
 
@@ -332,6 +338,22 @@ func (handler *Handler) GetRunningJobs() ([]*Job, error) {
 	return runningJobs, nil
 }
 
+func (handler *Handler) DeleteJob(id string) error {
+	query := bson.M{
+		"JobID": id,
+	}
+
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+
+	_, err := handler.Collection.DeleteOne(ctx, query)
+	if err != nil {
+		log.Println(err.Error())
+		return err
+	}
+
+	return nil
+}
+
 func (handler *Handler) createUploadStoreKey(id string, uploadFileType UploadFileType) string {
 	var filename string
 	switch uploadFileType {
@@ -365,4 +387,20 @@ func randStringBytes(n int) (string, error) {
 	data := base64.StdEncoding.EncodeToString(b)
 
 	return data, nil
+}
+
+func (handler *Handler) createExpiryIndex() error {
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+
+	index := bson.M{
+		"ExpiryDate": 1,
+	}
+
+	_, err := handler.Collection.Indexes().CreateOne(ctx, mongo.IndexModel{Keys: index, Options: options.Index().SetExpireAfterSeconds(0)}, nil)
+	if err != nil {
+		log.Println(err.Error())
+		return err
+	}
+
+	return nil
 }
