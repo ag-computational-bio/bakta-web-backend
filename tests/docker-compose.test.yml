@@ -6,12 +6,12 @@ services:
       AWS_SECRET_ACCESS_KEY: minioadmin
     build:
       context: .
-      dockerfile: test/Dockerfile
+      dockerfile: tests/Dockerfile
     entrypoint: >
       /bin/sh -c "
       /bin/mc config host add myminio http://minio:9000 minioadmin minioadmin;
       /bin/mc mb myminio/test-bucket;
-      cargo test
+      go test --tags=integration
       "
     depends_on:
       - minioConf
