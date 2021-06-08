@@ -13,7 +13,7 @@ import (
 )
 
 type SimpleMonitor struct {
-	k8sClient *kubernetes.Clientset
+	k8sClient kubernetes.Interface
 	namespace string
 }
 
@@ -22,7 +22,7 @@ type JobStatus struct {
 	ErrorMsg string
 }
 
-func New(k8sClient *kubernetes.Clientset, namespace string) SimpleMonitor {
+func New(k8sClient kubernetes.Interface, namespace string) SimpleMonitor {
 	return SimpleMonitor{
 		k8sClient: k8sClient,
 		namespace: namespace,

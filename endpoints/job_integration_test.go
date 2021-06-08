@@ -1,3 +1,5 @@
+// +build integration
+
 package endpoints
 
 import "testing"
