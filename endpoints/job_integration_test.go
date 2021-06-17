@@ -3,7 +3,9 @@
 package endpoints
 
 import (
+	"context"
 	"fmt"
+	proto_api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 	"github.com/ag-computational-bio/bakta-web-backend/monitor"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
@@ -47,17 +49,36 @@ func InitAPI() *BaktaJobAPI {
 
 func TestBaktaJobAPI_InitJob(t *testing.T) {
 	api := InitAPI()
+	response, err := api.InitJob(context.Background(), &proto_api.InitJobRequest{
+		RepliconTableType: 0,
+		Name:              "",
+	})
 
 }
 
 func TestBaktaJobAPI_StartJob(t *testing.T) {
+	api := InitAPI()
+	response, err := api.InitJob(context.Background(), &proto_api.InitJobRequest{
+		RepliconTableType: 0,
+		Name:              "",
+	})
 
 }
 
 func TestBaktaJobAPI_JobsStatus(t *testing.T) {
+	api := InitAPI()
+	response, err := api.InitJob(context.Background(), &proto_api.InitJobRequest{
+		RepliconTableType: 0,
+		Name:              "",
+	})
 
 }
 
 func TestBaktaJobAPI_JobResult(t *testing.T) {
+	api := InitAPI()
+	response, err := api.InitJob(context.Background(), &proto_api.InitJobRequest{
+		RepliconTableType: 0,
+		Name:              "",
+	})
 
 }
