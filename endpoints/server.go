@@ -115,7 +115,7 @@ func initGrpcJobServer(dbHandler *database.Handler, sched *scheduler.SimpleSched
 	baktaJobsEndpoints := InitBaktaAPI(dbHandler, sched, s3Handler, updateMonitor)
 
 	var opts []grpc.ServerOption
-	opts = append(opts, grpc.UnaryInterceptor(authHandler.unaryInterceptor))
+	//opts = append(opts, grpc.UnaryInterceptor(authHandler.unaryInterceptor))
 
 	grpcServer := grpc.NewServer(opts...)
 	api.RegisterBaktaJobsServer(grpcServer, baktaJobsEndpoints)

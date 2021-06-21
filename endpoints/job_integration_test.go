@@ -16,69 +16,91 @@ import (
 	"testing"
 )
 
-func InitAPI() *BaktaJobAPI {
+func InitAPI() (api *BaktaJobAPI, err error) {
 	dbHandler, err := database.InitDatabaseHandler()
 	if err != nil {
-		log.Fatalln(err.Error())
+		return nil, err
 	}
 
 	clientset, err := scheduler.CreateClientSet()
 
 	if err != nil {
-		log.Fatalln(err.Error())
+		return nil, err
 	}
 
 	sched, err := scheduler.InitSimpleScheduler(dbHandler, clientset)
 	if err != nil {
-		log.Fatalln(err.Error())
+		return nil, err
 	}
 
 	bucket := viper.GetString("Objectstorage.S3.Bucket")
 
 	s3Handler, err := objectStorage.InitS3ObjectStorageHandler(bucket)
 	if err != nil {
-		log.Println(fmt.Sprintf("failed to listen: %v", err))
-		return err
+		return nil, err
 	}
 
 	updateMonitor := monitor.New(sched.GetK8sClient(), sched.GetNamespace())
 
-	return InitBaktaAPI(dbHandler, sched, s3Handler, &updateMonitor)
+	return  InitBaktaAPI(dbHandler, sched, s3Handler, &updateMonitor), nil
 
 }
 
 func TestBaktaJobAPI_InitJob(t *testing.T) {
-	api := InitAPI()
+	api, err := InitAPI()
+	if err != nil{
+		t.Fatal(err)
+	}
 	response, err := api.InitJob(context.Background(), &proto_api.InitJobRequest{
-		RepliconTableType: 0,
-		Name:              "",
+		RepliconTableType: 1,
+		Name:              "test",
 	})
+
+	if err != nil{
+		t.Fatal(err)
+	}
+
+	if response != nil {
+		t.Fatal("nil response")
+	}
 
 }
 
 func TestBaktaJobAPI_StartJob(t *testing.T) {
-	api := InitAPI()
+	api, err  := InitAPI()
+	if err != nil{
+
+		t.Fatal(err)
+	}
 	response, err := api.InitJob(context.Background(), &proto_api.InitJobRequest{
 		RepliconTableType: 0,
 		Name:              "",
+	})
+	if err != nil{
+
+		t.Fatal(err)
+	}
+
+	api.StartJob(context.Background(), &proto_api.StartJobRequest{
+		Job:             response.Job,
+		Config:          ,
+		JobConfigString: "",
 	})
 
 }
 
 func TestBaktaJobAPI_JobsStatus(t *testing.T) {
-	api := InitAPI()
+	api, err := InitAPI()
+	if err != nil{
+		t.Fatal(err)
+	}
 	response, err := api.InitJob(context.Background(), &proto_api.InitJobRequest{
 		RepliconTableType: 0,
 		Name:              "",
 	})
+	if err != nil{
 
-}
-
-func TestBaktaJobAPI_JobResult(t *testing.T) {
-	api := InitAPI()
-	response, err := api.InitJob(context.Background(), &proto_api.InitJobRequest{
-		RepliconTableType: 0,
-		Name:              "",
-	})
+		t.Fatal(err)
+	}
 
 }
