@@ -52,7 +52,13 @@ func RunGrpcJobServer() error {
 		log.Fatalln(err.Error())
 	}
 
-	sched, err := scheduler.InitSimpleScheduler(dbHandler)
+	clientset, err := scheduler.CreateClientSet()
+
+	if err != nil {
+		log.Fatalln(err.Error())
+	}
+
+	sched, err := scheduler.InitSimpleScheduler(dbHandler, clientset)
 	if err != nil {
 		log.Fatalln(err.Error())
 	}
@@ -112,7 +118,7 @@ func initGrpcJobServer(dbHandler *database.Handler, sched *scheduler.SimpleSched
 	baktaJobsEndpoints := InitBaktaAPI(dbHandler, sched, s3Handler, updateMonitor)
 
 	var opts []grpc.ServerOption
-	opts = append(opts, grpc.UnaryInterceptor(authHandler.unaryInterceptor))
+	//opts = append(opts, grpc.UnaryInterceptor(authHandler.unaryInterceptor))
 
 	grpcServer := grpc.NewServer(opts...)
 	api.RegisterBaktaJobsServer(grpcServer, baktaJobsEndpoints)
