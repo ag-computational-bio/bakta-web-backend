@@ -86,7 +86,6 @@ func InitDatabaseHandler() (*Handler, error) {
 	collection := client.Database(dbName).Collection(COLLECTIONNAME)
 
 	userBucket := viper.GetString("Objectstorage.S3.UserBucket")
-	dbBucket := viper.GetString("Objectstorage.S3.DBBucket")
 	baseKey := viper.GetString("Objectstorage.S3.BaseKey")
 	expiryTime := viper.GetInt64("ExpiryTime")
 
@@ -94,9 +93,14 @@ func InitDatabaseHandler() (*Handler, error) {
 		DB:             client,
 		Collection:     collection,
 		UserDataBucket: userBucket,
-		DBBucket:       dbBucket,
 		BaseKey:        baseKey,
 		ExpiryTime:     expiryTime,
+	}
+
+	err = dbHandler.createExpiryIndex()
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
 	}
 
 	return &dbHandler, nil
@@ -312,6 +316,44 @@ func (handler *Handler) GetJobStatus(jobID string) (*Job, error) {
 	return job, nil
 }
 
+func (handler *Handler) GetRunningJobs() ([]*Job, error) {
+	var runningJobs []*Job
+	running_jobs_query := bson.M{
+		"Status": api.JobStatusEnum_RUNNING.String(),
+	}
+
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+
+	csr, err := handler.Collection.Find(ctx, running_jobs_query)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	if err = csr.All(ctx, &runningJobs); err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	return runningJobs, nil
+}
+
+func (handler *Handler) DeleteJob(id string) error {
+	query := bson.M{
+		"JobID": id,
+	}
+
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+
+	_, err := handler.Collection.DeleteOne(ctx, query)
+	if err != nil {
+		log.Println(err.Error())
+		return err
+	}
+
+	return nil
+}
+
 func (handler *Handler) createUploadStoreKey(id string, uploadFileType UploadFileType) string {
 	var filename string
 	switch uploadFileType {
@@ -345,4 +387,20 @@ func randStringBytes(n int) (string, error) {
 	data := base64.StdEncoding.EncodeToString(b)
 
 	return data, nil
+}
+
+func (handler *Handler) createExpiryIndex() error {
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
+
+	index := bson.M{
+		"ExpiryDate": 1,
+	}
+
+	_, err := handler.Collection.Indexes().CreateOne(ctx, mongo.IndexModel{Keys: index, Options: options.Index().SetExpireAfterSeconds(0)}, nil)
+	if err != nil {
+		log.Println(err.Error())
+		return err
+	}
+
+	return nil
 }
