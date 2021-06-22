@@ -4,15 +4,12 @@ package endpoints
 
 import (
 	"context"
-	"fmt"
 	proto_api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 	"github.com/ag-computational-bio/bakta-web-backend/monitor"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 	"github.com/ag-computational-bio/bakta-web-backend/scheduler"
 	"github.com/spf13/viper"
-	"log"
-	"net"
 	"testing"
 )
 
@@ -42,13 +39,13 @@ func InitAPI() (api *BaktaJobAPI, err error) {
 
 	updateMonitor := monitor.New(sched.GetK8sClient(), sched.GetNamespace())
 
-	return  InitBaktaAPI(dbHandler, sched, s3Handler, &updateMonitor), nil
+	return InitBaktaAPI(dbHandler, sched, s3Handler, &updateMonitor), nil
 
 }
 
 func TestBaktaJobAPI_InitJob(t *testing.T) {
 	api, err := InitAPI()
-	if err != nil{
+	if err != nil {
 		t.Fatal(err)
 	}
 	response, err := api.InitJob(context.Background(), &proto_api.InitJobRequest{
@@ -56,7 +53,7 @@ func TestBaktaJobAPI_InitJob(t *testing.T) {
 		Name:              "test",
 	})
 
-	if err != nil{
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -67,8 +64,8 @@ func TestBaktaJobAPI_InitJob(t *testing.T) {
 }
 
 func TestBaktaJobAPI_StartJob(t *testing.T) {
-	api, err  := InitAPI()
-	if err != nil{
+	api, err := InitAPI()
+	if err != nil {
 
 		t.Fatal(err)
 	}
@@ -76,14 +73,28 @@ func TestBaktaJobAPI_StartJob(t *testing.T) {
 		RepliconTableType: 0,
 		Name:              "",
 	})
-	if err != nil{
+	if err != nil {
 
 		t.Fatal(err)
 	}
 
 	api.StartJob(context.Background(), &proto_api.StartJobRequest{
-		Job:             response.Job,
-		Config:          ,
+		Job: response.Job,
+		Config: &proto_api.JobConfig{
+			HasProdigal:        false,
+			HasReplicons:       false,
+			TranslationalTable: 0,
+			CompleteGenome:     false,
+			KeepContigHeaders:  false,
+			MinContigLength:    0,
+			DermType:           0,
+			Genus:              "",
+			Species:            "",
+			Strain:             "",
+			Plasmid:            "",
+			Locus:              "",
+			LocusTag:           "",
+		},
 		JobConfigString: "",
 	})
 
@@ -91,14 +102,14 @@ func TestBaktaJobAPI_StartJob(t *testing.T) {
 
 func TestBaktaJobAPI_JobsStatus(t *testing.T) {
 	api, err := InitAPI()
-	if err != nil{
+	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := api.InitJob(context.Background(), &proto_api.InitJobRequest{
+	_, err = api.InitJob(context.Background(), &proto_api.InitJobRequest{
 		RepliconTableType: 0,
 		Name:              "",
 	})
-	if err != nil{
+	if err != nil {
 
 		t.Fatal(err)
 	}
