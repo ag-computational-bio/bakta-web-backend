@@ -48,6 +48,12 @@ func createBaseJobConf(
 		return nil, err
 	}
 
+	claimName := viper.GetString("BaktaDatabasePVCName")
+	if claimName == "" {
+		log.Println("could not find pvc name for the bakta database")
+		return nil, fmt.Errorf("could not find pvc name for the bakta database")
+	}
+
 	resourceRequests := make(map[v1.ResourceName]resource.Quantity)
 	resourceRequests[v1.ResourceCPU] = cpuQuantity
 	resourceRequests[v1.ResourceMemory] = memoryQuantity
@@ -155,7 +161,7 @@ func createBaseJobConf(
 							Name: "database",
 							VolumeSource: v1.VolumeSource{
 								PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-									ClaimName: "bakta",
+									ClaimName: claimName,
 								},
 							},
 						},
