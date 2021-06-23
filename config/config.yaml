@@ -1,19 +1,20 @@
 Objectstorage:
   S3:
-    UserBucket: baktauserdata
+    UserBucket: baktauserdata2
     DBBucket: baktadbs
     BaseKey: data/dev
 Database:
-  MongoHost: mongo.mongo-mongodb
+  MongoHost: mongo-mongodb.mongo
   MongoDBName: bakta
   MongoUser: bakta
   MongoAuthSource: bakta
   MongoPort: 27017
 K8sNamespace: "bakta"
 UpdateService:
-  Name: baktawebbackend
+  Name: bakta
   Port: "8081"
 Testing: true
 ExpiryTime: 34560
 JobContainer: "harbor.computational.bio.uni-giessen.de/bakta/bakta-web-job:0.1.0-beta.11"
 InCluster: true
+BaktaDatabasePVCName: bakta

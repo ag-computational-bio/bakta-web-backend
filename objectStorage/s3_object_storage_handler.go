@@ -6,7 +6,6 @@ import (
 	"path"
 	"reflect"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -66,9 +65,8 @@ func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) 
 func (handler *S3ObjectStorageHandler) CreateUploadLink(bucket string, key string) (string, error) {
 
 	presignedRequestURL, err := handler.PresignClient.PresignPutObject(context.Background(), &s3.PutObjectInput{
-		Bucket:  aws.String(bucket),
-		Key:     aws.String(key),
-		Expires: aws.Time(time.Now().AddDate(0, 0, 11)),
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
 	})
 
 	if err != nil {
