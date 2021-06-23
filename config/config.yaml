@@ -4,12 +4,12 @@ Objectstorage:
     DBBucket: baktadbs
     BaseKey: data/dev
 Database:
-  MongoHost: localhost
+  MongoHost: mongo.mongo-mongodb
   MongoDBName: bakta
-  MongoUser: root
-  MongoAuthSource: admin
+  MongoUser: bakta
+  MongoAuthSource: bakta
   MongoPort: 27017
-K8sNamespace: "bakta-dev"
+K8sNamespace: "bakta"
 UpdateService:
   Name: baktawebbackend
   Port: "8081"

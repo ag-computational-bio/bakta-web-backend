@@ -15,8 +15,6 @@ spec:
       app.kubernetes.io/version: v0.1.0
   template:
     metadata:
-      annotations:
-        linkerd.io/inject: enabled
       labels:
         app.kubernetes.io/name: backend
         app.kubernetes.io/part-of: bakta-web
@@ -24,11 +22,13 @@ spec:
     spec:
       containers:
       - env:
+        - name: ApiToken
+          value: foo
         - name: MongoPassword
           valueFrom:
             secretKeyRef:
               key: mongodb-password
-              name: bakta-mongo-mongodb
+              name: mongo-mongodb
         - name: AWS_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:
@@ -39,11 +39,6 @@ spec:
             secretKeyRef:
               key: SecretKey
               name: s3
-        - name: ApiToken
-          valueFrom:
-            secretKeyRef:
-              key: Token
-              name: authhandler
         image: harbor.computational.bio.uni-giessen.de/bakta/bakta-web-backend:latest
         resources:
           limits:
@@ -67,8 +62,6 @@ spec:
         - mountPath: /config
           name: config
           readOnly: true
-      serviceAccount: bakta-runner
-      serviceAccountName: bakta-runner
       volumes:
       - emptyDir: {}
         name: tmp-volume
@@ -76,3 +69,21 @@ spec:
           defaultMode: 420
           name: baktabackendconf
         name: config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bakta
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: bakta-web
+    app.kubernetes.io/version: v0.1.0
+spec:
+  selector:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: bakta-web
+    app.kubernetes.io/version: v0.1.0
+  ports:
+    - protocol: TCP
+      port: 9000
+      targetPort: 9000

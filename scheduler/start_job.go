@@ -155,7 +155,7 @@ func createBaseJobConf(
 							Name: "database",
 							VolumeSource: v1.VolumeSource{
 								PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
-									ClaimName: "database",
+									ClaimName: "bakta",
 								},
 							},
 						},
