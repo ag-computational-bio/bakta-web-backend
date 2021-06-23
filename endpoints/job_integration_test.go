@@ -37,7 +37,7 @@ func InitAPI() (api *BaktaJobAPI, err error) {
 		return nil, err
 	}
 
-	updateMonitor := monitor.New(sched.GetK8sClient(), sched.GetNamespace())
+	updateMonitor := monitor.New(sched.GetK8sClient(), sched.GetNamespace(), dbHandler)
 
 	return InitBaktaAPI(dbHandler, sched, s3Handler, &updateMonitor), nil
 
