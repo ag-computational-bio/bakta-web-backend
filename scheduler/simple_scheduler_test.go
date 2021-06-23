@@ -12,7 +12,7 @@ func TestSimpleScheduler_StartJob(t *testing.T) {
 		t.Fatal("error in simple scheduler init")
 	}
 
-	job, err := simpleScheduler.StartJob("test", &api.JobConfig{
+	_, err = simpleScheduler.StartJob("test", &api.JobConfig{
 		HasProdigal:        false,
 		HasReplicons:       false,
 		TranslationalTable: 0,
@@ -26,7 +26,7 @@ func TestSimpleScheduler_StartJob(t *testing.T) {
 		Plasmid:            "",
 		Locus:              "",
 		LocusTag:           "",
-	}, createBaktaConf())
+	}, "conf")
 	if err != nil {
 		return
 	}
