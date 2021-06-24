@@ -36,13 +36,45 @@ func createBaseJobConf(
 		return nil, err
 	}
 
-	cpuQuantity, err := resource.ParseQuantity("8")
+	cpuQuantityStringLimit := viper.GetString("Job.CPU.Limit")
+	if cpuQuantityStringLimit == "" {
+		cpuQuantityStringLimit = "4"
+	}
+
+	memoryQuantityStringLimit := viper.GetString("Job.Memory.Limit")
+	if memoryQuantityStringLimit == "" {
+		memoryQuantityStringLimit = "4000Mi"
+	}
+
+	cpuQuantityStringRequest := viper.GetString("Job.CPU.Request")
+	if cpuQuantityStringRequest == "" {
+		cpuQuantityStringRequest = "4"
+	}
+
+	memoryQuantityStringRequest := viper.GetString("Job.Memory.Request")
+	if memoryQuantityStringRequest == "" {
+		memoryQuantityStringRequest = "4000Mi"
+	}
+
+	cpuQuantityLimit, err := resource.ParseQuantity(cpuQuantityStringLimit)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
 	}
 
-	memoryQuantity, err := resource.ParseQuantity("8000Mi")
+	memoryQuantityLimit, err := resource.ParseQuantity(memoryQuantityStringLimit)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	cpuQuantityRequest, err := resource.ParseQuantity(cpuQuantityStringRequest)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	memoryQuantityRequest, err := resource.ParseQuantity(memoryQuantityStringRequest)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
@@ -55,8 +87,12 @@ func createBaseJobConf(
 	}
 
 	resourceRequests := make(map[v1.ResourceName]resource.Quantity)
-	resourceRequests[v1.ResourceCPU] = cpuQuantity
-	resourceRequests[v1.ResourceMemory] = memoryQuantity
+	resourceRequests[v1.ResourceCPU] = cpuQuantityRequest
+	resourceRequests[v1.ResourceMemory] = memoryQuantityRequest
+
+	resourceLimit := make(map[v1.ResourceName]resource.Quantity)
+	resourceLimit[v1.ResourceCPU] = cpuQuantityLimit
+	resourceLimit[v1.ResourceMemory] = memoryQuantityLimit
 
 	//Required to convert const to int32 ref
 	job_image := viper.GetString("JobContainer")
@@ -86,7 +122,7 @@ func createBaseJobConf(
 								},
 							},
 							Resources: v1.ResourceRequirements{
-								Limits:   resourceRequests,
+								Limits:   resourceLimit,
 								Requests: resourceRequests,
 							},
 							VolumeMounts: []v1.VolumeMount{

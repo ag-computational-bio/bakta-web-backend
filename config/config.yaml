@@ -17,4 +17,12 @@ Testing: true
 ExpiryTime: 34560
 JobContainer: "harbor.computational.bio.uni-giessen.de/bakta/bakta-web-job:0.1.0-beta.11"
 InCluster: true
-BaktaDatabasePVCName: bakta
+BaktaDatabasePVCName: bakta-web
+Job:
+  CPU:
+    Limit: 4
+    Request: 4
+  Memory:
+    Limit: "4000Mi"
+    Request: "4000Mi"
+  
