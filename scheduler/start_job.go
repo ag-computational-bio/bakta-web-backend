@@ -110,17 +110,6 @@ func createBaseJobConf(
 						{
 							Name:  "bakta-job",
 							Image: job_image,
-							Lifecycle: &v1.Lifecycle{
-								PostStart: &v1.Handler{
-									Exec: &v1.ExecAction{
-										Command: []string{
-											"/bin/bash",
-											"-c",
-											"/bin/DataStager update",
-										},
-									},
-								},
-							},
 							Resources: v1.ResourceRequirements{
 								Limits:   resourceLimit,
 								Requests: resourceRequests,
