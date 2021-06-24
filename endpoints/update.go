@@ -22,6 +22,8 @@ type BaktaUpdateAPI struct {
 //UpdateStatus Updates the status of a running job
 func (apiHandler *BaktaUpdateAPI) UpdateStatus(ctx context.Context, request *api.UpdateStatusRequest) (*api.Empty, error) {
 	go func() {
+		log.Println("Received job update")
+
 		job, err := apiHandler.dbHandler.GetJob(request.GetJobID())
 		if err != nil {
 			log.Println(err.Error())
@@ -40,7 +42,10 @@ func (apiHandler *BaktaUpdateAPI) UpdateStatus(ctx context.Context, request *api
 
 		isDeleted := false
 
+		repeats := 0
+
 		for {
+			repeats = repeats + 1
 			status, err = apiHandler.updateMonitor.GetJobStatus(job.JobID)
 			if err != nil {
 				log.Println(err.Error())
@@ -48,6 +53,10 @@ func (apiHandler *BaktaUpdateAPI) UpdateStatus(ctx context.Context, request *api
 			}
 
 			if status.Status != api.JobStatusEnum_RUNNING {
+				break
+			}
+
+			if repeats > 15 {
 				break
 			}
 
