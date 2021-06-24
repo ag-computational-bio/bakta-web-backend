@@ -181,7 +181,7 @@ func (handler *Handler) UpdateK8s(id string, k8s string, conf string) error {
 	update := bson.M{
 		"$set": bson.M{
 			"k8sid":  k8s,
-			"status": api.JobStatusEnum_RUNNING.String(),
+			"status": api.JobStatusEnum_INIT.String(),
 		},
 	}
 
