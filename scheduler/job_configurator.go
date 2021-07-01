@@ -37,7 +37,7 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig, rawConfString strin
 	var confStringElements []string
 
 	confStringElements = append(confStringElements, "--tmp-dir /cache")
-	confStringElements = append(confStringElements, "--threads 8")
+	confStringElements = append(confStringElements, "--threads 12")
 	confStringElements = append(confStringElements, "--prefix result")
 	confStringElements = append(confStringElements, "-o /output")
 
