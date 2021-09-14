@@ -64,7 +64,7 @@ func CreateClientSet() (*kubernetes.Clientset, error) {
 }
 
 //StartJob Starts a pre-configurated bakta job on Kubernetes and returns the started job configuration
-func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfig, baktaConfString string) (*batchv1.Job, error) {
+func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfig) (*batchv1.Job, error) {
 	job, err := scheduler.databaseHandler.GetJob(jobID)
 	if err != nil {
 		log.Println(err.Error())
@@ -77,7 +77,7 @@ func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfi
 		return nil, err
 	}
 
-	baktaConf, err := createBaktaConf(job, jobConfig, baktaConfString)
+	baktaConf, err := createBaktaConf(job, jobConfig)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err

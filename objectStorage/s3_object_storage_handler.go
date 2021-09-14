@@ -28,6 +28,7 @@ type UploadLinks struct {
 	EMBL            string `bakta:"embl"`
 	TSVHypothetical string `bakta:"hypotheticals.tsv"`
 	FAAHypothetical string `bakta:"hypotheticals.faa"`
+	FFN             string `bakta:"ffn"`
 }
 
 func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) {
