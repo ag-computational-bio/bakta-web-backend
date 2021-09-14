@@ -95,7 +95,6 @@ func TestBaktaJobAPI_StartJob(t *testing.T) {
 			Locus:              "",
 			LocusTag:           "",
 		},
-		JobConfigString: "",
 	})
 
 }
