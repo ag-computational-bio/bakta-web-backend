@@ -26,7 +26,7 @@ func TestSimpleScheduler_StartJob(t *testing.T) {
 		Plasmid:            "",
 		Locus:              "",
 		LocusTag:           "",
-	}, "conf")
+	})
 	if err != nil {
 		return
 	}
