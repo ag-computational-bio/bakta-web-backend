@@ -87,13 +87,13 @@ func (apiHandler *BaktaJobAPI) StartJob(ctx context.Context, request *api.StartJ
 		return nil, err
 	}
 
-	k8sJob, err := apiHandler.scheduler.StartJob(request.Job.GetJobID(), request.GetConfig(), request.GetJobConfigString())
+	k8sJob, err := apiHandler.scheduler.StartJob(request.Job.GetJobID(), request.GetConfig())
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
 	}
 
-	err = apiHandler.dbHandler.UpdateK8s(request.Job.GetJobID(), string(k8sJob.GetUID()), request.GetJobConfigString())
+	err = apiHandler.dbHandler.UpdateK8s(request.Job.GetJobID(), string(k8sJob.GetUID()))
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err

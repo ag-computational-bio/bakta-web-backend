@@ -171,7 +171,7 @@ func (handler *Handler) CreateJob(repliconTypeAPI api.RepliconTableType, jobname
 }
 
 //UpdateK8s Updates a job with its k8s id
-func (handler *Handler) UpdateK8s(id string, k8s string, conf string) error {
+func (handler *Handler) UpdateK8s(id string, k8s string) error {
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 
 	update_filter := bson.M{
