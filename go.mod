@@ -3,7 +3,7 @@ module github.com/ag-computational-bio/bakta-web-backend
 go 1.16
 
 require (
-	github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210601150242-66592223b39f
+	github.com/ag-computational-bio/bakta-web-api-go v0.0.0-20210914120219-1ecbdd368991
 	github.com/aws/aws-sdk-go v1.38.66 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.6.0
 	github.com/aws/aws-sdk-go-v2/config v1.3.0

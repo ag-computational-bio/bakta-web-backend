@@ -95,7 +95,7 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
 		confStringElements = append(confStringElements, fmt.Sprintf("--translation-table %v", conf.TranslationalTable))
 	}
 
-	if conf.HasCompliance {
+	if conf.HasCompliant {
 		confStringElements = append(confStringElements, "--compliant")
 	}
 
