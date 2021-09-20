@@ -37,7 +37,7 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
 	var confStringElements []string
 
 	confStringElements = append(confStringElements, "--tmp-dir /cache")
-	confStringElements = append(confStringElements, "--threads 8")
+	confStringElements = append(confStringElements, "--threads 12")
 	confStringElements = append(confStringElements, "--prefix result")
 	confStringElements = append(confStringElements, "-o /output")
 
@@ -97,6 +97,10 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
 
 	if conf.TranslationalTable == 4 || conf.TranslationalTable == 11 {
 		confStringElements = append(confStringElements, fmt.Sprintf("--translation-table %v", conf.TranslationalTable))
+	}
+
+	if conf.HasCompliant {
+		confStringElements = append(confStringElements, "--compliant")
 	}
 
 	dermtype := "?"
