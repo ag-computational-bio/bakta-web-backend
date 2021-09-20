@@ -33,7 +33,7 @@ func createDownloadConf(job *database.Job, prodigaltf bool, replicontsv bool) (s
 }
 
 //createBaktaConf Creates a bakta config string based on the configuration and job settings provided
-func createBaktaConf(job *database.Job, conf *api.JobConfig, rawConfString string) (string, error) {
+func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
 	var confStringElements []string
 
 	confStringElements = append(confStringElements, "--tmp-dir /cache")
@@ -89,6 +89,10 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig, rawConfString strin
 
 	if conf.Plasmid != "" {
 		confStringElements = append(confStringElements, fmt.Sprintf("--plasmid %v", conf.Plasmid))
+	}
+
+	if conf.HasCompliant {
+		confStringElements = append(confStringElements, fmt.Sprintf("--compliant"))
 	}
 
 	if conf.TranslationalTable == 4 || conf.TranslationalTable == 11 {
