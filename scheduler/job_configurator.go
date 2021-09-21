@@ -91,16 +91,12 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
 		confStringElements = append(confStringElements, fmt.Sprintf("--plasmid %v", conf.Plasmid))
 	}
 
-	if conf.HasCompliant {
+	if conf.Compliant {
 		confStringElements = append(confStringElements, fmt.Sprintf("--compliant"))
 	}
 
 	if conf.TranslationalTable == 4 || conf.TranslationalTable == 11 {
 		confStringElements = append(confStringElements, fmt.Sprintf("--translation-table %v", conf.TranslationalTable))
-	}
-
-	if conf.HasCompliant {
-		confStringElements = append(confStringElements, "--compliant")
 	}
 
 	dermtype := "?"
