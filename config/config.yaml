@@ -14,6 +14,9 @@ UpdateService:
   Name: bakta
   Port: "8081"
 Testing: true
+Version:
+  Tool: "1.1.1"
+  DB: "3.0.0"
 ExpiryTime: 34560
 JobContainer: "harbor.computational.bio.uni-giessen.de/bakta/bakta-web-job:0.1.0-beta.11"
 InCluster: true

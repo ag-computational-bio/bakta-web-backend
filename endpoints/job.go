@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/spf13/viper"
 	"log"
 	"os"
 	"time"
@@ -221,8 +222,8 @@ func (apiHandler *BaktaJobAPI) Version(ctx context.Context, request *api.Empty) 
 	shaVersion := os.Getenv("GITHUB_SHA")
 
 	version := api.VersionResponse{
-		ToolVersion:    "1.1.1",
-		DbVersion:      "3.0.0",
+		ToolVersion:    viper.GetString("Version.Tool"),
+		DbVersion:      viper.GetString("Version.DB"),
 		BackendVersion: shaVersion,
 	}
 
