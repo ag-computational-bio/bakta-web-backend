@@ -13,6 +13,10 @@ import (
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 )
 
+func quote(s string) string {
+	return fmt.Sprintf("\"%v\"", strings.ReplaceAll(s, "\"", "\\\""))
+}
+
 //createDownloadConf Creates the configuration string for the download part of a bakta job
 //The job has to be provided along with two bools that indicate if a prodigal training file and/or a replicon file are present
 func createDownloadConf(job *database.Job, prodigaltf bool, replicontsv bool) (string, error) {
@@ -64,11 +68,11 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
 	}
 
 	if conf.Locus != "" {
-		confStringElements = append(confStringElements, fmt.Sprintf("--locus %v", conf.Locus))
+		confStringElements = append(confStringElements, fmt.Sprintf("--locus %v", quote(conf.Locus)))
 	}
 
 	if conf.LocusTag != "" {
-		confStringElements = append(confStringElements, fmt.Sprintf("--locus-tag %v", conf.LocusTag))
+		confStringElements = append(confStringElements, fmt.Sprintf("--locus-tag %v", quote(conf.LocusTag)))
 	}
 
 	if conf.KeepContigHeaders {
@@ -76,19 +80,19 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
 	}
 
 	if conf.Genus != "" {
-		confStringElements = append(confStringElements, fmt.Sprintf("--genus %v", conf.Genus))
+		confStringElements = append(confStringElements, fmt.Sprintf("--genus %v", quote(conf.Genus)))
 	}
 
 	if conf.Species != "" {
-		confStringElements = append(confStringElements, fmt.Sprintf("--species %v", conf.Species))
+		confStringElements = append(confStringElements, fmt.Sprintf("--species %v", quote(conf.Species)))
 	}
 
 	if conf.Strain != "" {
-		confStringElements = append(confStringElements, fmt.Sprintf("--strain %v", conf.Strain))
+		confStringElements = append(confStringElements, fmt.Sprintf("--strain %v", quote(conf.Strain)))
 	}
 
 	if conf.Plasmid != "" {
-		confStringElements = append(confStringElements, fmt.Sprintf("--plasmid %v", conf.Plasmid))
+		confStringElements = append(confStringElements, fmt.Sprintf("--plasmid %v", quote(conf.Plasmid)))
 	}
 
 	if conf.Compliant {
