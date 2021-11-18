@@ -20,6 +20,7 @@ func createBaseJobConf(
 	downloaderConf string,
 	baktaConf string,
 	uploaderConf string,
+	uploaderErrorConf string,
 	secret string) (*batchv1.Job, error) {
 
 	updateServiceName := viper.GetString("UpdateService.Name")
@@ -136,6 +137,10 @@ func createBaseJobConf(
 								{
 									Name:  "UploaderEnvConfig",
 									Value: uploaderConf,
+								},
+								{
+									Name:  "UploaderErrorEnvConfig",
+									Value: uploaderErrorConf,
 								},
 								{
 									Name:  "JobID",

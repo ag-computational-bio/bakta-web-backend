@@ -6,10 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/spf13/viper"
 	"log"
 	"os"
 	"time"
+
+	"github.com/spf13/viper"
 
 	api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 	"github.com/ag-computational-bio/bakta-web-backend/monitor"
@@ -160,6 +161,10 @@ func (apiHandler *BaktaJobAPI) JobsStatus(ctx context.Context, request *api.JobS
 			Name:      job.Jobname,
 		}
 
+		if statusEnum == api.JobStatusEnum_ERROR {
+
+		}
+
 		jobsStatus = append(jobsStatus, &statusResponse)
 	}
 
@@ -185,13 +190,32 @@ func (apiHandler *BaktaJobAPI) JobResult(ctx context.Context, request *api.JobAu
 		return nil, fmt.Errorf("could not read job result for job: %v", request.GetJobID())
 	}
 
-	results, err := apiHandler.s3Handler.CreateDownloadLinks(job.DataBucket, job.ResultKey, "result")
-	if err != nil {
-		log.Println(err.Error())
-		return nil, fmt.Errorf("could not create download url for job: %v", request.GetJobID())
+	statusNumber, ok := api.JobStatusEnum_value[job.Status]
+	if !ok {
+		err = fmt.Errorf("%v not a valid status", job.Status)
+		return nil, err
 	}
 
-	intermediateByteData, err := json.Marshal(results)
+	statusEnum := api.JobStatusEnum(statusNumber)
+
+	var resultIface interface{}
+
+	if statusEnum == api.JobStatusEnum_ERROR {
+		resultIface, err = apiHandler.s3Handler.CreateLogDownloadLink(job.DataBucket, job.ResultKey)
+		if err != nil {
+			log.Println(err.Error())
+			return nil, fmt.Errorf("could not create download url for job: %v", request.GetJobID())
+		}
+
+	} else {
+		resultIface, err = apiHandler.s3Handler.CreateDownloadLinks(job.DataBucket, job.ResultKey, "result")
+		if err != nil {
+			log.Println(err.Error())
+			return nil, fmt.Errorf("could not create download url for job: %v", request.GetJobID())
+		}
+	}
+
+	intermediateByteData, err := json.Marshal(resultIface)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err

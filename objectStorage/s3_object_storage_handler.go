@@ -31,6 +31,10 @@ type UploadLinks struct {
 	FFN             string `bakta:"ffn"`
 }
 
+type LogLink struct {
+	Log string `bakta:"log"`
+}
+
 func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) {
 	endpoint := "https://s3.computational.bio.uni-giessen.de"
 
@@ -105,4 +109,26 @@ func (handler *S3ObjectStorageHandler) CreateDownloadLinks(bucket string, key st
 	}
 
 	return &uploadLinks, nil
+}
+
+func (handler *S3ObjectStorageHandler) CreateLogDownloadLink(bucket string, key string) (*LogLink, error) {
+	fullFilename := "result.log"
+
+	keyWithFilename := path.Join(key, fullFilename)
+
+	presignedRequestURL, err := handler.PresignClient.PresignGetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(keyWithFilename),
+	})
+
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	loglink := &LogLink{
+		Log: presignedRequestURL.URL,
+	}
+
+	return loglink, nil
 }

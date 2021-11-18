@@ -143,3 +143,12 @@ func createUploadConf(job *database.Job) (string, error) {
 
 	return confString, nil
 }
+
+//createUploadConf Creates the upload config for a job with an error
+func createUploadErrorConf(job *database.Job) (string, error) {
+	logFile := "/output/result.log"
+
+	confString := fmt.Sprintf("upload -e s3.computational.bio.uni-giessen.de -k %v -b %v -f %v", job.ResultKey, job.DataBucket, logFile)
+
+	return confString, nil
+}
