@@ -101,7 +101,7 @@ func (scheduler *SimpleScheduler) StartJob(jobID string, jobConfig *api.JobConfi
 		return nil, err
 	}
 
-	err = scheduler.databaseHandler.UpdateK8s(jobID, string(scheduledJob.UID))
+	err = scheduler.databaseHandler.UpdateK8s(jobID, string(scheduledJob.UID), nil)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
