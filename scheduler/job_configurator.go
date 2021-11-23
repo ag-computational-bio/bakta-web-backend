@@ -37,6 +37,8 @@ func createDownloadConf(job *database.Job, prodigaltf bool, replicontsv bool) (s
 func createBaktaConf(job *database.Job, conf *api.JobConfig) ([]byte, error) {
 	var confStringElements []string
 
+	confStringElements = append(confStringElements, "bakta")
+
 	confStringElements = append(confStringElements, "--tmp-dir", "/cache")
 	confStringElements = append(confStringElements, "--threads", "12")
 	confStringElements = append(confStringElements, "--prefix", "result")
