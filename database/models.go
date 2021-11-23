@@ -2,6 +2,7 @@ package database
 
 import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"k8s.io/client-go/tools/clientcmd/api"
 )
 
 // Job The database model for a bakta job
@@ -22,4 +23,5 @@ type Job struct {
 	ConfString  string
 	IsDeleted   bool
 	Jobname     string
+	Config      *api.Config
 }

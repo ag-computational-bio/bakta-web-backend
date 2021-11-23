@@ -171,7 +171,7 @@ func (handler *Handler) CreateJob(repliconTypeAPI api.RepliconTableType, jobname
 }
 
 //UpdateK8s Updates a job with its k8s id
-func (handler *Handler) UpdateK8s(id string, k8s string) error {
+func (handler *Handler) UpdateK8s(id string, k8s string, config *api.JobConfig) error {
 	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 
 	update_filter := bson.M{
@@ -183,6 +183,16 @@ func (handler *Handler) UpdateK8s(id string, k8s string) error {
 			"k8sid":  k8s,
 			"status": api.JobStatusEnum_INIT.String(),
 		},
+	}
+
+	if config != nil {
+		update = bson.M{
+			"$set": bson.M{
+				"k8sid":  k8s,
+				"status": api.JobStatusEnum_INIT.String(),
+				"conf":   config,
+			},
+		}
 	}
 
 	result, err := handler.Collection.UpdateOne(ctx, update_filter, update)
