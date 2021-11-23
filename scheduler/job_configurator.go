@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"reflect"
@@ -12,10 +13,6 @@ import (
 	"github.com/ag-computational-bio/bakta-web-backend/database"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 )
-
-func quote(s string) string {
-	return fmt.Sprintf("\"%v\"", strings.ReplaceAll(s, "\"", "\\\""))
-}
 
 //createDownloadConf Creates the configuration string for the download part of a bakta job
 //The job has to be provided along with two bools that indicate if a prodigal training file and/or a replicon file are present
@@ -37,30 +34,30 @@ func createDownloadConf(job *database.Job, prodigaltf bool, replicontsv bool) (s
 }
 
 //createBaktaConf Creates a bakta config string based on the configuration and job settings provided
-func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
+func createBaktaConf(job *database.Job, conf *api.JobConfig) ([]byte, error) {
 	var confStringElements []string
 
-	confStringElements = append(confStringElements, "--tmp-dir /cache")
-	confStringElements = append(confStringElements, "--threads 12")
-	confStringElements = append(confStringElements, "--prefix result")
-	confStringElements = append(confStringElements, "-o /output")
+	confStringElements = append(confStringElements, "--tmp-dir", "/cache")
+	confStringElements = append(confStringElements, "--threads", "12")
+	confStringElements = append(confStringElements, "--prefix", "result")
+	confStringElements = append(confStringElements, "-o", "/output")
 
 	if conf.HasProdigal {
-		confStringElements = append(confStringElements, "--prodigal-tf /data/prodigaltraining.tf")
+		confStringElements = append(confStringElements, "--prodigal-tf", "/data/prodigaltraining.tf")
 	}
 
 	if conf.HasReplicons {
 		if strings.HasSuffix(job.ProdigalKey, "csv") {
-			confStringElements = append(confStringElements, "--replicons /data/replicons.csv")
+			confStringElements = append(confStringElements, "--replicons", "/data/replicons.csv")
 		} else if strings.HasSuffix(job.ProdigalKey, "csv") {
-			confStringElements = append(confStringElements, "--replicons /data/replicons.tsv")
+			confStringElements = append(confStringElements, "--replicons", "/data/replicons.tsv")
 		}
 	}
 
 	if viper.IsSet("Testing") || viper.IsSet("Debug") {
-		confStringElements = append(confStringElements, "--db /db/db-mock")
+		confStringElements = append(confStringElements, "--db", "/db/db-mock")
 	} else {
-		confStringElements = append(confStringElements, "--db /db/db")
+		confStringElements = append(confStringElements, "--db", "/db/db")
 	}
 
 	if conf.CompleteGenome {
@@ -68,11 +65,11 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
 	}
 
 	if conf.Locus != "" {
-		confStringElements = append(confStringElements, fmt.Sprintf("--locus %v", quote(conf.Locus)))
+		confStringElements = append(confStringElements, "--locus", fmt.Sprintf("%v", conf.Locus))
 	}
 
 	if conf.LocusTag != "" {
-		confStringElements = append(confStringElements, fmt.Sprintf("--locus-tag %v", quote(conf.LocusTag)))
+		confStringElements = append(confStringElements, "--locus-tag", fmt.Sprintf("%v", conf.LocusTag))
 	}
 
 	if conf.KeepContigHeaders {
@@ -80,19 +77,19 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
 	}
 
 	if conf.Genus != "" {
-		confStringElements = append(confStringElements, fmt.Sprintf("--genus %v", quote(conf.Genus)))
+		confStringElements = append(confStringElements, "--genus", fmt.Sprintf("%v", conf.Genus))
 	}
 
 	if conf.Species != "" {
-		confStringElements = append(confStringElements, fmt.Sprintf("--species %v", quote(conf.Species)))
+		confStringElements = append(confStringElements, "--species", fmt.Sprintf("%v", conf.Species))
 	}
 
 	if conf.Strain != "" {
-		confStringElements = append(confStringElements, fmt.Sprintf("--strain %v", quote(conf.Strain)))
+		confStringElements = append(confStringElements, "--strain", fmt.Sprintf("%v", conf.Strain))
 	}
 
 	if conf.Plasmid != "" {
-		confStringElements = append(confStringElements, fmt.Sprintf("--plasmid %v", quote(conf.Plasmid)))
+		confStringElements = append(confStringElements, "--plasmid", fmt.Sprintf("%v", conf.Plasmid))
 	}
 
 	if conf.Compliant {
@@ -100,7 +97,7 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
 	}
 
 	if conf.TranslationalTable == 4 || conf.TranslationalTable == 11 {
-		confStringElements = append(confStringElements, fmt.Sprintf("--translation-table %v", conf.TranslationalTable))
+		confStringElements = append(confStringElements, "--translation-table", fmt.Sprintf("%v", conf.TranslationalTable))
 	}
 
 	dermtype := "?"
@@ -114,14 +111,16 @@ func createBaktaConf(job *database.Job, conf *api.JobConfig) (string, error) {
 		dermtype = "-"
 	}
 
-	confStringElements = append(confStringElements, fmt.Sprintf("--gram %s", dermtype))
+	confStringElements = append(confStringElements, "--gram", fmt.Sprintf("%s", dermtype))
 
-	confString := strings.Join(confStringElements, " ")
+	//confString := strings.Join(confStringElements, " ")
 
 	_, fastaFileName := path.Split(job.FastaKey)
-	confString = fmt.Sprintf(confString+" /data/%v", fastaFileName)
+	//confString = fmt.Sprintf(confString+" /data/%v", fastaFileName)
 
-	return confString, nil
+	confStringElements = append(confStringElements, fmt.Sprintf("/data/%v", fastaFileName))
+
+	return json.Marshal(confStringElements)
 }
 
 //createUploadConf Creates the configuration string for a bakta job
