@@ -90,7 +90,7 @@ func (apiHandler *BaktaJobAPI) JobsStatus(ctx context.Context, request *api.JobS
 
 		jobsStatus = append(jobsStatus, &api.JobStatusResponse{
 			JobID:     wfstatus.JobId,
-			JobStatus: api.JobStatusEnum_INIT,
+			JobStatus: apiHandler.statusHandler.ParseStatus(wfstatus.Status),
 			Started:   timestamppb.New(wfstatus.Started),
 			Updated:   timestamppb.New(wfstatus.Updated),
 			Name:      wfstatus.Name,

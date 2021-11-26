@@ -122,6 +122,27 @@ func (status *StatusHandler) GetJob(secret, jobID string) (wfstatus *WorkflowSta
 	}
 }
 
+func (status *StatusHandler) ParseStatus(statusstring string) api.JobStatusEnum {
+
+	switch statusstring {
+	case "Init":
+		return api.JobStatusEnum_INIT
+	case "Pending":
+		return api.JobStatusEnum_INIT
+	case "Running":
+		return api.JobStatusEnum_RUNNING
+	case "Succeeded":
+		return api.JobStatusEnum_SUCCESSFULL
+	case "Failed":
+		return api.JobStatusEnum_ERROR
+	case "Error":
+		return api.JobStatusEnum_ERROR
+	default:
+		return api.JobStatusEnum_ERROR
+	}
+
+}
+
 func randStringBytes(n int) (string, error) {
 	b := make([]byte, n)
 	_, err := rand.Read(b)
