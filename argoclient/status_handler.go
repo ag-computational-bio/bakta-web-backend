@@ -87,7 +87,7 @@ func (status *StatusHandler) InitJob(name string) (jobID, secret string, err err
 	}
 
 	secretSHA := sha256.Sum256([]byte(secretID))
-	secretSHABase64 := base64.StdEncoding.EncodeToString(secretSHA[:])
+	secretSHABase64 := base64.RawURLEncoding.EncodeToString(secretSHA[:])
 
 	wfStatus := WorkflowStatus{
 		Name:    name,
