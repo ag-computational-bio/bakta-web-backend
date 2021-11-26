@@ -2,66 +2,53 @@ package endpoints
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/spf13/viper"
-	"log"
-	"os"
-	"time"
-
 	api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
-	"github.com/ag-computational-bio/bakta-web-backend/monitor"
+	"github.com/ag-computational-bio/bakta-web-backend/argoclient"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
+	"github.com/spf13/viper"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
-
-	"github.com/ag-computational-bio/bakta-web-backend/database"
-	"github.com/ag-computational-bio/bakta-web-backend/scheduler"
+	"log"
+	"os"
 )
 
 //BaktaJobAPI implements the job endpoints of the bakta-web-api
 type BaktaJobAPI struct {
-	dbHandler *database.Handler
-	scheduler *scheduler.SimpleScheduler
-	s3Handler *objectStorage.S3ObjectStorageHandler
-	monitor   *monitor.SimpleMonitor
+	s3Handler     *objectStorage.S3ObjectStorageHandler
+	statusHandler *argoclient.StatusHandler
 }
 
 //InitBaktaAPI Initiates the Bakta API handler
-func InitBaktaAPI(dbHandler *database.Handler, scheduler *scheduler.SimpleScheduler, s3Handler *objectStorage.S3ObjectStorageHandler, monitor *monitor.SimpleMonitor) *BaktaJobAPI {
-	api := &BaktaJobAPI{
-		dbHandler: dbHandler,
-		scheduler: scheduler,
-		s3Handler: s3Handler,
-		monitor:   monitor,
+func InitBaktaAPI(statusHandler *argoclient.StatusHandler, s3Handler *objectStorage.S3ObjectStorageHandler) *BaktaJobAPI {
+	return &BaktaJobAPI{
+		statusHandler: statusHandler,
+		s3Handler:     s3Handler,
 	}
-
-	return api
 }
 
 //InitJob Initiates a bakta job and returns upload links for the fasta, prodigal training and replicon file
 func (apiHandler *BaktaJobAPI) InitJob(ctx context.Context, request *api.InitJobRequest) (*api.InitJobResponse, error) {
-	job, secret, err := apiHandler.dbHandler.CreateJob(request.RepliconTableType, request.GetName())
+	jobID, secret, err := apiHandler.statusHandler.InitJob(request.GetName())
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
 	}
 
-	fastaUploadKey, err := apiHandler.s3Handler.CreateUploadLink(job.DataBucket, job.FastaKey)
+	fastaUploadKey, err := apiHandler.s3Handler.CreateUploadLink(apiHandler.s3Handler.CreateKeyPath(jobID, "inputs", "fastadata.fasta"))
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
 	}
 
-	prodigalUploadKey, err := apiHandler.s3Handler.CreateUploadLink(job.DataBucket, job.ProdigalKey)
+	prodigalUploadKey, err := apiHandler.s3Handler.CreateUploadLink(apiHandler.s3Handler.CreateKeyPath(jobID, "inputs", "prodigal.tf"))
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
 	}
 
-	repliconsUploadKey, err := apiHandler.s3Handler.CreateUploadLink(job.DataBucket, job.RepliconKey)
+	repliconsUploadKey, err := apiHandler.s3Handler.CreateUploadLink(apiHandler.s3Handler.CreateKeyPath(jobID, "inputs", "replicons.tsv"))
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
@@ -69,7 +56,7 @@ func (apiHandler *BaktaJobAPI) InitJob(ctx context.Context, request *api.InitJob
 
 	initJobResp := api.InitJobResponse{
 		Job: &api.JobAuth{
-			JobID:  job.JobID,
+			JobID:  jobID,
 			Secret: secret,
 		},
 		UploadLinkFasta:     fastaUploadKey,
@@ -82,85 +69,32 @@ func (apiHandler *BaktaJobAPI) InitJob(ctx context.Context, request *api.InitJob
 
 //StartJob Starts a job based on the provided configuration
 func (apiHandler *BaktaJobAPI) StartJob(ctx context.Context, request *api.StartJobRequest) (*api.Empty, error) {
-	err := apiHandler.dbHandler.CheckSecret(request.GetJob().GetJobID(), request.GetJob().GetSecret())
+	err := apiHandler.statusHandler.StartJob(request.Job.JobID, request.Job.Secret, request.GetConfig())
 	if err != nil {
-		err = fmt.Errorf("JobID does not match secret ID")
 		return nil, err
 	}
-
-	k8sJob, err := apiHandler.scheduler.StartJob(request.Job.GetJobID(), request.GetConfig())
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
-
-	err = apiHandler.dbHandler.UpdateK8s(request.Job.GetJobID(), string(k8sJob.GetUID()))
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
-
 	return &api.Empty{}, nil
 }
 
-//GetJobsStatus Get the job status of the provided list of jobs
+//JobsStatus Get the job status of the provided list of jobs
 func (apiHandler *BaktaJobAPI) JobsStatus(ctx context.Context, request *api.JobStatusRequestList) (*api.JobStatusReponseList, error) {
 	var failedJobs []*api.FailedJob
 	var jobsStatus []*api.JobStatusResponse
 
-	jobs, err := apiHandler.dbHandler.GetJobs(request.GetJobs())
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
+	for _, jobS := range request.GetJobs() {
 
-	foundJobs := make(map[string]database.Job)
-	for _, job := range jobs {
-		foundJobs[job.JobID] = job
-
-	}
-
-	for _, expectedJob := range request.GetJobs() {
-		job, ok := foundJobs[expectedJob.JobID]
-		if !ok {
-			failedJobs = append(failedJobs, &api.FailedJob{
-				JobID:     expectedJob.JobID,
-				JobStatus: api.JobFailedStatus_NOT_FOUND,
-			})
+		wfstatus, err := apiHandler.statusHandler.GetJob(jobS.GetJobID(), jobS.GetSecret())
+		if err != nil {
 			continue
 		}
 
-		secretSHA := sha256.Sum256([]byte(expectedJob.Secret))
-		secretSHABase64 := base64.StdEncoding.EncodeToString(secretSHA[:])
-
-		if secretSHABase64 != job.Secret {
-			failedJobs = append(failedJobs, &api.FailedJob{
-				JobID:     expectedJob.JobID,
-				JobStatus: api.JobFailedStatus_UNAUTHORIZED,
-			})
-			continue
-		}
-
-		statusNumber, ok := api.JobStatusEnum_value[job.Status]
-		if !ok {
-			err = fmt.Errorf("%v not a valid status", job.Status)
-			return nil, err
-		}
-
-		statusEnum := api.JobStatusEnum(statusNumber)
-
-		created_time := timestamppb.New(time.Unix(int64(job.Created.T), 0))
-		updated_time := timestamppb.New(time.Unix(int64(job.Updated.T), 0))
-
-		statusResponse := api.JobStatusResponse{
-			JobID:     job.JobID,
-			JobStatus: statusEnum,
-			Started:   created_time,
-			Updated:   updated_time,
-			Name:      job.Jobname,
-		}
-
-		jobsStatus = append(jobsStatus, &statusResponse)
+		jobsStatus = append(jobsStatus, &api.JobStatusResponse{
+			JobID:     wfstatus.JobId,
+			JobStatus: api.JobStatusEnum_INIT,
+			Started:   timestamppb.New(wfstatus.Started),
+			Updated:   timestamppb.New(wfstatus.Updated),
+			Name:      wfstatus.Name,
+		})
 	}
 
 	response := api.JobStatusReponseList{
@@ -171,21 +105,15 @@ func (apiHandler *BaktaJobAPI) JobsStatus(ctx context.Context, request *api.JobS
 	return &response, nil
 }
 
-//GetJobResult Returns the results for a specific jobs
+//JobResult Returns the results for a specific jobs
 func (apiHandler *BaktaJobAPI) JobResult(ctx context.Context, request *api.JobAuth) (*api.JobResultResponse, error) {
-	err := apiHandler.dbHandler.CheckSecret(request.GetJobID(), request.GetSecret())
+	jobstatus, err := apiHandler.statusHandler.GetJob(request.GetJobID(), request.GetSecret())
 	if err != nil {
 		err = fmt.Errorf("JobID does not match secret ID")
 		return nil, err
 	}
 
-	job, err := apiHandler.dbHandler.GetJobStatus(request.GetJobID())
-	if err != nil {
-		log.Println(err.Error())
-		return nil, fmt.Errorf("could not read job result for job: %v", request.GetJobID())
-	}
-
-	results, err := apiHandler.s3Handler.CreateDownloadLinks(job.DataBucket, job.ResultKey, "result")
+	results, err := apiHandler.s3Handler.CreateDownloadLinks(jobstatus.JobId)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, fmt.Errorf("could not create download url for job: %v", request.GetJobID())
@@ -204,15 +132,12 @@ func (apiHandler *BaktaJobAPI) JobResult(ctx context.Context, request *api.JobAu
 		return nil, err
 	}
 
-	created_time := timestamppb.New(time.Unix(int64(job.Created.T), 0))
-	updated_time := timestamppb.New(time.Unix(int64(job.Updated.T), 0))
-
 	jobResponse := api.JobResultResponse{
-		JobID:       job.JobID,
+		JobID:       jobstatus.JobId,
 		ResultFiles: &structData,
-		Started:     created_time,
-		Updated:     updated_time,
-		Name:        job.Jobname,
+		Started:     timestamppb.New(jobstatus.Started),
+		Updated:     timestamppb.New(jobstatus.Updated),
+		Name:        jobstatus.Name,
 	}
 
 	return &jobResponse, nil
@@ -232,12 +157,4 @@ func (apiHandler *BaktaJobAPI) Version(ctx context.Context, request *api.Empty) 
 
 func (apiHandler *BaktaJobAPI) Delete(context.Context, *api.JobAuth) (*api.Empty, error) {
 	return &api.Empty{}, nil
-}
-
-func pretty(value interface{}) {
-	empJSON, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		log.Fatalf(err.Error())
-	}
-	fmt.Printf("%s\n", string(empJSON))
 }

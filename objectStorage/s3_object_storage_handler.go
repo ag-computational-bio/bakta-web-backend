@@ -13,9 +13,9 @@ import (
 )
 
 type S3ObjectStorageHandler struct {
-	S3Client      *s3.Client
-	PresignClient *s3.PresignClient
-	S3Endpoint    string
+	S3Client           *s3.Client
+	PresignClient      *s3.PresignClient
+	S3Endpoint, Bucket string
 }
 
 type UploadLinks struct {
@@ -31,8 +31,8 @@ type UploadLinks struct {
 	FFN             string `bakta:"ffn"`
 }
 
-func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) {
-	endpoint := "https://s3.computational.bio.uni-giessen.de"
+func InitS3ObjectStorageHandler(bucket, endpoint string) (*S3ObjectStorageHandler, error) {
+	//endpoint := "https://s3.computational.bio.uni-giessen.de"
 
 	cfg, err := config.LoadDefaultConfig(
 		context.Background(),
@@ -58,15 +58,23 @@ func InitS3ObjectStorageHandler(bucket string) (*S3ObjectStorageHandler, error) 
 		S3Client:      client,
 		PresignClient: presignClient,
 		S3Endpoint:    endpoint,
+		Bucket:        bucket,
 	}
 
 	return &handler, nil
 }
 
-func (handler *S3ObjectStorageHandler) CreateUploadLink(bucket string, key string) (string, error) {
+// CreateKeyPath is a function that creates a KeyPath based on JobID, subFolder and filename
+// Format: s3://<Bucket>/<JobID>/<Folder>/<File>
+// Example: s3://baktadata/asdkjas-asdasd-asdasd-asdasd/inputs/fastadata.fasta
+func (handler *S3ObjectStorageHandler) CreateKeyPath(jobid, folder, file string) string {
+	return path.Join("jobs", jobid, folder, file)
+}
+
+func (handler *S3ObjectStorageHandler) CreateUploadLink(key string) (string, error) {
 
 	presignedRequestURL, err := handler.PresignClient.PresignPutObject(context.Background(), &s3.PutObjectInput{
-		Bucket: aws.String(bucket),
+		Bucket: aws.String(handler.Bucket),
 		Key:    aws.String(key),
 	})
 
@@ -78,7 +86,7 @@ func (handler *S3ObjectStorageHandler) CreateUploadLink(bucket string, key strin
 	return presignedRequestURL.URL, nil
 }
 
-func (handler *S3ObjectStorageHandler) CreateDownloadLinks(bucket string, key string, prefix string) (*UploadLinks, error) {
+func (handler *S3ObjectStorageHandler) CreateDownloadLinks(jobid string) (*UploadLinks, error) {
 	uploadLinks := UploadLinks{}
 
 	uploadStructType := reflect.TypeOf(UploadLinks{})
@@ -88,10 +96,10 @@ func (handler *S3ObjectStorageHandler) CreateDownloadLinks(bucket string, key st
 		fieldFileSuffix := uploadStructType.Field(i).Tag.Get("bakta")
 		fullFilename := strings.Join([]string{"result", ".", fieldFileSuffix}, "")
 
-		keyWithFilename := path.Join(key, fullFilename)
+		keyWithFilename := handler.CreateKeyPath(jobid, "results", fullFilename)
 
 		presignedRequestURL, err := handler.PresignClient.PresignGetObject(context.Background(), &s3.GetObjectInput{
-			Bucket: aws.String(bucket),
+			Bucket: aws.String(handler.Bucket),
 			Key:    aws.String(keyWithFilename),
 		})
 
