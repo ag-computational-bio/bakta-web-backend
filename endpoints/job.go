@@ -85,6 +85,7 @@ func (apiHandler *BaktaJobAPI) JobsStatus(ctx context.Context, request *api.JobS
 
 		wfstatus, err := apiHandler.statusHandler.GetJob(jobS.GetJobID(), jobS.GetSecret())
 		if err != nil {
+			log.Println(fmt.Sprintf("getwfstatus error: %v", err))
 			continue
 		}
 

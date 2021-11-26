@@ -104,7 +104,7 @@ func (status *StatusHandler) InitJob(name string) (jobID, secret string, err err
 	return jobID, secretSHABase64, nil
 }
 
-func (status *StatusHandler) GetJob(secret, jobID string) (wfstatus *WorkflowStatus, err error) {
+func (status *StatusHandler) GetJob(jobID, secret string) (wfstatus *WorkflowStatus, err error) {
 
 	if requestedStatus, ok := status.wfStatus[jobID]; ok {
 		if requestedStatus.Secret == secret {
