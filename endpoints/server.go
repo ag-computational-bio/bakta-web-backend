@@ -15,10 +15,26 @@ import (
 func RunGrpcJobServer() error {
 
 	namespace := viper.GetString("K8sNamespace")
+	if len(namespace) == 0 {
+		log.Fatalln("param K8sNamespace is required")
+	}
 	wfTemplate := viper.GetString("WorkflowTemplate")
 
+	if len(wfTemplate) == 0 {
+		log.Fatalln("param WorkflowTemplate is required")
+	}
+
 	bucket := viper.GetString("Objectstorage.S3.Bucket")
+
+	if len(bucket) == 0 {
+		log.Fatalln("param Objectstorage.S3.Bucket is required")
+	}
+
 	endpoint := viper.GetString("Objectstorage.S3.Endpoint")
+
+	if len(endpoint) == 0 {
+		log.Fatalln("Objectstorage.S3.Endpoint is required")
+	}
 
 	aClient := argoclient.NewClient(namespace, wfTemplate)
 	statusHandler := argoclient.NewStatusHandler(aClient)
