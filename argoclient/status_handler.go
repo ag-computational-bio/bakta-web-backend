@@ -23,7 +23,8 @@ type WorkflowStatus struct {
 }
 
 func NewStatusHandler(client *ArgoClient) *StatusHandler {
-	return &StatusHandler{argoClient: client}
+
+	return &StatusHandler{argoClient: client, wfStatus: make(map[string]WorkflowStatus), wfInitialized: make(map[string]WorkflowStatus)}
 }
 
 func (status *StatusHandler) Run() {

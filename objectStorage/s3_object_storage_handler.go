@@ -32,8 +32,6 @@ type UploadLinks struct {
 }
 
 func InitS3ObjectStorageHandler(bucket, endpoint string) (*S3ObjectStorageHandler, error) {
-	//endpoint := "https://s3.computational.bio.uni-giessen.de"
-
 	cfg, err := config.LoadDefaultConfig(
 		context.Background(),
 		config.WithRegion("RegionOne"),
@@ -65,10 +63,10 @@ func InitS3ObjectStorageHandler(bucket, endpoint string) (*S3ObjectStorageHandle
 }
 
 // CreateKeyPath is a function that creates a KeyPath based on JobID, subFolder and filename
-// Format: s3://<Bucket>/<JobID>/<Folder>/<File>
-// Example: s3://baktadata/asdkjas-asdasd-asdasd-asdasd/inputs/fastadata.fasta
+// Format: s3://<Bucket>/jobs/<JobID>/<Folder>/<File>
+// Example: s3://baktadata/jobs/asdkjas-asdasd-asdasd-asdasd/inputs/fastadata.fasta
 func (handler *S3ObjectStorageHandler) CreateKeyPath(jobid, subFolder, file string) string {
-	return path.Join(jobid, subFolder, file)
+	return path.Join("jobs", jobid, subFolder, file)
 }
 
 func (handler *S3ObjectStorageHandler) CreateUploadLink(key string) (string, error) {
