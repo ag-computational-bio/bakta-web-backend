@@ -41,7 +41,7 @@ func (status *StatusHandler) UpdateStatus() {
 
 	wfstats, err := status.argoClient.GetWorkflowStatus()
 	if err != nil {
-		log.Errorf("error in getting new status")
+		log.Errorf("error in getting new status: %v", err.Error())
 	} else {
 		status.wfStatus = *wfstats
 	}

@@ -6,7 +6,6 @@ FROM golang:latest as builder
 RUN mkdir /BAKTA-Web-Backend
 WORKDIR /BAKTA-Web-Backend
 COPY . .
-RUN go mod download github.com/argoproj/argo-workflows/v3
 RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-extldflags "-static"' -o BaktaBackend .
 
 FROM scratch

@@ -3,11 +3,13 @@ package argoclient
 import (
 	"context"
 	"fmt"
-	"github.com/argoproj/argo-workflows/v3/cmd/argo/commands/client"
 	"github.com/argoproj/argo-workflows/v3/pkg/apiclient"
 	workflowpkg "github.com/argoproj/argo-workflows/v3/pkg/apiclient/workflow"
 	wfv1 "github.com/argoproj/argo-workflows/v3/pkg/apis/workflow/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/clientcmd"
+	"log"
+	"os"
 	"time"
 )
 
@@ -18,12 +20,51 @@ type ArgoClient struct {
 	namespace, wfTemplate string
 }
 
+var overrides = clientcmd.ConfigOverrides{}
+
 var (
 	defaultFields = "items.metadata.labels,items.status.phase,items.status.message,items.status.finishedAt,items.status.startedAt,items.status.estimatedDuration,items.status.progress"
+	explicitPath  string
+	Offline       bool
 )
 
+func GetConfig() clientcmd.ClientConfig {
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	loadingRules.DefaultClientConfig = &clientcmd.DefaultClientConfig
+	loadingRules.ExplicitPath = explicitPath
+	return clientcmd.NewInteractiveDeferredLoadingClientConfig(loadingRules, &overrides, os.Stdin)
+}
+
 func NewClient(namespace, workflowTemplate string) *ArgoClient {
-	ctx, apiClient := client.NewAPIClient(context.Background())
+	token, tokenExists := os.LookupEnv("ARGO_TOKEN")
+	if !tokenExists {
+		log.Fatal("no ARGO_TOKEN envvar found")
+	}
+
+	url, serverExists := os.LookupEnv("ARGO_SERVER")
+	if !serverExists {
+		log.Fatal("no ARGO_SERVER envvar found")
+	}
+
+	ctx, apiClient, err := apiclient.NewClientFromOpts(
+		apiclient.Opts{
+			ArgoServerOpts: apiclient.ArgoServerOpts{
+				URL:                url,
+				Secure:             false,
+				InsecureSkipVerify: true,
+				HTTP1:              true,
+			},
+			AuthSupplier: func() string {
+				return token
+			},
+			ClientConfigSupplier: func() clientcmd.ClientConfig { return GetConfig() },
+			Offline:              Offline,
+			Context:              context.Background(),
+		})
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	serviceClient := apiClient.NewWorkflowServiceClient()
 
 	return &ArgoClient{
