@@ -42,7 +42,7 @@ func (argo *ArgoClient) SubmitBaktaWorkflow(name, jobid, secret, confstring stri
 	_, err := argo.wfService.SubmitWorkflow(argo.ctx, &workflowpkg.WorkflowSubmitRequest{
 		Namespace:     argo.namespace,
 		ResourceKind:  "workflowtemplate",
-		ResourceName:  argo.namespace,
+		ResourceName:  argo.wfTemplate,
 		SubmitOptions: submitOpts,
 	})
 	if err != nil {
