@@ -25,6 +25,8 @@ func RunGrpcJobServer() error {
 	aClient := argoclient.NewClient(namespace, wfTemplate)
 	statusHandler := argoclient.NewStatusHandler(aClient)
 
+	statusHandler.Run()
+
 	s3Handler, err := objectStorage.InitS3ObjectStorageHandler(bucket, endpoint)
 	if err != nil {
 		log.Println(fmt.Sprintf("failed to listen: %v", err))
