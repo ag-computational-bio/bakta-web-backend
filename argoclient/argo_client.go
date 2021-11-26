@@ -92,7 +92,7 @@ func (argo *ArgoClient) GetWorkflowStatus() (wfs *map[string]WorkflowStatus, err
 func (argo *ArgoClient) CreateSubmitOpts(name, jobid, secret, confstring string) *wfv1.SubmitOpts {
 
 	return &wfv1.SubmitOpts{
-		GenerateName: "bakta-",
+		GenerateName: fmt.Sprintf("bakta-%v-", jobid),
 		Parameters:   []string{fmt.Sprintf("parameter=%s", confstring)},
 		Labels:       fmt.Sprintf("name=%v,jobid=%v,secret=%v", name, jobid, secret),
 	}
