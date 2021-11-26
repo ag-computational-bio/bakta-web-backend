@@ -78,7 +78,7 @@ func (status *StatusHandler) StartJob(jobId, secret string, config *api.JobConfi
 
 }
 
-func (status *StatusHandler) InitJob(name string) (secret, jobID string, err error) {
+func (status *StatusHandler) InitJob(name string) (jobID, secret string, err error) {
 	jobID = uuid.New().String()
 	secretID, err := randStringBytes(50)
 	if err != nil {
@@ -101,7 +101,7 @@ func (status *StatusHandler) InitJob(name string) (secret, jobID string, err err
 
 	status.wfInitialized[jobID] = wfStatus
 
-	return secretSHABase64, jobID, nil
+	return jobID, secretSHABase64, nil
 }
 
 func (status *StatusHandler) GetJob(secret, jobID string) (wfstatus *WorkflowStatus, err error) {
