@@ -2,7 +2,7 @@ Objectstorage:
   S3:
     UserBucket: baktauserdata3
     Endpoint: https://s3.computational.bio.uni-giessen.de
-K8sNamespace: "bakta"
+K8sNamespace: "argo"
 WorkflowTemplate: "bakta-job-1.2.2"
 Version:
   Tool: "1.3.3"

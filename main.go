@@ -1,11 +1,11 @@
 package main
 
 import (
-	"log"
-
 	"github.com/ag-computational-bio/bakta-web-backend/endpoints"
+	"github.com/ag-computational-bio/bakta-web-backend/gateway"
 	"github.com/jessevdk/go-flags"
 	"github.com/spf13/viper"
+	"log"
 )
 
 var opts struct {
@@ -31,6 +31,12 @@ func main() {
 	}
 
 	err = endpoints.RunGrpcJobServer()
+	if err != nil {
+		log.Fatalln(err.Error())
+	}
+
+	err = gateway.StartGateway()
+
 	if err != nil {
 		log.Fatalln(err.Error())
 	}

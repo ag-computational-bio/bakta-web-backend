@@ -10,13 +10,13 @@ import (
 func CreateBaktaConfString(conf *api.JobConfig) (string, error) {
 	var confStringElements []string
 
-	confStringElements = append(confStringElements, "bakta")
-
-	confStringElements = append(confStringElements, "--tmp-dir", "/cache")
-	confStringElements = append(confStringElements, "--threads", "12")
-	confStringElements = append(confStringElements, "--prefix", "result")
-	confStringElements = append(confStringElements, "-o", "/output")
-	confStringElements = append(confStringElements, "--db", "/db/db")
+	//confStringElements = append(confStringElements, "bakta")
+	//
+	//confStringElements = append(confStringElements, "--tmp-dir", "/cache")
+	//confStringElements = append(confStringElements, "--threads", "12")
+	//confStringElements = append(confStringElements, "--prefix", "result")
+	//confStringElements = append(confStringElements, "-o", "/output")
+	//confStringElements = append(confStringElements, "--db", "/db/db")
 
 	if conf.HasProdigal {
 		confStringElements = append(confStringElements, "--prodigal-tf", "/data/prodigaltraining.tf")

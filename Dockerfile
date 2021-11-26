@@ -13,5 +13,6 @@ ARG GITHUB_SHA
 ENV GITHUB_SHA=$GITHUB_SHA
 COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /BAKTA-Web-Backend/BaktaBackend .
+COPY --from=builder /BAKTA-Web-Backend/gateway/swagger-ui /gateway/swagger
 
 ENTRYPOINT [ "/BaktaBackend" ]

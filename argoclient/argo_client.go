@@ -50,7 +50,7 @@ func NewClient(namespace, workflowTemplate string) *ArgoClient {
 		apiclient.Opts{
 			ArgoServerOpts: apiclient.ArgoServerOpts{
 				URL:                url,
-				Secure:             false,
+				Secure:             true,
 				InsecureSkipVerify: true,
 				HTTP1:              true,
 			},
@@ -115,14 +115,17 @@ func (argo *ArgoClient) GetWorkflowStatus() (wfs *map[string]WorkflowStatus, err
 			updateTime = x.Status.FinishedAt.Time
 		}
 
-		wfmap[x.Labels["jobid"]] = WorkflowStatus{
-			JobId:   x.Labels["jobid"],
-			Name:    x.Labels["jobid"],
-			Secret:  x.Labels["jobid"],
-			Status:  string(x.Status.Phase),
-			Message: x.Status.Message,
-			Started: x.Status.StartedAt.Time,
-			Updated: updateTime,
+		if jobid, ok := x.Labels["jobid"]; ok {
+
+			wfmap[jobid] = WorkflowStatus{
+				JobId:   jobid,
+				Name:    x.Labels["name"],
+				Secret:  x.Labels["secret"],
+				Status:  string(x.Status.Phase),
+				Message: x.Status.Message,
+				Started: x.Status.StartedAt.Time,
+				Updated: updateTime,
+			}
 		}
 	}
 
@@ -134,7 +137,7 @@ func (argo *ArgoClient) CreateSubmitOpts(name, jobid, secret, confstring string)
 
 	return &wfv1.SubmitOpts{
 		GenerateName: fmt.Sprintf("bakta-%v-", jobid),
-		Parameters:   []string{fmt.Sprintf("parameter=%s", confstring)},
+		Parameters:   []string{fmt.Sprintf("parameter=%s", confstring), fmt.Sprintf("jobid=%s", jobid)},
 		Labels:       fmt.Sprintf("name=%v,jobid=%v,secret=%v", name, jobid, secret),
 	}
 }
