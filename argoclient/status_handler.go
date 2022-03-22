@@ -8,6 +8,7 @@ import (
 	api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
+	"regexp"
 	"time"
 )
 
@@ -16,6 +17,8 @@ type StatusHandler struct {
 	wfInitialized map[string]WorkflowStatus
 	argoClient    *ArgoClient
 }
+
+var regex = regexp.MustCompile("^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$")
 
 type WorkflowStatus struct {
 	JobId, Name, Secret, Status, Message string
@@ -80,19 +83,16 @@ func (status *StatusHandler) StartJob(jobId, secret string, config *api.JobConfi
 
 func (status *StatusHandler) InitJob(name string) (jobID, secret string, err error) {
 	jobID = uuid.New().String()
-	secretID, err := randStringBytes(50)
+	secretID, err := generateSecret()
 	if err != nil {
 		log.Println(err.Error())
 		return "", "", err
 	}
 
-	secretSHA := sha256.Sum256([]byte(secretID))
-	secretSHABase64 := base64.RawURLEncoding.EncodeToString(secretSHA[:])
-
 	wfStatus := WorkflowStatus{
 		Name:    name,
 		JobId:   jobID,
-		Secret:  secretSHABase64,
+		Secret:  secretID,
 		Status:  "Init",
 		Message: "",
 		Started: time.Now(),
@@ -101,7 +101,7 @@ func (status *StatusHandler) InitJob(name string) (jobID, secret string, err err
 
 	status.wfInitialized[jobID] = wfStatus
 
-	return jobID, secretSHABase64, nil
+	return jobID, secretID, nil
 }
 
 func (status *StatusHandler) GetJob(jobID, secret string) (wfstatus *WorkflowStatus, err error) {
@@ -144,15 +144,22 @@ func (status *StatusHandler) ParseStatus(statusstring string) api.JobStatusEnum 
 
 }
 
-func randStringBytes(n int) (string, error) {
-	b := make([]byte, n)
-	_, err := rand.Read(b)
-	if err != nil {
-		log.Println(err.Error())
-		return "", err
+func generateSecret() (string, error) {
+
+	for {
+		b := make([]byte, 50)
+		_, err := rand.Read(b)
+		if err != nil {
+			log.Println(err.Error())
+			return "", err
+		}
+
+		data := base64.StdEncoding.EncodeToString(b)
+		secretSHA := sha256.Sum256([]byte(data))
+		secretSHABase64 := base64.RawURLEncoding.EncodeToString(secretSHA[:])
+
+		if regex.MatchString(secretSHABase64) {
+			return secretSHABase64, nil
+		}
 	}
-
-	data := base64.StdEncoding.EncodeToString(b)
-
-	return data, nil
 }
