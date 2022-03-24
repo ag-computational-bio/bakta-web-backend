@@ -3,6 +3,7 @@ package endpoints
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 	"github.com/ag-computational-bio/bakta-web-backend/argoclient"
@@ -85,7 +86,20 @@ func (apiHandler *BaktaJobAPI) JobsStatus(ctx context.Context, request *api.JobS
 
 		wfstatus, err := apiHandler.statusHandler.GetJob(jobS.GetJobID(), jobS.GetSecret())
 		if err != nil {
-			log.Println(fmt.Sprintf("getwfstatus error: %v", err))
+
+			if errors.Is(err, fmt.Errorf("job not found")) {
+				failedJobs = append(failedJobs, &api.FailedJob{
+					JobID:     jobS.JobID,
+					JobStatus: api.JobFailedStatus_NOT_FOUND,
+				})
+			} else if errors.Is(err, fmt.Errorf("wrong secret")) {
+				failedJobs = append(failedJobs, &api.FailedJob{
+					JobID:     jobS.JobID,
+					JobStatus: api.JobFailedStatus_UNAUTHORIZED,
+				})
+			} else {
+				log.Println(fmt.Sprintf("getwfstatus error: %v", err))
+			}
 			continue
 		}
 
