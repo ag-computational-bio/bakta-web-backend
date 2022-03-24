@@ -156,6 +156,10 @@ func (apiHandler *BaktaJobAPI) Version(ctx context.Context, request *api.Empty) 
 	return &version, nil
 }
 
-func (apiHandler *BaktaJobAPI) Delete(context.Context, *api.JobAuth) (*api.Empty, error) {
+func (apiHandler *BaktaJobAPI) Delete(ctx context.Context, job *api.JobAuth) (*api.Empty, error) {
+	err := apiHandler.statusHandler.DeleteJob(job.JobID, job.Secret)
+	if err != nil {
+		return nil, err
+	}
 	return &api.Empty{}, nil
 }

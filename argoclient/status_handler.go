@@ -21,8 +21,8 @@ type StatusHandler struct {
 var regex = regexp.MustCompile("^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$")
 
 type WorkflowStatus struct {
-	JobId, Name, Secret, Status, Message string
-	Started, Updated                     time.Time
+	JobId, Name, Secret, Status, Message, FullName string
+	Started, Updated                               time.Time
 }
 
 func NewStatusHandler(client *ArgoClient) *StatusHandler {
@@ -53,6 +53,7 @@ func (status *StatusHandler) UpdateStatus() {
 }
 
 func (status *StatusHandler) StartJob(jobId, secret string, config *api.JobConfig) error {
+	var fullname string
 	if requestedStatus, ok := status.wfInitialized[jobId]; ok {
 		if requestedStatus.Secret == secret {
 			confString, err := CreateBaktaConfString(config)
@@ -60,7 +61,7 @@ func (status *StatusHandler) StartJob(jobId, secret string, config *api.JobConfi
 				return err
 			}
 
-			err = status.argoClient.SubmitBaktaWorkflow(requestedStatus.Name, requestedStatus.JobId, requestedStatus.Secret, confString)
+			fullname, err = status.argoClient.SubmitBaktaWorkflow(requestedStatus.Name, requestedStatus.JobId, requestedStatus.Secret, confString)
 
 			if err != nil {
 				return err
@@ -68,6 +69,7 @@ func (status *StatusHandler) StartJob(jobId, secret string, config *api.JobConfi
 
 			delete(status.wfInitialized, jobId)
 			requestedStatus.Status = "Pending"
+			requestedStatus.FullName = fullname
 			status.wfStatus[jobId] = requestedStatus
 
 			return nil
@@ -90,13 +92,14 @@ func (status *StatusHandler) InitJob(name string) (jobID, secret string, err err
 	}
 
 	wfStatus := WorkflowStatus{
-		Name:    name,
-		JobId:   jobID,
-		Secret:  secretID,
-		Status:  "Init",
-		Message: "",
-		Started: time.Now(),
-		Updated: time.Now(),
+		Name:     name,
+		JobId:    jobID,
+		Secret:   secretID,
+		Status:   "Init",
+		Message:  "",
+		FullName: "",
+		Started:  time.Now(),
+		Updated:  time.Now(),
 	}
 
 	status.wfInitialized[jobID] = wfStatus
@@ -121,6 +124,20 @@ func (status *StatusHandler) GetJob(jobID, secret string) (wfstatus *WorkflowSta
 	} else {
 		return nil, fmt.Errorf("job not found")
 	}
+}
+
+func (status *StatusHandler) DeleteJob(jobID, secret string) error {
+
+	stat, err := status.GetJob(jobID, secret)
+	if err != nil {
+		return err
+	}
+	err = status.argoClient.DeleteWorkflow(stat.FullName)
+	if err != nil {
+		return err
+	}
+	delete(status.wfStatus, jobID)
+	return nil
 }
 
 func (status *StatusHandler) ParseStatus(statusstring string) api.JobStatusEnum {

@@ -35,21 +35,35 @@ func NewClient(namespace, workflowTemplate string) *ArgoClient {
 	}
 }
 
-func (argo *ArgoClient) SubmitBaktaWorkflow(name, jobid, secret, confstring string) error {
+func (argo *ArgoClient) SubmitBaktaWorkflow(name, jobid, secret, confstring string) (fullname string, er error) {
 
 	submitOpts := argo.CreateSubmitOpts(name, jobid, secret, confstring)
 
-	_, err := argo.wfService.SubmitWorkflow(argo.ctx, &workflowpkg.WorkflowSubmitRequest{
+	wf, err := argo.wfService.SubmitWorkflow(argo.ctx, &workflowpkg.WorkflowSubmitRequest{
 		Namespace:     argo.namespace,
 		ResourceKind:  "workflowtemplate",
 		ResourceName:  argo.wfTemplate,
 		SubmitOptions: submitOpts,
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	return nil
+	return wf.Name, nil
+}
+
+func (argo *ArgoClient) DeleteWorkflow(workflowName string) error {
+
+	deleteopt := &metav1.DeleteOptions{}
+
+	_, err := argo.wfService.DeleteWorkflow(argo.ctx, &workflowpkg.WorkflowDeleteRequest{
+		Name:          workflowName,
+		Namespace:     argo.namespace,
+		DeleteOptions: deleteopt,
+	})
+
+	return err
+
 }
 
 func (argo *ArgoClient) GetWorkflowStatus() (wfs *map[string]WorkflowStatus, err error) {
@@ -77,13 +91,14 @@ func (argo *ArgoClient) GetWorkflowStatus() (wfs *map[string]WorkflowStatus, err
 		if jobid, ok := x.Labels["jobid"]; ok {
 
 			wfmap[jobid] = WorkflowStatus{
-				JobId:   jobid,
-				Name:    x.Labels["name"],
-				Secret:  x.Labels["secret"],
-				Status:  string(x.Status.Phase),
-				Message: x.Status.Message,
-				Started: x.Status.StartedAt.Time,
-				Updated: updateTime,
+				JobId:    jobid,
+				Name:     x.Labels["name"],
+				Secret:   x.Labels["secret"],
+				Status:   string(x.Status.Phase),
+				FullName: x.Name,
+				Message:  x.Status.Message,
+				Started:  x.Status.StartedAt.Time,
+				Updated:  updateTime,
 			}
 		}
 	}
