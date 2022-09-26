@@ -5,14 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"os"
+	"regexp"
+
 	api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 	"github.com/ag-computational-bio/bakta-web-backend/argoclient"
 	"github.com/ag-computational-bio/bakta-web-backend/objectStorage"
 	"github.com/spf13/viper"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"log"
-	"os"
 )
 
 //BaktaJobAPI implements the job endpoints of the bakta-web-api
@@ -31,7 +33,20 @@ func InitBaktaAPI(statusHandler *argoclient.StatusHandler, s3Handler *objectStor
 
 //InitJob Initiates a bakta job and returns upload links for the fasta, prodigal training and replicon file
 func (apiHandler *BaktaJobAPI) InitJob(ctx context.Context, request *api.InitJobRequest) (*api.InitJobResponse, error) {
-	jobID, secret, err := apiHandler.statusHandler.InitJob(request.GetName())
+
+	// Replace string with the specified regexp
+	// Using ReplaceAllString() method
+	m1 := regexp.MustCompile(`[^0-9a-zA-Z_.]+[^0-9a-zA-Z]{1}`)
+	m2 := regexp.MustCompile(`[^0-9a-zA-Z]$`)
+
+	remove_chars := m1.ReplaceAllString(request.GetName(), "_")
+	fix_end := m2.ReplaceAllString(remove_chars, "")
+
+	if len(fix_end) > 63 {
+		fix_end = fix_end[0:63]
+	}
+
+	jobID, secret, err := apiHandler.statusHandler.InitJob(fix_end)
 	if err != nil {
 		log.Println(err.Error())
 		return nil, err
