@@ -2,8 +2,9 @@ package argoclient
 
 import (
 	"fmt"
-	api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 	"strings"
+
+	api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 )
 
 //CreateBaktaConfString Creates a bakta config string based on the configuration and job settings provided

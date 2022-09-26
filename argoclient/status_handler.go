@@ -5,11 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"regexp"
+	"time"
+
 	api "github.com/ag-computational-bio/bakta-web-api-go/bakta/web/api/proto/v1"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
-	"regexp"
-	"time"
 )
 
 type StatusHandler struct {

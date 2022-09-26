@@ -3,12 +3,13 @@ package argoclient
 import (
 	"context"
 	"fmt"
+	"time"
+
 	"github.com/argoproj/argo-workflows/v3/cmd/argo/commands/client"
 	"github.com/argoproj/argo-workflows/v3/pkg/apiclient"
 	workflowpkg "github.com/argoproj/argo-workflows/v3/pkg/apiclient/workflow"
 	wfv1 "github.com/argoproj/argo-workflows/v3/pkg/apis/workflow/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"time"
 )
 
 type ArgoClient struct {
