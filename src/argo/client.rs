@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use super::{
     structs::{SimpleStatusList, SubmitOptions, SubmitWorkflowTemplate},
-    urls::{get_status_url, get_status_url_phunter, get_submit_url},
+    urls::{get_delete_url, get_status_url_bakta, get_submit_url},
 };
 
 pub struct ArgoClient {
@@ -28,10 +28,10 @@ impl ArgoClient {
 }
 
 impl ArgoClient {
-    pub async fn get_workflow_status(&self) -> Result<SimpleStatusList> {
+    pub async fn get_workflow_status(&self, recent: bool) -> Result<SimpleStatusList> {
         let response = self
             .client
-            .get(get_status_url(&self.url, &self.namespace))
+            .get(get_status_url_bakta(&self.url, &self.namespace, recent))
             .header("Authorization", &self.token)
             .send()
             .await?
@@ -40,16 +40,15 @@ impl ArgoClient {
         Ok(response)
     }
 
-    pub async fn get_workflow_status_small(&self) -> Result<SimpleStatusList> {
-        let response = self
-            .client
-            .get(get_status_url_phunter(&self.url, &self.namespace))
+    pub async fn delete_workflow(&self, workflow_name: String) -> Result<()> {
+        self.client
+            .delete(get_delete_url(&self.url, &self.namespace, workflow_name))
             .header("Authorization", &self.token)
             .send()
             .await?
-            .json::<SimpleStatusList>()
+            .bytes()
             .await?;
-        Ok(response)
+        Ok(())
     }
 
     pub async fn submit_from_template(
@@ -96,5 +95,18 @@ impl ArgoClient {
             .send()
             .await?;
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_workflow_status() {
+        let client = ArgoClient::new("foo".to_string(), "bar".to_string(), "bakta".to_string());
+        let response = client.get_workflow_status(true).await.unwrap();
+        dbg!(response);
     }
 }

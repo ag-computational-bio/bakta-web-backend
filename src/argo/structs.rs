@@ -1,3 +1,4 @@
+use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -113,29 +114,28 @@ pub struct ResourcesDuration {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 #[serde(rename = "items")]
 pub struct SimpleStatusList {
-    pub items: Option<Vec<SimpleStatus>>,
+    pub items: Vec<SimpleStatus>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SimpleStatus {
-    pub metadata: Name,
-    pub status: SimplePhase,
+    pub metadata: StatusMetadata,
+    pub status: SimpleStatusStatus,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[serde(rename = "metadata")]
-pub struct Name {
+pub struct StatusMetadata {
     pub name: String,
+    pub labels: HashMap<String, String>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[serde(rename = "Status")]
-pub struct SimplePhase {
+pub struct SimpleStatusStatus {
     pub phase: String,
+    #[serde(rename = "startedAt")]
+    pub started_at: chrono::DateTime<Utc>,
+    #[serde(rename = "finishedAt")]
+    pub finished_at: Option<chrono::DateTime<Utc>>,
 }

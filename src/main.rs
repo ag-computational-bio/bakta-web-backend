@@ -25,18 +25,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let swagger = SwaggerUi::new("/swagger-ui")
         .url("/api-docs/openapi.json", api_structs::BaktaApi::openapi());
 
-    let bakta_handler = Arc::new(BaktaHandler::new(
-        dotenvy::var("ARGO_TOKEN")?,
-        dotenvy::var("ARGO_URL")?,
-        dotenvy::var("ARGO_NAMESPACE")?,
-        dotenvy::var("S3_ACCESS_KEY")?,
-        dotenvy::var("S3_SECRET_KEY")?,
-        dotenvy::var("S3_BUCKET")?,
-        dotenvy::var("S3_ENDPOINT")?,
-        dotenvy::var("BAKTA_VERSION")?,
-        dotenvy::var("DATABASE_VERSION")?,
-        dotenvy::var("BACKEND_VERSION")?,
-    ));
+    let bakta_handler = Arc::new(
+        BaktaHandler::new(
+            dotenvy::var("ARGO_TOKEN")?,
+            dotenvy::var("ARGO_URL")?,
+            dotenvy::var("ARGO_NAMESPACE")?,
+            dotenvy::var("S3_ACCESS_KEY")?,
+            dotenvy::var("S3_SECRET_KEY")?,
+            dotenvy::var("S3_BUCKET")?,
+            dotenvy::var("S3_ENDPOINT")?,
+            dotenvy::var("BAKTA_VERSION")?,
+            dotenvy::var("DATABASE_VERSION")?,
+            dotenvy::var("BACKEND_VERSION")?,
+        )
+        .await,
+    );
 
     let app = Router::new()
         .merge(swagger)

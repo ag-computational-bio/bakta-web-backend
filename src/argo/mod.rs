@@ -1,3 +1,3 @@
 pub mod client;
-mod structs;
+pub mod structs;
 mod urls;

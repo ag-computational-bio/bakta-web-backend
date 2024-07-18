@@ -1,5 +1,8 @@
 use crate::api_paths::*;
-use chrono::NaiveDateTime;
+use anyhow::anyhow;
+use anyhow::Result;
+use chrono::DateTime;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 use uuid::Uuid;
@@ -65,12 +68,26 @@ pub struct ListRequest {
     pub jobs: Vec<Job>,
 }
 
-#[derive(ToSchema, Serialize, Deserialize)]
+#[derive(ToSchema, Serialize, Deserialize, Clone)]
 pub enum JobStatusEnum {
     INIT,
     RUNNING,
     SUCCESSFULL,
     ERROR,
+}
+
+impl TryFrom<String> for JobStatusEnum {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        match value.as_str() {
+            "Init" | "Pending" => Ok(JobStatusEnum::INIT),
+            "Running" => Ok(JobStatusEnum::RUNNING),
+            "Succeeded" => Ok(JobStatusEnum::SUCCESSFULL),
+            "Failed" | "Error" => Ok(JobStatusEnum::ERROR),
+            _ => Err(anyhow!("Invalid JobStatus")),
+        }
+    }
 }
 
 #[derive(ToSchema, Serialize, Deserialize)]
@@ -81,14 +98,14 @@ pub enum FailedJobStatusEnum {
     Unauthorized,
 }
 
-#[derive(ToSchema, Serialize, Deserialize)]
+#[derive(ToSchema, Serialize, Deserialize, Clone)]
 pub struct JobStatus {
     #[serde(rename = "jobID")]
     pub id: Uuid,
     #[serde(rename = "jobStatus")]
     pub status: JobStatusEnum,
-    pub started: NaiveDateTime,
-    pub updated: NaiveDateTime,
+    pub started: DateTime<Utc>,
+    pub updated: DateTime<Utc>,
     pub name: String,
 }
 
@@ -135,8 +152,8 @@ pub struct ResultFiles {
 pub struct ResultResponse {
     #[serde(rename = "jobID")]
     pub id: Uuid,
-    pub started: NaiveDateTime,
-    pub updated: NaiveDateTime,
+    pub started: DateTime<Utc>,
+    pub updated: DateTime<Utc>,
     pub name: String,
     #[serde(rename = "ResultFiles")]
     pub files: ResultFiles,

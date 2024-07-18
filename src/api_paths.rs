@@ -1,6 +1,16 @@
-use axum::{extract::Query, response::IntoResponse, Json};
+use std::sync::Arc;
 
-use crate::api_structs::{InitRequest, Job, ListRequest, StartRequest};
+use axum::{
+    extract::{Query, State},
+    response::IntoResponse,
+    Json,
+};
+use reqwest::StatusCode;
+
+use crate::{
+    api_structs::{InitRequest, InitResponse, Job, ListRequest, StartRequest},
+    bakta_handler::BaktaHandler,
+};
 
 /// Delete an existing Job
 #[utoipa::path(
@@ -10,11 +20,19 @@ use crate::api_structs::{InitRequest, Job, ListRequest, StartRequest};
         Job,
     ),
     responses(
-        (status = 200, body = ())
+        (status = 200, body = ()),
+        (status = 400, body = String)
     )
 )]
-pub async fn delete_job(query: Query<Job>) -> impl IntoResponse {
-    format!("Job {} deleted", query.id)
+pub async fn delete_job(
+    State(state): State<Arc<BaktaHandler>>,
+    Query(job): Query<Job>,
+) -> impl IntoResponse {
+    state
+        .state_handler
+        .delete_job((job.id, job.secret))
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
 /// Create a new BaktaJob
@@ -23,11 +41,58 @@ pub async fn delete_job(query: Query<Job>) -> impl IntoResponse {
     path = "/api/v1/job/init",
     request_body = InitRequest,
     responses(
-        (status = 200, body = InitResponse)
+        (status = 200, body = InitResponse),
+        (status = 400, body = String)
     )
 )]
-pub async fn init_job(Json(InitRequest): Json<InitRequest>) -> impl IntoResponse {
-    format!("")
+pub async fn init_job(
+    State(state): State<Arc<BaktaHandler>>,
+    Json(init_request): Json<InitRequest>,
+) -> impl IntoResponse {
+    let (id, secret) = state.state_handler.init_job(init_request.name).await;
+
+    let Ok(fasta_url) = state
+        .s3_handler
+        .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::Fasta)
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json("Failed to sign URL".to_string()),
+        )
+            .into_response();
+    };
+
+    let Ok(prodigal_url) = state
+        .s3_handler
+        .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::Prodigal)
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json("Failed to sign URL".to_string()),
+        )
+            .into_response();
+    };
+    let Ok(replicon_url) = state
+        .s3_handler
+        .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::RepliconsTSV)
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json("Failed to sign URL".to_string()),
+        )
+            .into_response();
+    };
+
+    (
+        StatusCode::OK,
+        Json(InitResponse {
+            job: Job { id, secret },
+            fasta_url,
+            prodigal_url,
+            replicon_url,
+        }),
+    )
+        .into_response()
 }
 
 /// List status of jobs
