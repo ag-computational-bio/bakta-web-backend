@@ -179,7 +179,7 @@ pub struct JobConfig {
     #[serde(rename = "keepContigHeaders")]
     pub headers: bool,
     #[serde(rename = "minContigLength")]
-    pub min_length: Option<String>,
+    pub min_length: u64,
     #[serde(rename = "dermType")]
     pub derm: Option<DermType>,
     pub genus: Option<String>,
@@ -195,6 +195,10 @@ pub struct JobConfig {
 impl JobConfig {
     pub fn into_parameters(self) -> String {
         let mut parameters = Vec::new();
+
+        if self.min_length > 1 {
+            parameters.push(format!("--min-contig-length {}", self.min_length));
+        }
 
         if self.prodigal {
             parameters.push("--prodigal /data/prodigal.tf".to_string());
@@ -282,7 +286,7 @@ mod test {
             table: 4,
             complete: true,
             headers: true,
-            min_length: None,
+            min_length: 1,
             derm: Some(DermType::MONODERM),
             genus: Some("Bacillus".to_string()),
             species: Some("subtilis".to_string()),
