@@ -247,7 +247,7 @@ impl StateHandler {
                         ("name".to_string(), state.name.clone()),
                         ("secret".to_string(), state.secret.clone()),
                     ])),
-                    Some(HashMap::from([("parameters".to_string(), parameters)])),
+                    Some(HashMap::from([("parameter".to_string(), parameters)])),
                     None,
                 )
                 .await?;

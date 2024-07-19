@@ -166,11 +166,15 @@ pub enum DermType {
     DIDERM,
 }
 
+fn default_replicons() -> bool {
+    true
+}
+
 #[derive(ToSchema, Serialize, Deserialize, Default)]
 pub struct JobConfig {
-    #[serde(rename = "hasProdigal")]
-    pub prodigal: bool,
-    #[serde(rename = "hasReplicons")]
+    #[serde(rename = "prodigalTrainingFile")]
+    pub prodigal: Option<String>,
+    #[serde(rename = "hasReplicons", default = "default_replicons")]
     pub replicons: bool,
     #[serde(rename = "translationTable")]
     pub table: u8,
@@ -200,7 +204,7 @@ impl JobConfig {
             parameters.push(format!("--min-contig-length {}", self.min_length));
         }
 
-        if self.prodigal {
+        if self.prodigal.is_some() {
             parameters.push("--prodigal /data/prodigal.tf".to_string());
         }
 
@@ -281,7 +285,7 @@ mod test {
     #[test]
     fn test_into_parameters() {
         let params = JobConfig {
-            prodigal: true,
+            prodigal: Some("foo".to_string()),
             replicons: true,
             table: 4,
             complete: true,

@@ -80,15 +80,17 @@ impl ArgoClient {
             },
         };
 
-        Ok(self
+
+        let response = self
             .client
             .post(get_submit_url(&self.url, &self.namespace))
             .header("Authorization", &self.token)
             .json(&submit_template)
             .send()
-            .await?
-            .json()
-            .await?)
+            .await?.bytes().await?;
+
+        tracing::trace!("Response: {response:?}");
+        Ok(serde_json::from_slice(&response)?)
     }
 }
 
