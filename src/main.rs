@@ -44,17 +44,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await,
     );
 
-
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or("none".into())
         .add_directive("tower_http=debug".parse()?)
         .add_directive("bakta_web_backend=trace".parse()?);
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            filter
-        )
-        .init();
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     tracing::info!(?socket_address, "Starting bakta web backend");
 

@@ -75,7 +75,7 @@ impl S3Handler {
                 &self.bucket,
                 &key,
                 &self.endpoint,
-                60 * 86400, // 60 days
+                6 * 86400, // 6 days
             )
         };
         Ok(ResultFiles {

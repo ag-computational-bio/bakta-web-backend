@@ -20,6 +20,7 @@ pub struct SubmitOptions {
     pub labels: Option<String>,
     pub parameters: Option<Vec<String>>,
     pub service_account: Option<String>,
+    pub generate_name: Option<String>,
 }
 
 /// GET WORKFLOWS REQUEST
@@ -146,5 +147,6 @@ pub struct SubmitResult {
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmitResultMetadata {
     pub name: String,
+    #[serde(rename = "creationTimestamp")]
     pub creation_timestamp: DateTime<Utc>,
 }

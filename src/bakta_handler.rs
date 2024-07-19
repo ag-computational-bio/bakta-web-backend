@@ -2,7 +2,7 @@ use crate::api_structs::FailedJobStatus;
 use crate::api_structs::FailedJobStatusEnum;
 use crate::api_structs::Job;
 use crate::api_structs::ListResponse;
-use crate::api_structs::ResultFiles;
+use crate::api_structs::ResultResponse;
 use crate::api_structs::StartRequest;
 use crate::argo::structs::SimpleStatus;
 use crate::{
@@ -124,7 +124,7 @@ impl StateHandler {
                 ))
             };
 
-            let initial = argo_client.get_workflow_status(false).await.map_err(|e| {
+            let initial = argo_client.get_workflow_status().await.map_err(|e| {
                 tracing::error!(?e, "Failed to get initial workflow status");
                 e
             })?;
@@ -138,15 +138,15 @@ impl StateHandler {
             }
             drop(write_lock);
             'outer: loop {
-                let Ok(initial) = argo_client.get_workflow_status(true).await.map_err(|e| {
+                let Ok(initial) = argo_client.get_workflow_status().await.map_err(|e| {
                     tracing::error!(?e, "Failed to query workflow_status");
-                })else{
+                }) else {
                     continue;
                 };
                 for item in initial.items {
                     let Ok((id, state)) = into_state(item).map_err(|e| {
                         tracing::error!(?e, "Failed to parse_state");
-                    })else{
+                    }) else {
                         continue 'outer;
                     };
                     self.job_state.write().await.insert(id, state);
@@ -247,8 +247,12 @@ impl StateHandler {
                         ("name".to_string(), state.name.clone()),
                         ("secret".to_string(), state.secret.clone()),
                     ])),
-                    Some(HashMap::from([("parameter".to_string(), parameters)])),
+                    Some(HashMap::from([
+                        ("parameter".to_string(), parameters),
+                        ("jobid".to_string(), id.to_string()),
+                    ])),
                     None,
+                    Some(format!("bakta-job-{}-", id.to_string())),
                 )
                 .await?;
 
@@ -268,7 +272,7 @@ impl StateHandler {
         &self,
         Job { id, secret }: Job,
         s3_handler: &S3Handler,
-    ) -> Result<ResultFiles> {
+    ) -> Result<ResultResponse> {
         if let Some(state) = self.job_state.read().await.get(&id) {
             if state.secret != secret {
                 return Err(anyhow!("Unauthorized"));
@@ -279,7 +283,17 @@ impl StateHandler {
                     return Err(anyhow!("Job not finished"));
                 }
             }
+
+            if let Some(state) = &state.api_status {
+                return Ok(ResultResponse {
+                    id,
+                    started: state.started,
+                    updated: state.updated,
+                    name: state.name.clone(),
+                    files: s3_handler.sign_download_urls(id.to_string().as_str())?,
+                });
+            }
         }
-        s3_handler.sign_download_urls(id.to_string().as_str())
+        Err(anyhow!("Job not found"))
     }
 }

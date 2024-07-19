@@ -1,15 +1,11 @@
 use std::fmt::Display;
 
-pub fn get_status_url_bakta<T, U>(url: T, namespace: U, recent: bool) -> String
+pub fn get_status_url_bakta<T, U>(url: T, namespace: U) -> String
 where
     T: Display,
     U: Display,
 {
-    if recent {
-        format!("{url}/api/v1/workflows/{namespace}?fields=items.status.finishedAt,items.status.startedAt,items.metadata.name,items.status.phase,items.metadata.labels&listOptions.labelSelector=workflows.argoproj.io/workflow-archiving-status!=Archived")
-    } else {
-        format!("{url}/api/v1/workflows/{namespace}?fields=items.status.finishedAt,items.status.startedAt,items.metadata.name,items.status.phase,items.metadata.labels")
-    }
+    format!("{url}/api/v1/workflows/{namespace}?fields=items.status.finishedAt,items.status.startedAt,items.metadata.name,items.status.phase,items.metadata.labels")
 }
 
 pub fn get_submit_url<T, U>(url: T, namespace: U) -> String

@@ -26,10 +26,10 @@ impl ArgoClient {
 }
 
 impl ArgoClient {
-    pub async fn get_workflow_status(&self, recent: bool) -> Result<SimpleStatusList> {
+    pub async fn get_workflow_status(&self) -> Result<SimpleStatusList> {
         let response = self
             .client
-            .get(get_status_url_bakta(&self.url, &self.namespace, recent))
+            .get(get_status_url_bakta(&self.url, &self.namespace))
             .header("Authorization", &self.token)
             .send()
             .await?
@@ -55,6 +55,7 @@ impl ArgoClient {
         labels: Option<HashMap<String, String>>,
         parameters: Option<HashMap<String, String>>,
         service_account: Option<String>,
+        generate_name: Option<String>,
     ) -> Result<SubmitResult> {
         let labels = labels.map(|some| {
             some.iter()
@@ -77,9 +78,9 @@ impl ArgoClient {
                 labels,
                 parameters,
                 service_account,
+                generate_name,
             },
         };
-
 
         let response = self
             .client
@@ -87,7 +88,9 @@ impl ArgoClient {
             .header("Authorization", &self.token)
             .json(&submit_template)
             .send()
-            .await?.bytes().await?;
+            .await?
+            .bytes()
+            .await?;
 
         tracing::trace!("Response: {response:?}");
         Ok(serde_json::from_slice(&response)?)
@@ -102,7 +105,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_workflow_status() {
         let client = ArgoClient::new("foo".to_string(), "bar".to_string(), "bakta".to_string());
-        let response = client.get_workflow_status(true).await.unwrap();
+        let response = client.get_workflow_status().await.unwrap();
         dbg!(response);
     }
 }

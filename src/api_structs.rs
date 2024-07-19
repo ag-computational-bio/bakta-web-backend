@@ -217,11 +217,15 @@ impl JobConfig {
         }
 
         if let Some(locus) = self.locus {
-            parameters.push(format!("--locus {}", locus));
+            if !locus.is_empty() {
+                parameters.push(format!("--locus {}", locus));
+            }
         }
 
         if let Some(locus_tag) = self.locus_tag {
-            parameters.push(format!("--locus-tag {}", locus_tag));
+            if !locus_tag.is_empty() {
+                parameters.push(format!("--locus-tag {}", locus_tag));
+            }
         }
 
         if self.headers {
@@ -229,19 +233,27 @@ impl JobConfig {
         }
 
         if let Some(genus) = self.genus {
-            parameters.push(format!("--genus {}", genus));
+            if !genus.is_empty() {
+                parameters.push(format!("--genus {}", genus));
+            }
         }
 
         if let Some(species) = self.species {
-            parameters.push(format!("--species {}", species));
+            if !species.is_empty() {
+                parameters.push(format!("--species {}", species));
+            }
         }
 
         if let Some(strain) = self.strain {
-            parameters.push(format!("--strain {}", strain));
+            if !strain.is_empty() {
+                parameters.push(format!("--strain {}", strain));
+            }
         }
 
         if let Some(plasmid) = self.plasmid {
-            parameters.push(format!("--plasmid {}", plasmid));
+            if !plasmid.is_empty() {
+                parameters.push(format!("--plasmid {}", plasmid));
+            }
         }
 
         if self.compliant {
@@ -255,7 +267,7 @@ impl JobConfig {
         match self.derm {
             Some(DermType::MONODERM) => parameters.push("--gram +".to_string()),
             Some(DermType::DIDERM) => parameters.push("--gram -".to_string()),
-            _ => parameters.push("--derm ?".to_string()),
+            _ => parameters.push("--gram ?".to_string()),
         }
 
         parameters.join(" ")
