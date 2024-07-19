@@ -20,7 +20,7 @@ where
     format!("{url}/api/v1/workflows/{namespace}/submit")
 }
 
-pub fn get_logs_url<T, U, V, W>(url: T, namespace: U, workflowname: V, podname: W) -> String
+pub fn _get_logs_url<T, U, V, W>(url: T, namespace: U, workflowname: V, podname: W) -> String
 where
     T: Display,
     U: Display,

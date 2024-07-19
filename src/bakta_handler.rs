@@ -1,6 +1,9 @@
 use crate::api_structs::FailedJobStatus;
 use crate::api_structs::FailedJobStatusEnum;
+use crate::api_structs::Job;
 use crate::api_structs::ListResponse;
+use crate::api_structs::ResultFiles;
+use crate::api_structs::StartRequest;
 use crate::argo::structs::SimpleStatus;
 use crate::{
     api_structs::{JobStatus, JobStatusEnum, VersionResponse},
@@ -30,7 +33,6 @@ pub struct FullJobState {
 }
 
 pub struct BaktaHandler {
-    pub argo_client: Arc<ArgoClient>,
     pub s3_handler: S3Handler,
     pub version: VersionResponse,
     pub state_handler: Arc<StateHandler>,
@@ -54,14 +56,13 @@ impl BaktaHandler {
 
         let state_handler = Arc::new(StateHandler {
             job_state: RwLock::new(HashMap::new()),
-            argo_client: argo_client.clone(),
+            argo_client: argo_client,
         });
 
         let state_handler_clone = state_handler.clone();
         state_handler_clone.run().await;
 
         BaktaHandler {
-            argo_client,
             s3_handler,
             version: VersionResponse {
                 tool: bakta_version,
@@ -143,12 +144,12 @@ impl StateHandler {
         });
     }
 
-    pub async fn get_job_states(&self, job_ids: Vec<(Uuid, String)>) -> ListResponse {
+    pub async fn get_job_states(&self, request_jobs: Vec<Job>) -> ListResponse {
         let read_lock = self.job_state.read().await;
         let mut jobs = vec![];
         let mut failed = vec![];
 
-        for (id, secret) in job_ids {
+        for Job { id, secret } in request_jobs {
             if let Some(state) = read_lock.get(&id) {
                 if state.secret != secret {
                     failed.push(FailedJobStatus {
@@ -206,5 +207,65 @@ impl StateHandler {
             },
         );
         (job_id, secret)
+    }
+
+    pub async fn start_job(
+        &self,
+        start_settings: StartRequest,
+        bakta_version: String,
+    ) -> Result<()> {
+        let Job { id, secret } = &start_settings.job;
+
+        let parameters = start_settings.config.into_parameters();
+
+        let mut write_lock = self.job_state.write().await;
+        if let Some(state) = write_lock.get_mut(&id) {
+            if state.secret != *secret {
+                return Err(anyhow!("Unauthorized"));
+            }
+
+            let result = self
+                .argo_client
+                .submit_from_template(
+                    format!("bakta-job-{}", bakta_version),
+                    Some(HashMap::from([
+                        ("jobid".to_string(), id.to_string()),
+                        ("name".to_string(), state.name.clone()),
+                        ("secret".to_string(), state.secret.clone()),
+                    ])),
+                    Some(HashMap::from([("parameters".to_string(), parameters)])),
+                    None,
+                )
+                .await?;
+
+            state.workflowname = Some(result.metadata.name);
+            state.api_status = Some(JobStatus {
+                id: id.clone(),
+                status: JobStatusEnum::INIT,
+                started: result.metadata.creation_timestamp,
+                updated: Utc::now(),
+                name: state.name.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn get_results(
+        &self,
+        Job { id, secret }: Job,
+        s3_handler: &S3Handler,
+    ) -> Result<ResultFiles> {
+        if let Some(state) = self.job_state.read().await.get(&id) {
+            if state.secret != secret {
+                return Err(anyhow!("Unauthorized"));
+            }
+
+            if let Some(state) = &state.api_status {
+                if state.status != JobStatusEnum::SUCCESSFULL {
+                    return Err(anyhow!("Job not finished"));
+                }
+            }
+        }
+        s3_handler.sign_download_urls(id.to_string().as_str())
     }
 }

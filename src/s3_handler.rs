@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use chrono::format;
 use reqsign::{AwsCredential, AwsV4Signer};
 use reqwest::Method;
 use url::Url;

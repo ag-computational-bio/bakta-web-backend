@@ -1,3 +1,4 @@
+use chrono::DateTime;
 use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
@@ -16,11 +17,8 @@ pub struct SubmitWorkflowTemplate {
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitOptions {
-    pub generate_name: Option<String>,
     pub labels: Option<String>,
-    pub name: Option<String>,
     pub parameters: Option<Vec<String>>,
-    pub priority: Option<i64>,
     pub service_account: Option<String>,
 }
 
@@ -138,4 +136,15 @@ pub struct SimpleStatusStatus {
     pub started_at: chrono::DateTime<Utc>,
     #[serde(rename = "finishedAt")]
     pub finished_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmitResult {
+    pub metadata: SubmitResultMetadata,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmitResultMetadata {
+    pub name: String,
+    pub creation_timestamp: DateTime<Utc>,
 }

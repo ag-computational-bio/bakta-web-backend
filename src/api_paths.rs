@@ -51,9 +51,20 @@ pub async fn init_job(
 ) -> impl IntoResponse {
     let (id, secret) = state.state_handler.init_job(init_request.name).await;
 
-    let Ok(fasta_url) = state
-        .s3_handler
-        .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::Fasta)
+    let Ok((fasta_url, prodigal_url, replicon_url)) =
+        || -> anyhow::Result<(String, String, String)> {
+            Ok((
+                state
+                    .s3_handler
+                    .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::Fasta)?,
+                state
+                    .s3_handler
+                    .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::Prodigal)?,
+                state
+                    .s3_handler
+                    .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::RepliconsTSV)?,
+            ))
+        }()
     else {
         return (
             StatusCode::BAD_REQUEST,
@@ -61,28 +72,6 @@ pub async fn init_job(
         )
             .into_response();
     };
-
-    let Ok(prodigal_url) = state
-        .s3_handler
-        .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::Prodigal)
-    else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json("Failed to sign URL".to_string()),
-        )
-            .into_response();
-    };
-    let Ok(replicon_url) = state
-        .s3_handler
-        .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::RepliconsTSV)
-    else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json("Failed to sign URL".to_string()),
-        )
-            .into_response();
-    };
-
     (
         StatusCode::OK,
         Json(InitResponse {
@@ -104,8 +93,11 @@ pub async fn init_job(
         (status = 200, body = ListResponse)
     )
 )]
-pub async fn list_jobs(Json(ListRequest): Json<ListRequest>) -> impl IntoResponse {
-    format!("")
+pub async fn list_jobs(
+    State(state): State<Arc<BaktaHandler>>,
+    Json(list_request): Json<ListRequest>,
+) -> impl IntoResponse {
+    Json(state.state_handler.get_job_states(list_request.jobs).await)
 }
 
 /// Query the result of a job
@@ -114,11 +106,22 @@ pub async fn list_jobs(Json(ListRequest): Json<ListRequest>) -> impl IntoRespons
     path = "/api/v1/job/result",
     request_body = Job,
     responses(
-        (status = 200, body = ResultResponse)
+        (status = 200, body = ResultResponse),
+        (status = 400, body = String)
     )
 )]
-pub async fn query_result(Json(job): Json<Job>) -> impl IntoResponse {
-    format!("")
+pub async fn query_result(
+    State(state): State<Arc<BaktaHandler>>,
+    Json(job): Json<Job>,
+) -> impl IntoResponse {
+    match state
+        .state_handler
+        .get_results(job, &state.s3_handler)
+        .await
+    {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(e.to_string())).into_response(),
+    }
 }
 
 /// Start a job
@@ -127,11 +130,23 @@ pub async fn query_result(Json(job): Json<Job>) -> impl IntoResponse {
     path = "/api/v1/job/start",
     request_body = StartRequest,
     responses(
-        (status = 200, body = ())
+        (status = 200, body = ()),
+        (status = 400, body = String)
     )
 )]
-pub async fn start_job(Json(StartRequest): Json<StartRequest>) -> impl IntoResponse {
-    format!("")
+pub async fn start_job(
+    State(state): State<Arc<BaktaHandler>>,
+    Json(start_request): Json<StartRequest>,
+) -> impl IntoResponse {
+    let tool_version = state.version.tool.clone();
+    match state
+        .state_handler
+        .start_job(start_request, tool_version)
+        .await
+    {
+        Ok(_) => (StatusCode::OK, Json(())).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(e.to_string())).into_response(),
+    }
 }
 
 /// Get the current version
@@ -142,6 +157,6 @@ pub async fn start_job(Json(StartRequest): Json<StartRequest>) -> impl IntoRespo
         (status = 200, body = VersionResponse)
     )
 )]
-pub async fn version() -> impl IntoResponse {
-    format!("")
+pub async fn version(State(state): State<Arc<BaktaHandler>>) -> impl IntoResponse {
+    Json(state.version.clone())
 }

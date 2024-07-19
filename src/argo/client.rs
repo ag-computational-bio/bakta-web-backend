@@ -1,11 +1,9 @@
+use anyhow::Result;
+use reqwest::Client;
 use std::collections::HashMap;
 
-use reqwest::{Client, Response};
-
-use anyhow::Result;
-
 use super::{
-    structs::{SimpleStatusList, SubmitOptions, SubmitWorkflowTemplate},
+    structs::{SimpleStatusList, SubmitOptions, SubmitResult, SubmitWorkflowTemplate},
     urls::{get_delete_url, get_status_url_bakta, get_submit_url},
 };
 
@@ -54,12 +52,10 @@ impl ArgoClient {
     pub async fn submit_from_template(
         &self,
         templatename: String,
-        name: String,
         labels: Option<HashMap<String, String>>,
         parameters: Option<HashMap<String, String>>,
-        priority: Option<i64>,
         service_account: Option<String>,
-    ) -> Result<Response> {
+    ) -> Result<SubmitResult> {
         let labels = labels.map(|some| {
             some.iter()
                 .map(|(k, v)| format!("{k}={v}"))
@@ -78,23 +74,21 @@ impl ArgoClient {
             resource_kind: "WorkflowTemplate".to_string(),
             resource_name: templatename.to_string(),
             submit_options: SubmitOptions {
-                generate_name: None,
                 labels,
-                name: Some(name),
                 parameters,
-                priority,
                 service_account,
             },
         };
 
-        let response = self
+        Ok(self
             .client
             .post(get_submit_url(&self.url, &self.namespace))
             .header("Authorization", &self.token)
             .json(&submit_template)
             .send()
-            .await?;
-        Ok(response)
+            .await?
+            .json()
+            .await?)
     }
 }
 

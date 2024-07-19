@@ -68,7 +68,7 @@ pub struct ListRequest {
     pub jobs: Vec<Job>,
 }
 
-#[derive(ToSchema, Serialize, Deserialize, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum JobStatusEnum {
     INIT,
     RUNNING,
@@ -166,18 +166,18 @@ pub enum DermType {
     DIDERM,
 }
 
-#[derive(ToSchema, Serialize, Deserialize)]
+#[derive(ToSchema, Serialize, Deserialize, Default)]
 pub struct JobConfig {
     #[serde(rename = "hasProdigal")]
-    pub prodigal: Option<bool>,
+    pub prodigal: bool,
     #[serde(rename = "hasReplicons")]
-    pub replicons: Option<bool>,
+    pub replicons: bool,
     #[serde(rename = "translationTable")]
-    pub table: Option<u8>,
+    pub table: u8,
     #[serde(rename = "completeGenome")]
-    pub complete: Option<bool>,
+    pub complete: bool,
     #[serde(rename = "keepContigHeaders")]
-    pub headers: Option<bool>,
+    pub headers: bool,
     #[serde(rename = "minContigLength")]
     pub min_length: Option<String>,
     #[serde(rename = "dermType")]
@@ -189,7 +189,69 @@ pub struct JobConfig {
     pub locus: Option<String>,
     #[serde(rename = "locusTag")]
     pub locus_tag: Option<String>,
-    pub compliant: Option<bool>,
+    pub compliant: bool,
+}
+
+impl JobConfig {
+    pub fn into_parameters(self) -> String {
+        let mut parameters = Vec::new();
+
+        if self.prodigal {
+            parameters.push("--prodigal /data/prodigal.tf".to_string());
+        }
+
+        if self.replicons {
+            parameters.push("--replicons /data/replicons.tsv".to_string());
+        }
+
+        if self.complete {
+            parameters.push("--complete".to_string());
+        }
+
+        if let Some(locus) = self.locus {
+            parameters.push(format!("--locus {}", locus));
+        }
+
+        if let Some(locus_tag) = self.locus_tag {
+            parameters.push(format!("--locus-tag {}", locus_tag));
+        }
+
+        if self.headers {
+            parameters.push("--keep-contig-headers".to_string());
+        }
+
+        if let Some(genus) = self.genus {
+            parameters.push(format!("--genus {}", genus));
+        }
+
+        if let Some(species) = self.species {
+            parameters.push(format!("--species {}", species));
+        }
+
+        if let Some(strain) = self.strain {
+            parameters.push(format!("--strain {}", strain));
+        }
+
+        if let Some(plasmid) = self.plasmid {
+            parameters.push(format!("--plasmid {}", plasmid));
+        }
+
+        if self.compliant {
+            parameters.push("--compliant".to_string());
+        }
+
+        if let 4 = self.table {
+            parameters.push("--translation-table 4".to_string());
+        }
+
+        match self.derm {
+            Some(DermType::MONODERM) => parameters.push("--gram +".to_string()),
+            Some(DermType::DIDERM) => parameters.push("--gram -".to_string()),
+            _ => parameters.push("--derm ?".to_string()),
+        }
+
+        parameters.join(" ")
+    }
 }
 
 #[derive(ToSchema, Serialize, Deserialize)]
@@ -198,7 +260,7 @@ pub struct StartRequest {
     pub config: JobConfig,
 }
 
-#[derive(ToSchema, Serialize, Deserialize)]
+#[derive(ToSchema, Serialize, Deserialize, Clone)]
 pub struct VersionResponse {
     #[serde(rename = "toolVersion")]
     pub tool: String,
@@ -206,4 +268,36 @@ pub struct VersionResponse {
     pub db: String,
     #[serde(rename = "backendVersion")]
     pub backend: String,
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_into_parameters() {
+        let params = JobConfig {
+            prodigal: true,
+            replicons: true,
+            table: 4,
+            complete: true,
+            headers: true,
+            min_length: None,
+            derm: Some(DermType::MONODERM),
+            genus: Some("Bacillus".to_string()),
+            species: Some("subtilis".to_string()),
+            strain: Some("168".to_string()),
+            plasmid: Some("pBS32".to_string()),
+            locus: Some("BSU_00010".to_string()),
+            locus_tag: Some("BSU00010".to_string()),
+            compliant: true,
+        };
+
+        assert_eq!(
+            params.into_parameters(),
+            "--prodigal /data/prodigal.tf --replicons /data/replicons.tsv --complete --locus BSU_00010 --locus-tag BSU00010 --keep-contig-headers --genus Bacillus --species subtilis --strain 168 --plasmid pBS32 --compliant --translation-table 4 --gram +"
+        );
+
+        assert_eq!(JobConfig::default().into_parameters(), "--derm ?");
+    }
 }
