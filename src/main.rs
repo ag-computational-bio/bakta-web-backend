@@ -5,6 +5,9 @@ use axum::{
 };
 use bakta_handler::BaktaHandler;
 use std::{net::SocketAddr, sync::Arc};
+use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
+use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -41,6 +44,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await,
     );
 
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or("none".into())
+        .add_directive("tower_http=debug".parse()?)
+        .add_directive("bakta_web_backend=trace".parse()?);
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            filter
+        )
+        .init();
+
+    tracing::info!(?socket_address, "Starting bakta web backend");
+
     let app = Router::new()
         .merge(swagger)
         .route("/", get(|| async { Redirect::permanent("/swagger-ui") }))
@@ -50,7 +67,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/job/result", post(api_paths::query_result))
         .route("/api/v1/job/start", post(api_paths::start_job))
         .route("/api/v1/version", get(api_paths::version))
-        .with_state(bakta_handler);
+        .with_state(bakta_handler)
+        .layer(CorsLayer::very_permissive())
+        .layer(
+            TraceLayer::new_for_http()
+                .on_response(())
+                .on_body_chunk(())
+                .on_eos(()),
+        );
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
 }

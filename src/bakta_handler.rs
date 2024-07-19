@@ -124,17 +124,31 @@ impl StateHandler {
                 ))
             };
 
-            let initial = argo_client.get_workflow_status(false).await?;
+            let initial = argo_client.get_workflow_status(false).await.map_err(|e| {
+                tracing::error!(?e, "Failed to get initial workflow status");
+                e
+            })?;
             let mut write_lock = self.job_state.write().await;
             for item in initial.items {
-                let (id, state) = into_state(item)?;
+                let (id, state) = into_state(item).map_err(|e| {
+                    tracing::error!(?e, "Failed to parse state");
+                    e
+                })?;
                 write_lock.insert(id, state);
             }
             drop(write_lock);
-            loop {
-                let initial = argo_client.get_workflow_status(true).await?;
+            'outer: loop {
+                let Ok(initial) = argo_client.get_workflow_status(true).await.map_err(|e| {
+                    tracing::error!(?e, "Failed to query workflow_status");
+                })else{
+                    continue;
+                };
                 for item in initial.items {
-                    let (id, state) = into_state(item)?;
+                    let Ok((id, state)) = into_state(item).map_err(|e| {
+                        tracing::error!(?e, "Failed to parse_state");
+                    })else{
+                        continue 'outer;
+                    };
                     self.job_state.write().await.insert(id, state);
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
