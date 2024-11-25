@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 #[derive(OpenApi)]
 #[openapi(
+    info(title = "Bakta Web API"),
     paths(delete_job, init_job, list_jobs, query_result, start_job, version),
     components(schemas(
         Job,

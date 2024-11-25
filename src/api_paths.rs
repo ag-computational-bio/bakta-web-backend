@@ -8,7 +8,10 @@ use axum::{
 use reqwest::StatusCode;
 
 use crate::{
-    api_structs::{InitRequest, InitResponse, Job, ListRequest, StartRequest},
+    api_structs::{
+        InitRequest, InitResponse, Job, ListRequest, ListResponse, ResultResponse, StartRequest,
+        VersionResponse,
+    },
     bakta_handler::BaktaHandler,
 };
 
