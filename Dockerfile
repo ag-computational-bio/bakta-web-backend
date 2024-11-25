@@ -1,17 +1,19 @@
-FROM alpine:latest as certs
-RUN apk --update add ca-certificates
-
-FROM golang:latest as builder
-
-RUN mkdir /BAKTA-Web-Backend
-WORKDIR /BAKTA-Web-Backend
+# Build Stage
+FROM rust:1-alpine3.20 AS builder
+WORKDIR /build
+RUN apk update
+RUN apk upgrade
+ENV RUSTFLAGS="-C target-feature=-crt-static"
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+RUN apk add llvm cmake gcc ca-certificates libc-dev pkgconfig musl-dev git openssl-dev curl
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-extldflags "-static"' -o BaktaBackend .
+RUN cargo build --release
 
-FROM scratch
-ARG GITHUB_SHA
-ENV GITHUB_SHA=$GITHUB_SHA
-COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /BAKTA-Web-Backend/BaktaBackend .
-
-ENTRYPOINT [ "/BaktaBackend" ]
+FROM alpine:3.20
+WORKDIR /run
+RUN apk update
+RUN apk upgrade
+RUN apk add libgcc gcompat ca-certificates openssl-dev
+COPY --from=builder /build/target/release/bakta-web-backend .
+COPY --from=builder /build/.env .
+CMD [ "/run/bakta-web-backend" ]
