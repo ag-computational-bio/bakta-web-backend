@@ -56,7 +56,7 @@ impl BaktaHandler {
 
         let state_handler = Arc::new(StateHandler {
             job_state: RwLock::new(HashMap::new()),
-            argo_client: argo_client,
+            argo_client,
         });
 
         let state_handler_clone = state_handler.clone();
@@ -76,7 +76,7 @@ impl BaktaHandler {
 
 lazy_static::lazy_static! {
     /// This is an example for using doc comment attributes
-    static ref REGEX: Regex = Regex::new(r"[^0-9a-zA-Z_.]+").unwrap();
+    pub static ref REGEX: Regex = Regex::new(r"[^0-9a-zA-Z_.]+").unwrap();
 }
 
 impl StateHandler {
@@ -85,7 +85,7 @@ impl StateHandler {
         tokio::spawn(async move {
             let into_state = |simple_status: SimpleStatus| -> Result<(Uuid, FullJobState)> {
                 let job_id = Uuid::from_str(
-                    &simple_status
+                    simple_status
                         .metadata
                         .labels
                         .get("jobid")
@@ -94,7 +94,7 @@ impl StateHandler {
                 let workflowname = simple_status.metadata.name;
 
                 let api_status = JobStatus {
-                    id: job_id.clone(),
+                    id: job_id,
                     status: JobStatusEnum::try_from(simple_status.status.phase)?,
                     started: simple_status.status.started_at,
                     updated: simple_status.status.finished_at.unwrap_or(Utc::now()),
@@ -109,7 +109,7 @@ impl StateHandler {
                 let name = api_status.name.clone();
 
                 Ok((
-                    api_status.id.clone(),
+                    api_status.id,
                     FullJobState {
                         api_status: Some(api_status),
                         workflowname: Some(workflowname),
@@ -234,7 +234,7 @@ impl StateHandler {
         let parameters = start_settings.config.into_parameters();
 
         let mut write_lock = self.job_state.write().await;
-        if let Some(state) = write_lock.get_mut(&id) {
+        if let Some(state) = write_lock.get_mut(id) {
             if state.secret != *secret {
                 return Err(anyhow!("Unauthorized"));
             }
@@ -247,20 +247,23 @@ impl StateHandler {
                         ("jobid".to_string(), id.to_string()),
                         ("name".to_string(), state.name.clone()),
                         ("secret".to_string(), state.secret.clone()),
-                        ("origin".to_string(), origin.unwrap_or_else(|| "Unknown".to_string())),
+                        (
+                            "origin".to_string(),
+                            origin.unwrap_or_else(|| "Unknown".to_string()),
+                        ),
                     ])),
                     Some(HashMap::from([
                         ("parameter".to_string(), parameters),
                         ("jobid".to_string(), id.to_string()),
                     ])),
                     None,
-                    Some(format!("bakta-job-{}-", id.to_string())),
+                    Some(format!("bakta-job-{}-", id)),
                 )
                 .await?;
 
             state.workflowname = Some(result.metadata.name);
             state.api_status = Some(JobStatus {
-                id: id.clone(),
+                id: *id,
                 status: JobStatusEnum::INIT,
                 started: result.metadata.creation_timestamp,
                 updated: Utc::now(),

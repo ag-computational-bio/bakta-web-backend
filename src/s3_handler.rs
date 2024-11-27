@@ -31,11 +31,7 @@ impl InputType {
 
 impl S3Handler {
     pub fn new(access_key: String, secret_key: String, bucket: String, endpoint: String) -> Self {
-        let ssl = if endpoint.starts_with("https://") {
-            true
-        } else {
-            false
-        };
+        let ssl = endpoint.starts_with("https://");
         S3Handler {
             access_key,
             secret_key,

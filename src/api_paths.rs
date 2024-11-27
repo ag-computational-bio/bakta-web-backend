@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Query, State}, http::HeaderMap, response::IntoResponse, Json
+    extract::{Query, State},
+    http::HeaderMap,
+    response::IntoResponse,
+    Json,
 };
 use reqwest::StatusCode;
 
@@ -10,7 +13,7 @@ use crate::{
         InitRequest, InitResponse, Job, ListRequest, ListResponse, ResultResponse, StartRequest,
         VersionResponse,
     },
-    bakta_handler::BaktaHandler,
+    bakta_handler::{BaktaHandler, REGEX},
 };
 
 /// Delete an existing Job
@@ -142,7 +145,15 @@ pub async fn start_job(
 ) -> impl IntoResponse {
     let tool_version = state.version.tool.clone();
 
-    let origin = headers.get("origin").map(|o| o.to_str().ok().map(|e| e.to_string())).flatten();
+    let origin = headers
+        .get("origin")
+        .and_then(|o| {
+            o.to_str().ok().map(|e| {
+                REGEX
+                    .replace_all(e.strip_prefix("https://").unwrap_or(e), "_")
+                    .to_string()
+            })
+        });
 
     match state
         .state_handler
