@@ -227,6 +227,7 @@ impl StateHandler {
         &self,
         start_settings: StartRequest,
         bakta_version: String,
+        origin: Option<String>,
     ) -> Result<()> {
         let Job { id, secret } = &start_settings.job;
 
@@ -246,6 +247,7 @@ impl StateHandler {
                         ("jobid".to_string(), id.to_string()),
                         ("name".to_string(), state.name.clone()),
                         ("secret".to_string(), state.secret.clone()),
+                        ("origin".to_string(), origin.unwrap_or_else(|| "Unknown".to_string())),
                     ])),
                     Some(HashMap::from([
                         ("parameter".to_string(), parameters),
