@@ -81,7 +81,7 @@ impl S3Handler {
             ffn: get_download_url("ffn")?,
             fna: get_download_url("fna")?,
             gbff: get_download_url("gbff")?,
-            gff3: get_download_url("gff")?,
+            gff3: get_download_url("gff3")?,
             json: get_download_url("json")?,
             tsv: get_download_url("tsv")?,
             tsv_hypothetical: get_download_url("hypotheticals.tsv")?,
