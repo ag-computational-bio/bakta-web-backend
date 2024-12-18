@@ -197,6 +197,10 @@ pub struct JobConfig {
     pub compliant: bool,
 }
 
+pub fn strip_whitespace(s: String) -> String {
+    s.replace(" ", "")
+}
+
 impl JobConfig {
     pub fn into_parameters(self) -> String {
         let mut parameters = Vec::new();
@@ -219,13 +223,13 @@ impl JobConfig {
 
         if let Some(locus) = self.locus {
             if !locus.is_empty() {
-                parameters.push(format!("--locus {}", locus));
+                parameters.push(format!("--locus {}", strip_whitespace(locus)));
             }
         }
 
         if let Some(locus_tag) = self.locus_tag {
             if !locus_tag.is_empty() {
-                parameters.push(format!("--locus-tag {}", locus_tag));
+                parameters.push(format!("--locus-tag {}", strip_whitespace(locus_tag)));
             }
         }
 
@@ -235,25 +239,25 @@ impl JobConfig {
 
         if let Some(genus) = self.genus {
             if !genus.is_empty() {
-                parameters.push(format!("--genus {}", genus));
+                parameters.push(format!("--genus {}", strip_whitespace(genus)));
             }
         }
 
         if let Some(species) = self.species {
             if !species.is_empty() {
-                parameters.push(format!("--species {}", species));
+                parameters.push(format!("--species {}", strip_whitespace(species)));
             }
         }
 
         if let Some(strain) = self.strain {
             if !strain.is_empty() {
-                parameters.push(format!("--strain {}", strain));
+                parameters.push(format!("--strain {}", strip_whitespace(strain)));
             }
         }
 
         if let Some(plasmid) = self.plasmid {
             if !plasmid.is_empty() {
-                parameters.push(format!("--plasmid {}", plasmid));
+                parameters.push(format!("--plasmid {}", strip_whitespace(plasmid)));
             }
         }
 
@@ -261,6 +265,7 @@ impl JobConfig {
             parameters.push("--compliant".to_string());
         }
 
+        // 11 is the default table
         if let 4 = self.table {
             parameters.push("--translation-table 4".to_string());
         }
