@@ -200,8 +200,8 @@ pub struct JobConfig {
     pub compliant: bool,
 }
 
-pub fn strip_whitespace(s: String) -> String {
-    s.replace(" ", "")
+pub fn sanitize_input(s: String) -> String {
+    format!("'{}'", s.replace("'", ""))
 }
 
 impl JobConfig {
@@ -226,13 +226,13 @@ impl JobConfig {
 
         if let Some(locus) = self.locus {
             if !locus.is_empty() {
-                parameters.push(format!("--locus {}", strip_whitespace(locus)));
+                parameters.push(format!("--locus {}", sanitize_input(locus)));
             }
         }
 
         if let Some(locus_tag) = self.locus_tag {
             if !locus_tag.is_empty() {
-                parameters.push(format!("--locus-tag {}", strip_whitespace(locus_tag)));
+                parameters.push(format!("--locus-tag {}", sanitize_input(locus_tag)));
             }
         }
 
@@ -242,25 +242,25 @@ impl JobConfig {
 
         if let Some(genus) = self.genus {
             if !genus.is_empty() {
-                parameters.push(format!("--genus {}", strip_whitespace(genus)));
+                parameters.push(format!("--genus {}", sanitize_input(genus)));
             }
         }
 
         if let Some(species) = self.species {
             if !species.is_empty() {
-                parameters.push(format!("--species {}", strip_whitespace(species)));
+                parameters.push(format!("--species {}", sanitize_input(species)));
             }
         }
 
         if let Some(strain) = self.strain {
             if !strain.is_empty() {
-                parameters.push(format!("--strain {}", strip_whitespace(strain)));
+                parameters.push(format!("--strain {}", sanitize_input(strain)));
             }
         }
 
         if let Some(plasmid) = self.plasmid {
             if !plasmid.is_empty() {
-                parameters.push(format!("--plasmid {}", strip_whitespace(plasmid)));
+                parameters.push(format!("--plasmid {}", sanitize_input(plasmid)));
             }
         }
 
