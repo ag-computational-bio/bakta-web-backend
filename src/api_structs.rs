@@ -76,8 +76,9 @@ pub struct ListRequest {
 pub enum JobStatusEnum {
     INIT,
     RUNNING,
-    SUCCESSFULL,
+    SUCCESSFUL,
     ERROR,
+    FAILED,
 }
 
 impl TryFrom<String> for JobStatusEnum {
@@ -87,8 +88,9 @@ impl TryFrom<String> for JobStatusEnum {
         match value.as_str() {
             "Init" | "Pending" => Ok(JobStatusEnum::INIT),
             "Running" => Ok(JobStatusEnum::RUNNING),
-            "Succeeded" => Ok(JobStatusEnum::SUCCESSFULL),
-            "Failed" | "Error" => Ok(JobStatusEnum::ERROR),
+            "Succeeded" => Ok(JobStatusEnum::SUCCESSFUL),
+            "Failed" => Ok(JobStatusEnum::FAILED),
+            "Error" => Ok(JobStatusEnum::ERROR),
             _ => Err(anyhow!("Invalid JobStatus")),
         }
     }

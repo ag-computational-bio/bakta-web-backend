@@ -284,7 +284,7 @@ impl StateHandler {
             }
 
             if let Some(state) = &state.api_status {
-                if state.status != JobStatusEnum::SUCCESSFULL {
+                if state.status != JobStatusEnum::SUCCESSFUL {
                     return Err(anyhow!("Job not finished"));
                 }
             }
