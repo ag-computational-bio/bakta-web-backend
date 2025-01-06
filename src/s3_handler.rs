@@ -85,6 +85,10 @@ impl S3Handler {
             json: get_download_url("json")?,
             tsv: get_download_url("tsv")?,
             tsv_hypothetical: get_download_url("hypotheticals.tsv")?,
+            tsv_interference: get_download_url("interference.tsv")?,
+            txt_logs: get_download_url("txt")?,
+            png_circular_plot: get_download_url("png")?,
+            svg_circular_plot: get_download_url("svg")?,
         })
     }
 }

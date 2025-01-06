@@ -78,7 +78,6 @@ pub enum JobStatusEnum {
     RUNNING,
     SUCCESSFUL,
     ERROR,
-    FAILED,
 }
 
 impl TryFrom<String> for JobStatusEnum {
@@ -89,8 +88,7 @@ impl TryFrom<String> for JobStatusEnum {
             "Init" | "Pending" => Ok(JobStatusEnum::INIT),
             "Running" => Ok(JobStatusEnum::RUNNING),
             "Succeeded" => Ok(JobStatusEnum::SUCCESSFUL),
-            "Failed" => Ok(JobStatusEnum::FAILED),
-            "Error" => Ok(JobStatusEnum::ERROR),
+            "Failed" | "Error" => Ok(JobStatusEnum::ERROR),
             _ => Err(anyhow!("Invalid JobStatus")),
         }
     }
@@ -152,6 +150,14 @@ pub struct ResultFiles {
     pub tsv: String,
     #[serde(rename = "TSVHypothetical")]
     pub tsv_hypothetical: String,
+    #[serde(rename = "TXTLogs")]
+    pub txt_logs: String,
+    #[serde(rename = "TSVInterference")]
+    pub tsv_interference: String,
+    #[serde(rename = "PNGCircularPlot")]
+    pub png_circular_plot: String,
+    #[serde(rename = "SVGCircularPlot")]
+    pub svg_circular_plot: String,
 }
 
 #[derive(ToSchema, Serialize, Deserialize)]
