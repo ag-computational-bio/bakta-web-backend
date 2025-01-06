@@ -13,7 +13,15 @@ use uuid::Uuid;
         title = "Bakta Web API",
         license(name = "MIT", url = "https://opensource.org/license/mit/")
     ),
-    paths(delete_job, init_job, list_jobs, query_result, start_job, version),
+    paths(
+        delete_job,
+        init_job,
+        list_jobs,
+        query_result,
+        start_job,
+        job_logs,
+        version
+    ),
     components(schemas(
         Job,
         InitRequest,
