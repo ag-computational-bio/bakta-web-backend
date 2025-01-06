@@ -188,7 +188,13 @@ impl StateHandler {
                     });
                     continue;
                 }
-                if let Some(api_status) = Option::<JobStatus>::from(state) {
+                if let Some(mut api_status) = Option::<JobStatus>::from(state) {
+                    if !matches!(
+                        state.status,
+                        Some(JobStatusEnum::ERROR) | Some(JobStatusEnum::SUCCESSFUL)
+                    ) {
+                        api_status.updated = Utc::now();
+                    }
                     jobs.push(api_status.clone());
                 }
             } else {
@@ -202,6 +208,24 @@ impl StateHandler {
         ListResponse { jobs, failed }
     }
 
+    pub async fn get_logs(&self, (job_id, secret): (Uuid, String)) -> Result<String> {
+        todo!();
+
+        // let read_lock = self.job_state.read().await;
+        // if let Some(state) = read_lock.get(&job_id) {
+        //     if state.secret != secret {
+        //         return Err(anyhow!("Unauthorized"));
+        //     }
+        //     if let Some(workflowname) = &state.workflowname {
+        //         return self
+        //             .argo_client
+        //             .get_workflow_logs(workflowname.clone())
+        //             .await;
+        //     }
+        // }
+        // Err(anyhow!("Job not found"))
+    }
+
     pub async fn delete_job(&self, (job_id, secret): (Uuid, String)) -> Result<()> {
         let mut write_lock = self.job_state.write().await;
         if let Some(state) = write_lock.get(&job_id) {
@@ -210,7 +234,7 @@ impl StateHandler {
             }
             if let Some(workflowname) = &state.workflowname {
                 self.argo_client
-                    .delete_workflow(workflowname.clone())
+                    .delete_workflow(workflowname.clone(), state.archived)
                     .await?;
             }
         }

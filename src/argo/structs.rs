@@ -3,6 +3,7 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// SUBMITWORKFLOW
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +128,9 @@ pub struct SimpleStatus {
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusMetadata {
     pub name: String,
+    pub uid: Uuid,
+    #[serde(rename = "resourceVersion")]
+    pub resource_version: String,
     pub labels: HashMap<String, String>,
 }
 

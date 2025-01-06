@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use super::{
     structs::{SimpleStatusList, SubmitOptions, SubmitResult, SubmitWorkflowTemplate},
-    urls::{get_delete_url, get_status_url_bakta, get_submit_url},
+    urls::{get_delete_url_archived, get_delete_url_running, get_status_url_bakta, get_submit_url},
 };
 
 pub struct ArgoClient {
@@ -38,9 +38,15 @@ impl ArgoClient {
         Ok(response)
     }
 
-    pub async fn delete_workflow(&self, workflow_name: String) -> Result<()> {
+    pub async fn delete_workflow(&self, workflow_name: String, archived: bool) -> Result<()> {
+        let url = if archived {
+            get_delete_url_archived(&self.url, &self.namespace, workflow_name)
+        } else {
+            get_delete_url_running(&self.url, &self.namespace, workflow_name)
+        };
+
         self.client
-            .delete(get_delete_url(&self.url, &self.namespace, workflow_name))
+            .delete(url)
             .header("Authorization", &self.token)
             .send()
             .await?

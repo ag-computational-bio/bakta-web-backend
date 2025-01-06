@@ -5,7 +5,7 @@ where
     T: Display,
     U: Display,
 {
-    format!("{url}/api/v1/workflows/{namespace}?fields=items.status.finishedAt,items.status.startedAt,items.metadata.name,items.status.phase,items.metadata.labels")
+    format!("{url}/api/v1/workflows/{namespace}?fields=items.status.finishedAt,items.status.startedAt,items.metadata.name,items.metadata.uid,items.metadata.resourceVersion,items.status.phase,items.metadata.labels")
 }
 
 pub fn get_submit_url<T, U>(url: T, namespace: U) -> String
