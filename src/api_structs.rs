@@ -44,6 +44,7 @@ use uuid::Uuid;
 pub struct BaktaApi;
 
 #[derive(ToSchema, Serialize, Deserialize, IntoParams)]
+#[into_params(style = Form, parameter_in = Query)]
 pub struct Job {
     pub secret: String,
     #[serde(rename = "jobID")]

@@ -20,9 +20,7 @@ use crate::{
 #[utoipa::path(
     delete,
     path = "/api/v1/job/delete",
-    params(
-        Job,
-    ),
+    params(Job),
     responses(
         (status = 200, body = ()),
         (status = 400, body = String)
