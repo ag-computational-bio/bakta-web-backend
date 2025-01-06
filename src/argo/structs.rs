@@ -154,3 +154,13 @@ pub struct SubmitResultMetadata {
     #[serde(rename = "creationTimestamp")]
     pub creation_timestamp: DateTime<Utc>,
 }
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+pub struct Content {
+    pub content: String,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+pub struct LogResult {
+    pub result: Content,
+}

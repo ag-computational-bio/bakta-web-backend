@@ -80,15 +80,38 @@ pub enum JobStatusEnum {
     ERROR,
 }
 
-impl TryFrom<String> for JobStatusEnum {
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ArgoStatus {
+    Pending,
+    Init,
+    Running,
+    Succeeded,
+    Failed,
+    Error,
+}
+
+impl From<ArgoStatus> for JobStatusEnum {
+    fn from(value: ArgoStatus) -> Self {
+        match value {
+            ArgoStatus::Pending | ArgoStatus::Init => JobStatusEnum::INIT,
+            ArgoStatus::Running => JobStatusEnum::RUNNING,
+            ArgoStatus::Succeeded => JobStatusEnum::SUCCESSFUL,
+            ArgoStatus::Failed | ArgoStatus::Error => JobStatusEnum::ERROR,
+        }
+    }
+}
+
+impl TryFrom<String> for ArgoStatus {
     type Error = anyhow::Error;
 
     fn try_from(value: String) -> Result<Self> {
         match value.as_str() {
-            "Init" | "Pending" => Ok(JobStatusEnum::INIT),
-            "Running" => Ok(JobStatusEnum::RUNNING),
-            "Succeeded" => Ok(JobStatusEnum::SUCCESSFUL),
-            "Failed" | "Error" => Ok(JobStatusEnum::ERROR),
+            "Init" => Ok(ArgoStatus::Init),
+            "Pending" => Ok(ArgoStatus::Pending),
+            "Running" => Ok(ArgoStatus::Running),
+            "Succeeded" => Ok(ArgoStatus::Succeeded),
+            "Failed" => Ok(ArgoStatus::Failed),
+            "Error" => Ok(ArgoStatus::Error),
             _ => Err(anyhow!("Invalid JobStatus")),
         }
     }

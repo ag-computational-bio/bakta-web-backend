@@ -5,8 +5,11 @@ use std::collections::HashMap;
 use crate::bakta_handler::FullJobState;
 
 use super::{
-    structs::{SimpleStatusList, SubmitOptions, SubmitResult, SubmitWorkflowTemplate},
-    urls::{get_delete_url_archived, get_delete_url_running, get_status_url_bakta, get_submit_url},
+    structs::{LogResult, SimpleStatusList, SubmitOptions, SubmitResult, SubmitWorkflowTemplate},
+    urls::{
+        get_delete_url_archived, get_delete_url_running, get_logs_archived_url,
+        get_logs_running_url, get_status_url_bakta, get_submit_url,
+    },
 };
 
 pub struct ArgoClient {
@@ -63,6 +66,54 @@ impl ArgoClient {
             .bytes()
             .await?;
         Ok(())
+    }
+
+    pub async fn get_logs(&self, state: &FullJobState) -> Result<String> {
+        if state.archived {
+            if let Some(argo_uid) = &state.argo_uid {
+                let wfname = state.workflowname.clone().unwrap_or("".to_string());
+                let url = get_logs_archived_url(&self.url, &self.namespace, argo_uid, wfname);
+                Ok(self
+                    .client
+                    .get(url)
+                    .header("Authorization", &self.token)
+                    .send()
+                    .await?
+                    .text()
+                    .await?)
+            } else {
+                return Ok(String::new());
+            }
+        } else {
+            if let Some(wf_name) = &state.workflowname {
+                let url = get_logs_running_url(&self.url, &self.namespace, wf_name);
+
+                let result = self
+                    .client
+                    .get(url)
+                    .header("Authorization", &self.token)
+                    .send()
+                    .await?
+                    .text()
+                    .await?;
+
+                let mut final_string = String::new();
+
+                for line in result.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let content: LogResult = serde_json::from_str(line)?;
+                    if !content.result.content.contains("argo=true") {
+                        final_string.push_str(&content.result.content);
+                        final_string.push_str("\n");
+                    }
+                }
+                Ok(final_string)
+            } else {
+                return Ok(String::new());
+            }
+        }
     }
 
     pub async fn submit_from_template(

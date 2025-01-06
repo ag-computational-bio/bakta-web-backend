@@ -55,10 +55,9 @@ pub async fn job_logs(
     State(state): State<Arc<BaktaHandler>>,
     Query(job): Query<Job>,
 ) -> impl IntoResponse {
-    todo!();
     state
         .state_handler
-        .delete_job((job.id, job.secret))
+        .get_logs((job.id, job.secret))
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }

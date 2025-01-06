@@ -1,3 +1,4 @@
+use crate::api_structs::ArgoStatus;
 use crate::api_structs::FailedJobStatus;
 use crate::api_structs::FailedJobStatusEnum;
 use crate::api_structs::Job;
@@ -6,7 +7,7 @@ use crate::api_structs::ResultResponse;
 use crate::api_structs::StartRequest;
 use crate::argo::structs::SimpleStatus;
 use crate::{
-    api_structs::{JobStatus, JobStatusEnum, VersionResponse},
+    api_structs::{JobStatus, VersionResponse},
     argo::client::ArgoClient,
     s3_handler::S3Handler,
 };
@@ -31,7 +32,7 @@ pub struct FullJobState {
     pub argo_uid: Option<Uuid>,
     pub argo_ressource_version: Option<String>,
     pub name: String,
-    pub status: Option<JobStatusEnum>,
+    pub status: Option<ArgoStatus>,
     pub started: Option<DateTime<Utc>>,
     pub updated: Option<DateTime<Utc>>,
     pub workflowname: Option<String>,
@@ -43,7 +44,7 @@ impl From<&FullJobState> for Option<JobStatus> {
     fn from(state: &FullJobState) -> Self {
         Some(JobStatus {
             id: state.id,
-            status: state.status.clone()?,
+            status: state.status.as_ref().map(|s| s.clone().into())?,
             started: state.started?,
             updated: state.updated?,
             name: state.name.clone(),
@@ -116,7 +117,7 @@ impl StateHandler {
                     id: job_id,
                     argo_uid: Some(simple_status.metadata.uid),
                     argo_ressource_version: Some(simple_status.metadata.resource_version),
-                    status: Some(JobStatusEnum::try_from(simple_status.status.phase)?),
+                    status: Some(ArgoStatus::try_from(simple_status.status.phase)?),
                     started: Some(simple_status.status.started_at),
                     updated: Some(simple_status.status.finished_at.unwrap_or(Utc::now())),
                     workflowname: Some(workflowname),
@@ -195,7 +196,9 @@ impl StateHandler {
                 if let Some(mut api_status) = Option::<JobStatus>::from(state) {
                     if !matches!(
                         state.status,
-                        Some(JobStatusEnum::ERROR) | Some(JobStatusEnum::SUCCESSFUL)
+                        Some(ArgoStatus::Error)
+                            | Some(ArgoStatus::Succeeded)
+                            | Some(ArgoStatus::Failed)
                     ) {
                         api_status.updated = Utc::now();
                     }
@@ -213,21 +216,14 @@ impl StateHandler {
     }
 
     pub async fn get_logs(&self, (job_id, secret): (Uuid, String)) -> Result<String> {
-        todo!();
-
-        // let read_lock = self.job_state.read().await;
-        // if let Some(state) = read_lock.get(&job_id) {
-        //     if state.secret != secret {
-        //         return Err(anyhow!("Unauthorized"));
-        //     }
-        //     if let Some(workflowname) = &state.workflowname {
-        //         return self
-        //             .argo_client
-        //             .get_workflow_logs(workflowname.clone())
-        //             .await;
-        //     }
-        // }
-        // Err(anyhow!("Job not found"))
+        let read_lock = self.job_state.read().await;
+        if let Some(state) = read_lock.get(&job_id) {
+            if state.secret != secret {
+                return Err(anyhow!("Unauthorized"));
+            }
+            return self.argo_client.get_logs(&state).await;
+        }
+        Err(anyhow!("Job not found"))
     }
 
     pub async fn delete_job(&self, (job_id, secret): (Uuid, String)) -> Result<()> {
@@ -308,7 +304,7 @@ impl StateHandler {
                 .await?;
 
             state.workflowname = Some(result.metadata.name);
-            state.status = Some(JobStatusEnum::INIT);
+            state.status = Some(ArgoStatus::Pending);
             state.started = Some(result.metadata.creation_timestamp);
             state.updated = Some(Utc::now());
         }
@@ -326,7 +322,7 @@ impl StateHandler {
             }
 
             if let Some(status) = &state.status {
-                if status != &JobStatusEnum::SUCCESSFUL {
+                if status != &ArgoStatus::Succeeded {
                     return Err(anyhow!("Job not finished"));
                 }
             }
