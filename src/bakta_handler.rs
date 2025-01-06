@@ -28,6 +28,8 @@ pub struct StateHandler {
 
 pub struct FullJobState {
     pub id: Uuid,
+    pub argo_uid: Option<Uuid>,
+    pub argo_ressource_version: Option<String>,
     pub name: String,
     pub status: Option<JobStatusEnum>,
     pub started: Option<DateTime<Utc>>,
@@ -112,6 +114,8 @@ impl StateHandler {
 
                 Ok(FullJobState {
                     id: job_id,
+                    argo_uid: Some(simple_status.metadata.uid),
+                    argo_ressource_version: Some(simple_status.metadata.resource_version),
                     status: Some(JobStatusEnum::try_from(simple_status.status.phase)?),
                     started: Some(simple_status.status.started_at),
                     updated: Some(simple_status.status.finished_at.unwrap_or(Utc::now())),
@@ -232,11 +236,7 @@ impl StateHandler {
             if state.secret != secret {
                 return Err(anyhow!("Unauthorized"));
             }
-            if let Some(workflowname) = &state.workflowname {
-                self.argo_client
-                    .delete_workflow(workflowname.clone(), state.archived)
-                    .await?;
-            }
+            self.argo_client.delete_workflow(&state).await?;
         }
         write_lock.remove(&job_id);
         Ok(())
@@ -255,6 +255,8 @@ impl StateHandler {
             job_id,
             FullJobState {
                 id: job_id,
+                argo_uid: None,
+                argo_ressource_version: None,
                 status: None,
                 started: None,
                 updated: None,

@@ -45,13 +45,12 @@ where
     )
 }
 
-pub fn get_delete_url_archived<T, U, V>(url: T, namespace: U, workflowname: V) -> String
+pub fn get_delete_url_archived<T, U>(url: T, uid: U) -> String
 where
     T: Display,
     U: Display,
-    V: Display,
 {
-    format!("{url}/api/v1/workflows/{namespace}/{workflowname}")
+    format!("{url}/api/v1/archived-workflows/{uid}")
 }
 
 pub fn get_delete_url_running<T, U, V>(url: T, namespace: U, workflowname: V) -> String

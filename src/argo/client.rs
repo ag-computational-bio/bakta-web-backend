@@ -2,6 +2,8 @@ use anyhow::Result;
 use reqwest::Client;
 use std::collections::HashMap;
 
+use crate::bakta_handler::FullJobState;
+
 use super::{
     structs::{SimpleStatusList, SubmitOptions, SubmitResult, SubmitWorkflowTemplate},
     urls::{get_delete_url_archived, get_delete_url_running, get_status_url_bakta, get_submit_url},
@@ -38,11 +40,19 @@ impl ArgoClient {
         Ok(response)
     }
 
-    pub async fn delete_workflow(&self, workflow_name: String, archived: bool) -> Result<()> {
-        let url = if archived {
-            get_delete_url_archived(&self.url, &self.namespace, workflow_name)
+    pub async fn delete_workflow(&self, state: &FullJobState) -> Result<()> {
+        let url = if state.archived {
+            if let Some(argo_uid) = &state.argo_uid {
+                get_delete_url_archived(&self.url, argo_uid)
+            } else {
+                return Ok(());
+            }
         } else {
-            get_delete_url_running(&self.url, &self.namespace, workflow_name)
+            if let Some(wf_name) = &state.workflowname {
+                get_delete_url_running(&self.url, &self.namespace, wf_name)
+            } else {
+                return Ok(());
+            }
         };
 
         self.client
