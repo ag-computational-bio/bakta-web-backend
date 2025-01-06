@@ -34,6 +34,7 @@ pub struct FullJobState {
     pub updated: Option<DateTime<Utc>>,
     pub workflowname: Option<String>,
     pub secret: String,
+    pub archived: bool,
 }
 
 impl From<&FullJobState> for Option<JobStatus> {
@@ -127,6 +128,15 @@ impl StateHandler {
                         .get("name")
                         .cloned()
                         .unwrap_or_else(|| "Unknown name".to_string()),
+                    archived: if simple_status
+                        .metadata
+                        .labels
+                        .contains_key("workflows.argoproj.io/workflow-archiving-status")
+                    {
+                        true
+                    } else {
+                        false
+                    },
                 })
             };
 
@@ -227,6 +237,7 @@ impl StateHandler {
                 workflowname: None,
                 secret: secret.clone(),
                 name: stripped,
+                archived: false,
             },
         );
         (job_id, secret)
