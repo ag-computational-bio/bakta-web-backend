@@ -19,7 +19,7 @@ use crate::{
 /// Delete an existing Job
 #[utoipa::path(
     delete,
-    path = "/api/v1/delete",
+    path = "/api/v1/job/delete",
     params(
         Job,
     ),
@@ -32,6 +32,30 @@ pub async fn delete_job(
     State(state): State<Arc<BaktaHandler>>,
     Query(job): Query<Job>,
 ) -> impl IntoResponse {
+    state
+        .state_handler
+        .delete_job((job.id, job.secret))
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+/// Get stdout / stderr logs of a job
+#[utoipa::path(
+    post,
+    path = "/api/v1/job/logs",
+    params(
+        Job,
+    ),
+    responses(
+        (status = 200, body = ()),
+        (status = 400, body = String)
+    )
+)]
+pub async fn job_logs(
+    State(state): State<Arc<BaktaHandler>>,
+    Query(job): Query<Job>,
+) -> impl IntoResponse {
+    todo!();
     state
         .state_handler
         .delete_job((job.id, job.secret))
@@ -145,15 +169,13 @@ pub async fn start_job(
 ) -> impl IntoResponse {
     let tool_version = state.version.tool.clone();
 
-    let origin = headers
-        .get("origin")
-        .and_then(|o| {
-            o.to_str().ok().map(|e| {
-                REGEX
-                    .replace_all(e.strip_prefix("https://").unwrap_or(e), "_")
-                    .to_string()
-            })
-        });
+    let origin = headers.get("origin").and_then(|o| {
+        o.to_str().ok().map(|e| {
+            REGEX
+                .replace_all(e.strip_prefix("https://").unwrap_or(e), "_")
+                .to_string()
+        })
+    });
 
     match state
         .state_handler
