@@ -55,9 +55,10 @@ impl S3Handler {
             &key,
             &self.endpoint,
             10000, // 10000 seconds = 2.77 hours should be enough for uploads
+            None,
         )
     }
-    pub fn sign_download_urls(&self, job_id: &str) -> Result<ResultFiles> {
+    pub fn sign_download_urls(&self, job_id: &str, name: &str) -> Result<ResultFiles> {
         let get_download_url = |output_format: &str| -> Result<String> {
             let key = format!("jobs/{job_id}/results/result.{output_format}").to_string();
             sign_url(
@@ -72,6 +73,7 @@ impl S3Handler {
                 &key,
                 &self.endpoint,
                 6 * 86400, // 6 days
+                Some(format!("{name}.{output_format}")),
             )
         };
         Ok(ResultFiles {
@@ -127,6 +129,7 @@ fn sign_url(
     key: &str,
     endpoint: &str,
     duration: i64,
+    disposition: Option<String>,
 ) -> Result<String> {
     let signer = AwsV4Signer::new("s3", "RegionOne");
 
@@ -151,10 +154,21 @@ fn sign_url(
             protocol, bucket, endpoint_sanitized, key, part_number, upload_id
         ))?
     } else {
-        Url::parse(&format!(
-            "{}{}.{}/{}",
-            protocol, bucket, endpoint_sanitized, key
-        ))?
+        if disposition.is_some() && method == &Method::GET {
+            let url_encoded_disposition = url::form_urlencoded::byte_serialize(
+                format!(r#"attachment; filename="{}""#, disposition.unwrap()).as_bytes(),
+            )
+            .collect::<String>();
+            Url::parse(&format!(
+                "{}{}.{}/{}?response-content-disposition={}",
+                protocol, bucket, endpoint_sanitized, key, url_encoded_disposition
+            ))?
+        } else {
+            Url::parse(&format!(
+                "{}{}.{}/{}",
+                protocol, bucket, endpoint_sanitized, key
+            ))?
+        }
     };
 
     let mut req = reqwest::Request::new(method, url);

@@ -327,7 +327,7 @@ impl StateHandler {
                 started: state.started.unwrap_or_default(),
                 updated: state.updated.unwrap_or_default(),
                 name: state.name.clone(),
-                files: s3_handler.sign_download_urls(id.to_string().as_str())?,
+                files: s3_handler.sign_download_urls(id.to_string().as_str(), &state.name)?,
             });
         }
         Err(anyhow!("Job not found"))

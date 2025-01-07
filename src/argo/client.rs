@@ -67,9 +67,11 @@ impl ArgoClient {
     }
 
     pub async fn get_logs(&self, state: &FullJobState) -> Result<String> {
-
         if let Some(ArgoStatus::Error) = state.status {
-            return Ok("Internal server error, please contact the administrator or try again later.".to_string());
+            return Ok(
+                "Internal server error, please contact the administrator or try again later."
+                    .to_string(),
+            );
         }
 
         if state.archived {
