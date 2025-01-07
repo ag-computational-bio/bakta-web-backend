@@ -40,7 +40,7 @@ pub async fn delete_job(
 
 /// Get stdout / stderr logs of a job
 #[utoipa::path(
-    post,
+    get,
     path = "/api/v1/job/logs",
     params(
         Job,
