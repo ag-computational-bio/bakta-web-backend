@@ -130,7 +130,7 @@ pub struct StatusMetadata {
     pub name: String,
     pub uid: Uuid,
     #[serde(rename = "resourceVersion")]
-    pub resource_version: String,
+    pub resource_version: Option<String>,
     pub labels: HashMap<String, String>,
 }
 

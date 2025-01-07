@@ -116,7 +116,7 @@ impl StateHandler {
                 Ok(FullJobState {
                     id: job_id,
                     argo_uid: Some(simple_status.metadata.uid),
-                    argo_ressource_version: Some(simple_status.metadata.resource_version),
+                    argo_ressource_version: simple_status.metadata.resource_version,
                     status: Some(ArgoStatus::try_from(simple_status.status.phase)?),
                     started: Some(simple_status.status.started_at),
                     updated: Some(simple_status.status.finished_at.unwrap_or(Utc::now())),
