@@ -184,8 +184,8 @@ pub struct ResultFiles {
     pub tsv_hypothetical: String,
     #[serde(rename = "TXTLogs")]
     pub txt_logs: String,
-    #[serde(rename = "TSVInterference")]
-    pub tsv_interference: String,
+    #[serde(rename = "TSVInference")]
+    pub tsv_inference: String,
     #[serde(rename = "PNGCircularPlot")]
     pub png_circular_plot: String,
     #[serde(rename = "SVGCircularPlot")]
