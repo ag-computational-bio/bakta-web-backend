@@ -24,7 +24,8 @@ use crate::{
     responses(
         (status = 200, body = ()),
         (status = 400, body = String)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn delete_job(
     State(state): State<Arc<BaktaHandler>>,
@@ -47,7 +48,8 @@ pub async fn delete_job(
     responses(
         (status = 200, body = ()),
         (status = 400, body = String)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn job_logs(
     State(state): State<Arc<BaktaHandler>>,
@@ -68,7 +70,8 @@ pub async fn job_logs(
     responses(
         (status = 200, body = InitResponse),
         (status = 400, body = String)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn init_job(
     State(state): State<Arc<BaktaHandler>>,
@@ -116,7 +119,8 @@ pub async fn init_job(
     request_body = ListRequest,
     responses(
         (status = 200, body = ListResponse)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn list_jobs(
     State(state): State<Arc<BaktaHandler>>,
@@ -133,7 +137,8 @@ pub async fn list_jobs(
     responses(
         (status = 200, body = ResultResponse),
         (status = 400, body = String)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn query_result(
     State(state): State<Arc<BaktaHandler>>,
@@ -157,7 +162,8 @@ pub async fn query_result(
     responses(
         (status = 200, body = ()),
         (status = 400, body = String)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn start_job(
     State(state): State<Arc<BaktaHandler>>,
@@ -190,7 +196,8 @@ pub async fn start_job(
     path = "/api/v1/version",
     responses(
         (status = 200, body = VersionResponse)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn version(State(state): State<Arc<BaktaHandler>>) -> impl IntoResponse {
     Json(state.version.clone())
