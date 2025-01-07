@@ -2,7 +2,7 @@ use anyhow::Result;
 use reqwest::Client;
 use std::collections::HashMap;
 
-use crate::bakta_handler::FullJobState;
+use crate::{api_structs::ArgoStatus, bakta_handler::FullJobState};
 
 use super::{
     structs::{LogResult, SimpleStatusList, SubmitOptions, SubmitResult, SubmitWorkflowTemplate},
@@ -67,6 +67,11 @@ impl ArgoClient {
     }
 
     pub async fn get_logs(&self, state: &FullJobState) -> Result<String> {
+
+        if let Some(ArgoStatus::Error) = state.status {
+            return Ok("Internal server error, please contact the administrator or try again later.".to_string());
+        }
+
         if state.archived {
             if let Some(argo_uid) = &state.argo_uid {
                 let wfname = state.workflowname.clone().unwrap_or("".to_string());
