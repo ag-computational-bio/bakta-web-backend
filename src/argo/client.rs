@@ -50,12 +50,10 @@ impl ArgoClient {
             } else {
                 return Ok(());
             }
+        } else if let Some(wf_name) = &state.workflowname {
+            get_delete_url_running(&self.url, &self.namespace, wf_name)
         } else {
-            if let Some(wf_name) = &state.workflowname {
-                get_delete_url_running(&self.url, &self.namespace, wf_name)
-            } else {
-                return Ok(());
-            }
+            return Ok(());
         };
 
         self.client
@@ -82,37 +80,35 @@ impl ArgoClient {
                     .text()
                     .await?)
             } else {
-                return Ok(String::new());
+                Ok(String::new())
             }
-        } else {
-            if let Some(wf_name) = &state.workflowname {
-                let url = get_logs_running_url(&self.url, &self.namespace, wf_name);
+        } else if let Some(wf_name) = &state.workflowname {
+            let url = get_logs_running_url(&self.url, &self.namespace, wf_name);
 
-                let result = self
-                    .client
-                    .get(url)
-                    .header("Authorization", &self.token)
-                    .send()
-                    .await?
-                    .text()
-                    .await?;
+            let result = self
+                .client
+                .get(url)
+                .header("Authorization", &self.token)
+                .send()
+                .await?
+                .text()
+                .await?;
 
-                let mut final_string = String::new();
+            let mut final_string = String::new();
 
-                for line in result.lines() {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    let content: LogResult = serde_json::from_str(line)?;
-                    if !content.result.content.contains("argo=true") {
-                        final_string.push_str(&content.result.content);
-                        final_string.push_str("\n");
-                    }
+            for line in result.lines() {
+                if line.trim().is_empty() {
+                    continue;
                 }
-                Ok(final_string)
-            } else {
-                return Ok(String::new());
+                let content: LogResult = serde_json::from_str(line)?;
+                if !content.result.content.contains("argo=true") {
+                    final_string.push_str(&content.result.content);
+                    final_string.push('\n');
+                }
             }
+            Ok(final_string)
+        } else {
+            Ok(String::new())
         }
     }
 

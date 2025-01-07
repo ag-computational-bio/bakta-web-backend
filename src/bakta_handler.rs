@@ -133,15 +133,10 @@ impl StateHandler {
                         .get("name")
                         .cloned()
                         .unwrap_or_else(|| "Unknown name".to_string()),
-                    archived: if simple_status
+                    archived: simple_status
                         .metadata
                         .labels
-                        .contains_key("workflows.argoproj.io/workflow-archiving-status")
-                    {
-                        true
-                    } else {
-                        false
-                    },
+                        .contains_key("workflows.argoproj.io/workflow-archiving-status"),
                 })
             };
 
@@ -221,7 +216,7 @@ impl StateHandler {
             if state.secret != secret {
                 return Err(anyhow!("Unauthorized"));
             }
-            return self.argo_client.get_logs(&state).await;
+            return self.argo_client.get_logs(state).await;
         }
         Err(anyhow!("Job not found"))
     }
@@ -232,7 +227,7 @@ impl StateHandler {
             if state.secret != secret {
                 return Err(anyhow!("Unauthorized"));
             }
-            self.argo_client.delete_workflow(&state).await?;
+            self.argo_client.delete_workflow(state).await?;
         }
         write_lock.remove(&job_id);
         Ok(())
