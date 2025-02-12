@@ -3,6 +3,7 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// SUBMITWORKFLOW
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +128,9 @@ pub struct SimpleStatus {
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusMetadata {
     pub name: String,
+    pub uid: Uuid,
+    #[serde(rename = "resourceVersion")]
+    pub resource_version: Option<String>,
     pub labels: HashMap<String, String>,
 }
 
@@ -149,4 +153,14 @@ pub struct SubmitResultMetadata {
     pub name: String,
     #[serde(rename = "creationTimestamp")]
     pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+pub struct Content {
+    pub content: String,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+pub struct LogResult {
+    pub result: Content,
 }

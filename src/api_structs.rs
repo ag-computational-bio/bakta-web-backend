@@ -11,9 +11,18 @@ use uuid::Uuid;
 #[openapi(
     info(
         title = "Bakta Web API",
+        description = "API for the Bakta Web Service, see: [https://bakta.readthedocs.io](https://bakta.readthedocs.io) for full documentation",
         license(name = "MIT", url = "https://opensource.org/license/mit/")
     ),
-    paths(delete_job, init_job, list_jobs, query_result, start_job, version),
+    paths(
+        delete_job,
+        init_job,
+        list_jobs,
+        query_result,
+        start_job,
+        job_logs,
+        version
+    ),
     components(schemas(
         Job,
         InitRequest,
@@ -36,6 +45,7 @@ use uuid::Uuid;
 pub struct BaktaApi;
 
 #[derive(ToSchema, Serialize, Deserialize, IntoParams)]
+#[into_params(style = Form, parameter_in = Query)]
 pub struct Job {
     pub secret: String,
     #[serde(rename = "jobID")]
@@ -76,19 +86,42 @@ pub struct ListRequest {
 pub enum JobStatusEnum {
     INIT,
     RUNNING,
-    SUCCESSFULL,
+    SUCCESSFUL,
     ERROR,
 }
 
-impl TryFrom<String> for JobStatusEnum {
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ArgoStatus {
+    Pending,
+    Init,
+    Running,
+    Succeeded,
+    Failed,
+    Error,
+}
+
+impl From<ArgoStatus> for JobStatusEnum {
+    fn from(value: ArgoStatus) -> Self {
+        match value {
+            ArgoStatus::Pending | ArgoStatus::Init => JobStatusEnum::INIT,
+            ArgoStatus::Running => JobStatusEnum::RUNNING,
+            ArgoStatus::Succeeded => JobStatusEnum::SUCCESSFUL,
+            ArgoStatus::Failed | ArgoStatus::Error => JobStatusEnum::ERROR,
+        }
+    }
+}
+
+impl TryFrom<String> for ArgoStatus {
     type Error = anyhow::Error;
 
     fn try_from(value: String) -> Result<Self> {
         match value.as_str() {
-            "Init" | "Pending" => Ok(JobStatusEnum::INIT),
-            "Running" => Ok(JobStatusEnum::RUNNING),
-            "Succeeded" => Ok(JobStatusEnum::SUCCESSFULL),
-            "Failed" | "Error" => Ok(JobStatusEnum::ERROR),
+            "Init" => Ok(ArgoStatus::Init),
+            "Pending" => Ok(ArgoStatus::Pending),
+            "Running" => Ok(ArgoStatus::Running),
+            "Succeeded" => Ok(ArgoStatus::Succeeded),
+            "Failed" => Ok(ArgoStatus::Failed),
+            "Error" => Ok(ArgoStatus::Error),
             _ => Err(anyhow!("Invalid JobStatus")),
         }
     }
@@ -150,6 +183,14 @@ pub struct ResultFiles {
     pub tsv: String,
     #[serde(rename = "TSVHypothetical")]
     pub tsv_hypothetical: String,
+    #[serde(rename = "TXTLogs")]
+    pub txt_logs: String,
+    #[serde(rename = "TSVInference")]
+    pub tsv_inference: String,
+    #[serde(rename = "PNGCircularPlot")]
+    pub png_circular_plot: String,
+    #[serde(rename = "SVGCircularPlot")]
+    pub svg_circular_plot: String,
 }
 
 #[derive(ToSchema, Serialize, Deserialize)]

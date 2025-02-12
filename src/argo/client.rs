@@ -2,9 +2,14 @@ use anyhow::Result;
 use reqwest::Client;
 use std::collections::HashMap;
 
+use crate::{api_structs::ArgoStatus, bakta_handler::FullJobState};
+
 use super::{
-    structs::{SimpleStatusList, SubmitOptions, SubmitResult, SubmitWorkflowTemplate},
-    urls::{get_delete_url, get_status_url_bakta, get_submit_url},
+    structs::{LogResult, SimpleStatusList, SubmitOptions, SubmitResult, SubmitWorkflowTemplate},
+    urls::{
+        get_delete_url_archived, get_delete_url_running, get_logs_archived_url,
+        get_logs_running_url, get_status_url_bakta, get_submit_url,
+    },
 };
 
 pub struct ArgoClient {
@@ -38,15 +43,80 @@ impl ArgoClient {
         Ok(response)
     }
 
-    pub async fn delete_workflow(&self, workflow_name: String) -> Result<()> {
+    pub async fn delete_workflow(&self, state: &FullJobState) -> Result<()> {
+        let url = if state.archived {
+            if let Some(argo_uid) = &state.argo_uid {
+                get_delete_url_archived(&self.url, argo_uid)
+            } else {
+                return Ok(());
+            }
+        } else if let Some(wf_name) = &state.workflowname {
+            get_delete_url_running(&self.url, &self.namespace, wf_name)
+        } else {
+            return Ok(());
+        };
+
         self.client
-            .delete(get_delete_url(&self.url, &self.namespace, workflow_name))
+            .delete(url)
             .header("Authorization", &self.token)
             .send()
             .await?
             .bytes()
             .await?;
         Ok(())
+    }
+
+    pub async fn get_logs(&self, state: &FullJobState) -> Result<String> {
+        if let Some(ArgoStatus::Error) = state.status {
+            return Ok(
+                "Internal server error, please contact the administrator or try again later."
+                    .to_string(),
+            );
+        }
+
+        if state.archived {
+            if let Some(argo_uid) = &state.argo_uid {
+                let wfname = state.workflowname.clone().unwrap_or("".to_string());
+                let url = get_logs_archived_url(&self.url, &self.namespace, argo_uid, wfname);
+                Ok(self
+                    .client
+                    .get(url)
+                    .header("Authorization", &self.token)
+                    .send()
+                    .await?
+                    .text()
+                    .await?)
+            } else {
+                Ok(String::new())
+            }
+        } else if let Some(wf_name) = &state.workflowname {
+            let url = get_logs_running_url(&self.url, &self.namespace, wf_name);
+
+            let result = self
+                .client
+                .get(url)
+                .header("Authorization", &self.token)
+                .send()
+                .await?
+                .text()
+                .await?;
+
+            let mut final_string = String::new();
+
+            for line in result.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let content: LogResult = serde_json::from_str(line)?;
+                if !content.result.content.contains("argo=true") {
+                    final_string.push_str(&content.result.content);
+                    final_string.push('\n');
+                }
+            }
+            Ok(final_string)
+        } else {
+            Ok(String::new())
+        }
     }
 
     pub async fn submit_from_template(

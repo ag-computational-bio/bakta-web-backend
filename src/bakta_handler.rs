@@ -1,3 +1,4 @@
+use crate::api_structs::ArgoStatus;
 use crate::api_structs::FailedJobStatus;
 use crate::api_structs::FailedJobStatusEnum;
 use crate::api_structs::Job;
@@ -6,15 +7,16 @@ use crate::api_structs::ResultResponse;
 use crate::api_structs::StartRequest;
 use crate::argo::structs::SimpleStatus;
 use crate::{
-    api_structs::{JobStatus, JobStatusEnum, VersionResponse},
+    api_structs::{JobStatus, VersionResponse},
     argo::client::ArgoClient,
     s3_handler::S3Handler,
 };
 use anyhow::anyhow;
 use anyhow::Result;
+use chrono::DateTime;
 use chrono::Utc;
-use rand::distributions::Alphanumeric;
-use rand::distributions::DistString;
+use rand::distr::Alphanumeric;
+use rand::distr::SampleString;
 use regex::Regex;
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 use tokio::sync::RwLock;
@@ -26,10 +28,28 @@ pub struct StateHandler {
 }
 
 pub struct FullJobState {
-    pub api_status: Option<JobStatus>,
+    pub id: Uuid,
+    pub argo_uid: Option<Uuid>,
+    pub argo_ressource_version: Option<String>,
+    pub name: String,
+    pub status: Option<ArgoStatus>,
+    pub started: Option<DateTime<Utc>>,
+    pub updated: Option<DateTime<Utc>>,
     pub workflowname: Option<String>,
     pub secret: String,
-    pub name: String,
+    pub archived: bool,
+}
+
+impl From<&FullJobState> for Option<JobStatus> {
+    fn from(state: &FullJobState) -> Self {
+        Some(JobStatus {
+            id: state.id,
+            status: state.status.as_ref().map(|s| s.clone().into())?,
+            started: state.started?,
+            updated: state.updated?,
+            name: state.name.clone(),
+        })
+    }
 }
 
 pub struct BaktaHandler {
@@ -83,7 +103,7 @@ impl StateHandler {
     async fn run(self: Arc<Self>) {
         let argo_client = self.argo_client.clone();
         tokio::spawn(async move {
-            let into_state = |simple_status: SimpleStatus| -> Result<(Uuid, FullJobState)> {
+            let into_state = |simple_status: SimpleStatus| -> Result<FullJobState> {
                 let job_id = Uuid::from_str(
                     simple_status
                         .metadata
@@ -93,35 +113,31 @@ impl StateHandler {
                 )?;
                 let workflowname = simple_status.metadata.name;
 
-                let api_status = JobStatus {
+                Ok(FullJobState {
                     id: job_id,
-                    status: JobStatusEnum::try_from(simple_status.status.phase)?,
-                    started: simple_status.status.started_at,
-                    updated: simple_status.status.finished_at.unwrap_or(Utc::now()),
+                    argo_uid: Some(simple_status.metadata.uid),
+                    argo_ressource_version: simple_status.metadata.resource_version,
+                    status: Some(ArgoStatus::try_from(simple_status.status.phase)?),
+                    started: Some(simple_status.status.started_at),
+                    updated: Some(simple_status.status.finished_at.unwrap_or(Utc::now())),
+                    workflowname: Some(workflowname),
+                    secret: simple_status
+                        .metadata
+                        .labels
+                        .get("secret")
+                        .cloned()
+                        .unwrap_or_else(|| "Unknown".to_string()),
                     name: simple_status
                         .metadata
                         .labels
                         .get("name")
                         .cloned()
                         .unwrap_or_else(|| "Unknown name".to_string()),
-                };
-
-                let name = api_status.name.clone();
-
-                Ok((
-                    api_status.id,
-                    FullJobState {
-                        api_status: Some(api_status),
-                        workflowname: Some(workflowname),
-                        secret: simple_status
-                            .metadata
-                            .labels
-                            .get("secret")
-                            .cloned()
-                            .unwrap_or_else(|| "Unknown".to_string()),
-                        name,
-                    },
-                ))
+                    archived: simple_status
+                        .metadata
+                        .labels
+                        .contains_key("workflows.argoproj.io/workflow-archiving-status"),
+                })
             };
 
             let initial = argo_client.get_workflow_status().await.map_err(|e| {
@@ -130,11 +146,11 @@ impl StateHandler {
             })?;
             let mut write_lock = self.job_state.write().await;
             for item in initial.items {
-                let (id, state) = into_state(item).map_err(|e| {
+                let state = into_state(item).map_err(|e| {
                     tracing::error!(?e, "Failed to parse state");
                     e
                 })?;
-                write_lock.insert(id, state);
+                write_lock.insert(state.id, state);
             }
             drop(write_lock);
             'outer: loop {
@@ -144,12 +160,12 @@ impl StateHandler {
                     continue;
                 };
                 for item in initial.items {
-                    let Ok((id, state)) = into_state(item).map_err(|e| {
+                    let Ok(state) = into_state(item).map_err(|e| {
                         tracing::error!(?e, "Failed to parse_state");
                     }) else {
                         continue 'outer;
                     };
-                    self.job_state.write().await.insert(id, state);
+                    self.job_state.write().await.insert(state.id, state);
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
             }
@@ -172,7 +188,15 @@ impl StateHandler {
                     });
                     continue;
                 }
-                if let Some(api_status) = &state.api_status {
+                if let Some(mut api_status) = Option::<JobStatus>::from(state) {
+                    if !matches!(
+                        state.status,
+                        Some(ArgoStatus::Error)
+                            | Some(ArgoStatus::Succeeded)
+                            | Some(ArgoStatus::Failed)
+                    ) {
+                        api_status.updated = Utc::now();
+                    }
                     jobs.push(api_status.clone());
                 }
             } else {
@@ -186,17 +210,24 @@ impl StateHandler {
         ListResponse { jobs, failed }
     }
 
+    pub async fn get_logs(&self, (job_id, secret): (Uuid, String)) -> Result<String> {
+        let read_lock = self.job_state.read().await;
+        if let Some(state) = read_lock.get(&job_id) {
+            if state.secret != secret {
+                return Err(anyhow!("Unauthorized"));
+            }
+            return self.argo_client.get_logs(state).await;
+        }
+        Err(anyhow!("Job not found"))
+    }
+
     pub async fn delete_job(&self, (job_id, secret): (Uuid, String)) -> Result<()> {
         let mut write_lock = self.job_state.write().await;
         if let Some(state) = write_lock.get(&job_id) {
             if state.secret != secret {
                 return Err(anyhow!("Unauthorized"));
             }
-            if let Some(workflowname) = &state.workflowname {
-                self.argo_client
-                    .delete_workflow(workflowname.clone())
-                    .await?;
-            }
+            self.argo_client.delete_workflow(state).await?;
         }
         write_lock.remove(&job_id);
         Ok(())
@@ -210,14 +241,20 @@ impl StateHandler {
             .to_string();
 
         let job_id = Uuid::new_v4();
-        let secret = Alphanumeric.sample_string(&mut rand::thread_rng(), 32);
+        let secret = Alphanumeric.sample_string(&mut rand::rng(), 32);
         self.job_state.write().await.insert(
             job_id,
             FullJobState {
-                api_status: None,
+                id: job_id,
+                argo_uid: None,
+                argo_ressource_version: None,
+                status: None,
+                started: None,
+                updated: None,
                 workflowname: None,
                 secret: secret.clone(),
                 name: stripped,
+                archived: false,
             },
         );
         (job_id, secret)
@@ -262,13 +299,9 @@ impl StateHandler {
                 .await?;
 
             state.workflowname = Some(result.metadata.name);
-            state.api_status = Some(JobStatus {
-                id: *id,
-                status: JobStatusEnum::INIT,
-                started: result.metadata.creation_timestamp,
-                updated: Utc::now(),
-                name: state.name.clone(),
-            });
+            state.status = Some(ArgoStatus::Pending);
+            state.started = Some(result.metadata.creation_timestamp);
+            state.updated = Some(Utc::now());
         }
         Ok(())
     }
@@ -283,21 +316,19 @@ impl StateHandler {
                 return Err(anyhow!("Unauthorized"));
             }
 
-            if let Some(state) = &state.api_status {
-                if state.status != JobStatusEnum::SUCCESSFULL {
+            if let Some(status) = &state.status {
+                if status != &ArgoStatus::Succeeded {
                     return Err(anyhow!("Job not finished"));
                 }
             }
 
-            if let Some(state) = &state.api_status {
-                return Ok(ResultResponse {
-                    id,
-                    started: state.started,
-                    updated: state.updated,
-                    name: state.name.clone(),
-                    files: s3_handler.sign_download_urls(id.to_string().as_str())?,
-                });
-            }
+            return Ok(ResultResponse {
+                id,
+                started: state.started.unwrap_or_default(),
+                updated: state.updated.unwrap_or_default(),
+                name: state.name.clone(),
+                files: s3_handler.sign_download_urls(id.to_string().as_str(), &state.name)?,
+            });
         }
         Err(anyhow!("Job not found"))
     }

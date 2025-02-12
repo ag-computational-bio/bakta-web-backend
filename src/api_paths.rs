@@ -19,14 +19,13 @@ use crate::{
 /// Delete an existing Job
 #[utoipa::path(
     delete,
-    path = "/api/v1/delete",
-    params(
-        Job,
-    ),
+    path = "/api/v1/job/delete",
+    params(Job),
     responses(
         (status = 200, body = ()),
         (status = 400, body = String)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn delete_job(
     State(state): State<Arc<BaktaHandler>>,
@@ -39,6 +38,30 @@ pub async fn delete_job(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
+/// Get stdout / stderr logs of a job
+#[utoipa::path(
+    get,
+    path = "/api/v1/job/logs",
+    params(
+        Job,
+    ),
+    responses(
+        (status = 200, body = ()),
+        (status = 400, body = String)
+    ),
+    tag = "bakta",
+)]
+pub async fn job_logs(
+    State(state): State<Arc<BaktaHandler>>,
+    Query(job): Query<Job>,
+) -> impl IntoResponse {
+    state
+        .state_handler
+        .get_logs((job.id, job.secret))
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
 /// Create a new BaktaJob
 #[utoipa::path(
     post,
@@ -47,7 +70,8 @@ pub async fn delete_job(
     responses(
         (status = 200, body = InitResponse),
         (status = 400, body = String)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn init_job(
     State(state): State<Arc<BaktaHandler>>,
@@ -95,7 +119,8 @@ pub async fn init_job(
     request_body = ListRequest,
     responses(
         (status = 200, body = ListResponse)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn list_jobs(
     State(state): State<Arc<BaktaHandler>>,
@@ -112,7 +137,8 @@ pub async fn list_jobs(
     responses(
         (status = 200, body = ResultResponse),
         (status = 400, body = String)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn query_result(
     State(state): State<Arc<BaktaHandler>>,
@@ -136,7 +162,8 @@ pub async fn query_result(
     responses(
         (status = 200, body = ()),
         (status = 400, body = String)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn start_job(
     State(state): State<Arc<BaktaHandler>>,
@@ -145,15 +172,13 @@ pub async fn start_job(
 ) -> impl IntoResponse {
     let tool_version = state.version.tool.clone();
 
-    let origin = headers
-        .get("origin")
-        .and_then(|o| {
-            o.to_str().ok().map(|e| {
-                REGEX
-                    .replace_all(e.strip_prefix("https://").unwrap_or(e), "_")
-                    .to_string()
-            })
-        });
+    let origin = headers.get("origin").and_then(|o| {
+        o.to_str().ok().map(|e| {
+            REGEX
+                .replace_all(e.strip_prefix("https://").unwrap_or(e), "_")
+                .to_string()
+        })
+    });
 
     match state
         .state_handler
@@ -171,7 +196,8 @@ pub async fn start_job(
     path = "/api/v1/version",
     responses(
         (status = 200, body = VersionResponse)
-    )
+    ),
+    tag = "bakta",
 )]
 pub async fn version(State(state): State<Arc<BaktaHandler>>) -> impl IntoResponse {
     Json(state.version.clone())
