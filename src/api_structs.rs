@@ -11,6 +11,7 @@ use uuid::Uuid;
 #[openapi(
     info(
         title = "Bakta Web API",
+        description = "API for the Bakta Web Service, see: [https://bakta.readthedocs.io](https://bakta.readthedocs.io) for full documentation",
         license(name = "MIT", url = "https://opensource.org/license/mit/")
     ),
     paths(

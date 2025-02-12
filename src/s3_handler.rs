@@ -153,22 +153,20 @@ fn sign_url(
             "{}{}.{}/{}?partNumber={}&uploadId={}",
             protocol, bucket, endpoint_sanitized, key, part_number, upload_id
         ))?
+    } else if disposition.is_some() && method == &Method::GET {
+        let url_encoded_disposition = url::form_urlencoded::byte_serialize(
+            format!(r#"attachment; filename="{}""#, disposition.unwrap()).as_bytes(),
+        )
+        .collect::<String>();
+        Url::parse(&format!(
+            "{}{}.{}/{}?response-content-disposition={}",
+            protocol, bucket, endpoint_sanitized, key, url_encoded_disposition
+        ))?
     } else {
-        if disposition.is_some() && method == &Method::GET {
-            let url_encoded_disposition = url::form_urlencoded::byte_serialize(
-                format!(r#"attachment; filename="{}""#, disposition.unwrap()).as_bytes(),
-            )
-            .collect::<String>();
-            Url::parse(&format!(
-                "{}{}.{}/{}?response-content-disposition={}",
-                protocol, bucket, endpoint_sanitized, key, url_encoded_disposition
-            ))?
-        } else {
-            Url::parse(&format!(
-                "{}{}.{}/{}",
-                protocol, bucket, endpoint_sanitized, key
-            ))?
-        }
+        Url::parse(&format!(
+            "{}{}.{}/{}",
+            protocol, bucket, endpoint_sanitized, key
+        ))?
     };
 
     let mut req = reqwest::Request::new(method, url);

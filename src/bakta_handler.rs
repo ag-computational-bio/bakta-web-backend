@@ -15,8 +15,8 @@ use anyhow::anyhow;
 use anyhow::Result;
 use chrono::DateTime;
 use chrono::Utc;
-use rand::distributions::Alphanumeric;
-use rand::distributions::DistString;
+use rand::distr::Alphanumeric;
+use rand::distr::SampleString;
 use regex::Regex;
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 use tokio::sync::RwLock;
@@ -241,7 +241,7 @@ impl StateHandler {
             .to_string();
 
         let job_id = Uuid::new_v4();
-        let secret = Alphanumeric.sample_string(&mut rand::thread_rng(), 32);
+        let secret = Alphanumeric.sample_string(&mut rand::rng(), 32);
         self.job_state.write().await.insert(
             job_id,
             FullJobState {
