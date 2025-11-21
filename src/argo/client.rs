@@ -35,7 +35,7 @@ impl ArgoClient {
         let response = self
             .client
             .get(get_status_url_bakta(&self.url, &self.namespace))
-            .header("Authorization", &self.token)
+            .header("Authorization", format!("Bearer {}", &self.token))
             .send()
             .await?
             .json::<SimpleStatusList>()
@@ -58,7 +58,7 @@ impl ArgoClient {
 
         self.client
             .delete(url)
-            .header("Authorization", &self.token)
+            .header("Authorization", format!("Bearer {}", &self.token))
             .send()
             .await?
             .bytes()
@@ -81,7 +81,7 @@ impl ArgoClient {
                 Ok(self
                     .client
                     .get(url)
-                    .header("Authorization", &self.token)
+                    .header("Authorization", format!("Bearer {}", &self.token))
                     .send()
                     .await?
                     .text()
@@ -95,7 +95,7 @@ impl ArgoClient {
             let result = self
                 .client
                 .get(url)
-                .header("Authorization", &self.token)
+                .header("Authorization", format!("Bearer {}", &self.token))
                 .send()
                 .await?
                 .text()
@@ -155,7 +155,7 @@ impl ArgoClient {
         let response = self
             .client
             .post(get_submit_url(&self.url, &self.namespace))
-            .header("Authorization", &self.token)
+            .header("Authorization", format!("Bearer {}", &self.token))
             .json(&submit_template)
             .send()
             .await?

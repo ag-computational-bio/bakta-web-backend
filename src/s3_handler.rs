@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use reqsign::{AwsCredential, AwsV4Signer};
 use reqwest::Method;
 use url::Url;
