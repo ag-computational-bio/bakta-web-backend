@@ -1,5 +1,5 @@
 use axum::{
-    Router,
+    Router, middleware,
     response::Redirect,
     routing::{delete, get, post},
 };
@@ -16,6 +16,7 @@ mod api_paths;
 mod api_structs;
 mod argo;
 mod bakta_handler;
+mod metrics;
 mod s3_handler;
 mod v2;
 mod workflow_catalog;
@@ -65,9 +66,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(?socket_address, "Starting bakta web backend");
 
+    let metrics_state = bakta_handler.clone();
+
     let app = Router::new()
         .merge(swagger)
         .route("/", get(|| async { Redirect::permanent("/swagger-ui") }))
+        .route("/metrics", get(metrics::metrics))
         .route("/api/v1/job/delete", delete(api_paths::delete_job))
         .route("/api/v1/job/logs", get(api_paths::job_logs))
         .route("/api/v1/job/init", post(api_paths::init_job))
@@ -84,6 +88,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v2/job/start", post(v2::api_paths::start_job))
         .route("/api/v2/version", get(v2::api_paths::version))
         .with_state(bakta_handler)
+        .layer(middleware::from_fn_with_state(
+            metrics_state,
+            metrics::track_http_metrics,
+        ))
         .layer(CorsLayer::very_permissive())
         .layer(
             TraceLayer::new_for_http()

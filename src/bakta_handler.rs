@@ -9,6 +9,7 @@ use crate::argo::structs::{Content, SimpleStatus, WorkflowNodeStatus};
 use crate::{
     api_structs::{JobStatus, VersionResponse},
     argo::client::ArgoClient,
+    metrics::AppMetrics,
     s3_handler::S3Handler,
     v2::api_structs::{
         FailedJobStatus as V2FailedJobStatus, FailedJobStatusKind, JobReference,
@@ -32,6 +33,7 @@ use uuid::Uuid;
 pub struct StateHandler {
     pub job_state: RwLock<HashMap<Uuid, FullJobState>>,
     pub argo_client: Arc<ArgoClient>,
+    pub metrics: Arc<AppMetrics>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +189,38 @@ fn current_updated_at(state: &FullJobState) -> Option<DateTime<Utc>> {
         updated = Utc::now();
     }
     Some(updated)
+}
+
+fn is_terminal_status(status: Option<&ArgoStatus>) -> bool {
+    matches!(
+        status,
+        Some(ArgoStatus::Succeeded | ArgoStatus::Failed | ArgoStatus::Error)
+    )
+}
+
+fn completion_status_label(status: &ArgoStatus) -> Option<&'static str> {
+    match status {
+        ArgoStatus::Succeeded => Some("succeeded"),
+        ArgoStatus::Failed => Some("failed"),
+        ArgoStatus::Error => Some("error"),
+        _ => None,
+    }
+}
+
+fn active_status_label(status: Option<&ArgoStatus>) -> Option<&'static str> {
+    match status {
+        None => Some("created"),
+        Some(ArgoStatus::Pending) => Some("pending"),
+        Some(ArgoStatus::Init) => Some("init"),
+        Some(ArgoStatus::Running) => Some("running"),
+        Some(ArgoStatus::Succeeded | ArgoStatus::Failed | ArgoStatus::Error) => None,
+    }
+}
+
+fn runtime_from_state(state: &FullJobState) -> Option<std::time::Duration> {
+    let started = state.started?;
+    let updated = state.updated?;
+    (updated - started).to_std().ok()
 }
 
 fn normalize_stage_identifier(value: &str) -> String {
@@ -410,11 +444,13 @@ impl BaktaHandler {
         backend_version: String,
     ) -> Self {
         let argo_client = Arc::new(ArgoClient::new(argo_token, argo_url, argo_namespace));
+        let metrics = Arc::new(AppMetrics::new());
         let s3_handler = S3Handler::new(s3_access_key, s3_secret_key, bucket, endpoint);
 
         let state_handler = Arc::new(StateHandler {
             job_state: RwLock::new(HashMap::new()),
             argo_client,
+            metrics,
         });
 
         let state_handler_clone = state_handler.clone();
@@ -452,6 +488,7 @@ impl StateHandler {
                 let initial = match argo_client.get_workflow_status().await {
                     Ok(status) => status,
                     Err(e) => {
+                        self.metrics.record_poll_error();
                         tracing::error!(?e, "Failed to query workflow_status");
                         tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
                         continue;
@@ -461,6 +498,18 @@ impl StateHandler {
                 let mut write_lock = self.job_state.write().await;
                 for item in initial.items {
                     if let Some(state) = state_from_simple_status(item) {
+                        if let Some(previous) = write_lock.get(&state.id)
+                            && !is_terminal_status(previous.status.as_ref())
+                            && is_terminal_status(state.status.as_ref())
+                            && let Some(status) =
+                                state.status.as_ref().and_then(completion_status_label)
+                        {
+                            self.metrics.record_job_completed(
+                                workflow_kind_label_value(state.workflow_kind),
+                                status,
+                                runtime_from_state(&state),
+                            );
+                        }
                         write_lock.insert(state.id, state);
                     }
                 }
@@ -499,6 +548,29 @@ impl StateHandler {
         }
 
         ListResponse { jobs, failed }
+    }
+
+    pub async fn render_metrics(&self) -> Result<String> {
+        let mut snapshot = HashMap::<(String, String), i64>::new();
+        let read_lock = self.job_state.read().await;
+
+        for state in read_lock.values() {
+            let Some(status) = active_status_label(state.status.as_ref()) else {
+                continue;
+            };
+
+            *snapshot
+                .entry((
+                    workflow_kind_label_value(state.workflow_kind).to_string(),
+                    status.to_string(),
+                ))
+                .or_default() += 1;
+        }
+
+        drop(read_lock);
+
+        self.metrics.update_active_jobs(&snapshot);
+        self.metrics.encode().map_err(|e| anyhow!(e.to_string()))
     }
 
     pub async fn get_job_states_v2(&self, request_jobs: Vec<JobReference>) -> V2ListResponse {
@@ -722,7 +794,16 @@ impl StateHandler {
                     None,
                     Some(format!("bakta-job-{}-", id)),
                 )
-                .await?;
+                .await;
+
+            let result = match result {
+                Ok(result) => result,
+                Err(e) => {
+                    self.metrics
+                        .record_submit_error(workflow_kind_label_value(state.workflow_kind));
+                    return Err(e);
+                }
+            };
 
             state.workflowname = Some(result.metadata.name);
             state.status = Some(ArgoStatus::Pending);
@@ -731,6 +812,10 @@ impl StateHandler {
             state.api_version = ApiVersion::V1;
             state.workflow_kind = WorkflowKind::Bakta;
             state.result_kind = ResultKind::Bakta;
+            self.metrics.record_job_submitted(
+                state.api_version.as_label_value(),
+                workflow_kind_label_value(state.workflow_kind),
+            );
         }
         Ok(())
     }
@@ -794,13 +879,26 @@ impl StateHandler {
                 None,
                 Some(format!("{}-{}-", descriptor.template_name, job_id)),
             )
-            .await?;
+            .await;
+
+        let result = match result {
+            Ok(result) => result,
+            Err(e) => {
+                self.metrics
+                    .record_submit_error(workflow_kind_label_value(state.workflow_kind));
+                return Err(e);
+            }
+        };
 
         state.workflowname = Some(result.metadata.name);
         state.status = Some(ArgoStatus::Pending);
         state.started = Some(result.metadata.creation_timestamp);
         state.updated = Some(Utc::now());
         state.result_kind = descriptor.result_kind;
+        self.metrics.record_job_submitted(
+            state.api_version.as_label_value(),
+            workflow_kind_label_value(state.workflow_kind),
+        );
 
         Ok(())
     }
