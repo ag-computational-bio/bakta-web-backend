@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::v2::api_structs::{ResultKind, UploadKind, WorkflowKind};
+use anyhow::{Result, anyhow};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UploadProfile {
@@ -12,7 +13,6 @@ pub struct UploadProfile {
 pub struct WorkflowDescriptor {
     pub workflow_kind: WorkflowKind,
     pub result_kind: ResultKind,
-    pub template_name: &'static str,
     pub uploads: &'static [UploadProfile],
     pub stages: &'static [&'static str],
 }
@@ -63,28 +63,24 @@ const WORKFLOWS: [WorkflowDescriptor; 4] = [
     WorkflowDescriptor {
         workflow_kind: WorkflowKind::Bakta,
         result_kind: ResultKind::Bakta,
-        template_name: "bakta",
         uploads: &BAKTA_UPLOADS,
         stages: &BAKTA_STAGES,
     },
     WorkflowDescriptor {
         workflow_kind: WorkflowKind::BaktaProteins,
         result_kind: ResultKind::BaktaProteins,
-        template_name: "bakta-proteins",
         uploads: &BAKTA_PROTEINS_UPLOADS,
         stages: &BAKTA_PROTEINS_STAGES,
     },
     WorkflowDescriptor {
         workflow_kind: WorkflowKind::BaktaBaktfold,
         result_kind: ResultKind::Bakta,
-        template_name: "bakta-baktfold",
         uploads: &BAKTA_UPLOADS,
         stages: &BAKTA_BAKTFOLD_STAGES,
     },
     WorkflowDescriptor {
         workflow_kind: WorkflowKind::Baktfold,
         result_kind: ResultKind::Baktfold,
-        template_name: "baktfold",
         uploads: &BAKTFOLD_UPLOADS,
         stages: &BAKTFOLD_STAGES,
     },
@@ -103,6 +99,50 @@ pub fn workflow_descriptor(kind: WorkflowKind) -> WorkflowDescriptor {
     }
 }
 
+pub fn workflow_template_name(
+    kind: WorkflowKind,
+    bakta_version: &str,
+    baktfold_version: &str,
+) -> Result<String> {
+    let bakta_version = bakta_version.trim();
+    let baktfold_version = baktfold_version.trim();
+
+    match kind {
+        WorkflowKind::Bakta => {
+            if bakta_version.is_empty() {
+                Err(anyhow!("Missing Bakta version for workflow template"))
+            } else {
+                Ok(format!("bakta-job-{bakta_version}"))
+            }
+        }
+        WorkflowKind::BaktaProteins => {
+            if bakta_version.is_empty() {
+                Err(anyhow!("Missing Bakta version for workflow template"))
+            } else {
+                Ok(format!("bakta-proteins-job-{bakta_version}"))
+            }
+        }
+        WorkflowKind::BaktaBaktfold => {
+            if bakta_version.is_empty() || baktfold_version.is_empty() {
+                Err(anyhow!(
+                    "Missing Bakta or Baktfold version for workflow template"
+                ))
+            } else {
+                Ok(format!(
+                    "bakta-baktfold-job-{bakta_version}-{baktfold_version}"
+                ))
+            }
+        }
+        WorkflowKind::Baktfold => {
+            if baktfold_version.is_empty() {
+                Err(anyhow!("Missing Baktfold version for workflow template"))
+            } else {
+                Ok(format!("baktfold-job-{baktfold_version}"))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,7 +151,6 @@ mod tests {
     fn test_workflow_descriptor_mapping() {
         let bakta = workflow_descriptor(WorkflowKind::Bakta);
         assert_eq!(bakta.result_kind, ResultKind::Bakta);
-        assert_eq!(bakta.template_name, "bakta");
         assert_eq!(bakta.stages, ["bakta"]);
         assert_eq!(bakta.uploads.len(), 6);
 
@@ -132,5 +171,25 @@ mod tests {
         let baktfold = workflow_descriptor(WorkflowKind::Baktfold);
         assert_eq!(baktfold.result_kind, ResultKind::Baktfold);
         assert_eq!(baktfold.stages, ["baktfold"]);
+    }
+
+    #[test]
+    fn test_workflow_template_name_mapping() {
+        assert_eq!(
+            workflow_template_name(WorkflowKind::Bakta, "1.9.0", "0.7.0").unwrap(),
+            "bakta-job-1.9.0"
+        );
+        assert_eq!(
+            workflow_template_name(WorkflowKind::BaktaProteins, "1.9.0", "0.7.0").unwrap(),
+            "bakta-proteins-job-1.9.0"
+        );
+        assert_eq!(
+            workflow_template_name(WorkflowKind::BaktaBaktfold, "1.9.0", "0.7.0").unwrap(),
+            "bakta-baktfold-job-1.9.0-0.7.0"
+        );
+        assert_eq!(
+            workflow_template_name(WorkflowKind::Baktfold, "1.9.0", "0.7.0").unwrap(),
+            "baktfold-job-0.7.0"
+        );
     }
 }

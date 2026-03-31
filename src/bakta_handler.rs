@@ -17,7 +17,7 @@ use crate::{
         V2ListResponse, V2LogsResponse, V2ResultResponse, V2StartRequest, V2VersionResponse,
         WorkflowKind,
     },
-    workflow_catalog::workflow_descriptor,
+    workflow_catalog::{workflow_descriptor, workflow_template_name},
 };
 use anyhow::Result;
 use anyhow::anyhow;
@@ -35,6 +35,8 @@ pub struct StateHandler {
     pub job_state: RwLock<HashMap<Uuid, FullJobState>>,
     pub argo_client: Arc<ArgoClient>,
     pub metrics: Arc<AppMetrics>,
+    pub bakta_version: String,
+    pub baktfold_version: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,6 +469,8 @@ impl BaktaHandler {
             job_state: RwLock::new(HashMap::new()),
             argo_client,
             metrics,
+            bakta_version: bakta_version.clone(),
+            baktfold_version: baktfold_version.clone(),
         });
 
         let state_handler_clone = state_handler.clone();
@@ -483,7 +487,7 @@ impl BaktaHandler {
                 backend_version,
                 bakta_version,
                 bakta_db_version: database_version,
-                baktfold_version,
+                baktfold_version: baktfold_version.clone(),
                 baktfold_db_version: baktfold_database_version,
             },
             state_handler,
@@ -852,6 +856,8 @@ impl StateHandler {
         let parameters = start_settings.workflow.into_parameters()?;
         let JobReference { job_id, secret } = start_settings.job;
         let descriptor = workflow_descriptor(workflow_kind);
+        let template_name =
+            workflow_template_name(workflow_kind, &self.bakta_version, &self.baktfold_version)?;
 
         let mut write_lock = self.job_state.write().await;
         let Some(state) = write_lock.get_mut(&job_id) else {
@@ -873,7 +879,7 @@ impl StateHandler {
         let result = self
             .argo_client
             .submit_from_template(
-                descriptor.template_name.to_string(),
+                template_name.clone(),
                 Some(HashMap::from([
                     ("jobid".to_string(), job_id.to_string()),
                     ("name".to_string(), state.name.clone()),
@@ -900,7 +906,7 @@ impl StateHandler {
                     ("jobid".to_string(), job_id.to_string()),
                 ])),
                 None,
-                Some(format!("{}-{}-", descriptor.template_name, job_id)),
+                Some(format!("{}-{}-", template_name, job_id)),
             )
             .await;
 
@@ -1261,6 +1267,8 @@ mod tests {
                 "argo".to_string(),
             )),
             metrics: Arc::new(AppMetrics::new()),
+            bakta_version: "1.0.0".to_string(),
+            baktfold_version: "1.0.0".to_string(),
         };
 
         let rendered = state_handler
