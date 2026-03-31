@@ -170,7 +170,7 @@ async fn sign_url(
             "{}{}.{}/{}?partNumber={}&uploadId={}",
             protocol, bucket, endpoint_sanitized, key, part_number, upload_id
         ))?
-    } else if disposition.is_some() && method == &Method::GET {
+    } else if disposition.is_some() && method == Method::GET {
         let url_encoded_disposition = url::form_urlencoded::byte_serialize(
             format!(r#"attachment; filename="{}""#, disposition.unwrap()).as_bytes(),
         )

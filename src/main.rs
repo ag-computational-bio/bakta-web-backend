@@ -12,6 +12,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 mod api_paths;
+#[allow(clippy::upper_case_acronyms)]
 mod api_structs;
 mod argo;
 mod bakta_handler;

@@ -59,6 +59,7 @@ pub struct BaktaHandler {
 }
 
 impl BaktaHandler {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         argo_token: String,
         argo_url: String,
@@ -316,10 +317,10 @@ impl StateHandler {
                 return Err(anyhow!("Unauthorized"));
             }
 
-            if let Some(status) = &state.status {
-                if status != &ArgoStatus::Succeeded {
-                    return Err(anyhow!("Job not finished"));
-                }
+            if let Some(status) = &state.status
+                && status != &ArgoStatus::Succeeded
+            {
+                return Err(anyhow!("Job not finished"));
             }
 
             return Ok(ResultResponse {

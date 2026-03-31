@@ -265,44 +265,44 @@ impl JobConfig {
             parameters.push("--complete".to_string());
         }
 
-        if let Some(locus) = self.locus {
-            if !locus.is_empty() {
-                parameters.push(format!("--locus {}", sanitize_input(locus)));
-            }
+        if let Some(locus) = self.locus
+            && !locus.is_empty()
+        {
+            parameters.push(format!("--locus {}", sanitize_input(locus)));
         }
 
-        if let Some(locus_tag) = self.locus_tag {
-            if !locus_tag.is_empty() {
-                parameters.push(format!("--locus-tag {}", sanitize_input(locus_tag)));
-            }
+        if let Some(locus_tag) = self.locus_tag
+            && !locus_tag.is_empty()
+        {
+            parameters.push(format!("--locus-tag {}", sanitize_input(locus_tag)));
         }
 
         if self.headers {
             parameters.push("--keep-contig-headers".to_string());
         }
 
-        if let Some(genus) = self.genus {
-            if !genus.is_empty() {
-                parameters.push(format!("--genus {}", sanitize_input(genus)));
-            }
+        if let Some(genus) = self.genus
+            && !genus.is_empty()
+        {
+            parameters.push(format!("--genus {}", sanitize_input(genus)));
         }
 
-        if let Some(species) = self.species {
-            if !species.is_empty() {
-                parameters.push(format!("--species {}", sanitize_input(species)));
-            }
+        if let Some(species) = self.species
+            && !species.is_empty()
+        {
+            parameters.push(format!("--species {}", sanitize_input(species)));
         }
 
-        if let Some(strain) = self.strain {
-            if !strain.is_empty() {
-                parameters.push(format!("--strain {}", sanitize_input(strain)));
-            }
+        if let Some(strain) = self.strain
+            && !strain.is_empty()
+        {
+            parameters.push(format!("--strain {}", sanitize_input(strain)));
         }
 
-        if let Some(plasmid) = self.plasmid {
-            if !plasmid.is_empty() {
-                parameters.push(format!("--plasmid {}", sanitize_input(plasmid)));
-            }
+        if let Some(plasmid) = self.plasmid
+            && !plasmid.is_empty()
+        {
+            parameters.push(format!("--plasmid {}", sanitize_input(plasmid)));
         }
 
         if self.compliant {
