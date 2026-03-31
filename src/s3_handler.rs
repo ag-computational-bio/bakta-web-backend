@@ -4,7 +4,13 @@ use reqsign::aws::{self, StaticCredentialProvider};
 use reqwest::Method;
 use url::Url;
 
-use crate::api_structs::ResultFiles;
+use crate::{
+    api_structs::ResultFiles,
+    v2::api_structs::{
+        BaktaProteinsResultFiles, BaktaResultFiles, BaktfoldResultFiles, ResultKind, UploadKind,
+        V2ResultFiles,
+    },
+};
 
 pub struct S3Handler {
     access_key: String,
@@ -27,6 +33,19 @@ impl InputType {
             InputType::Prodigal => "prodigal.tf",
             InputType::RepliconsTSV => "replicons.tsv",
         }
+    }
+}
+
+fn upload_object_name(kind: UploadKind) -> &'static str {
+    match kind {
+        UploadKind::GenomeFasta => "genome.fasta",
+        UploadKind::ProdigalTrainingFile => "prodigal.tf",
+        UploadKind::RepliconsTable => "replicons.tsv",
+        UploadKind::RegionsFile => "regions",
+        UploadKind::TrustedProteinsFile => "trusted_proteins.faa",
+        UploadKind::HmmsFile => "trusted_hmms.hmm",
+        UploadKind::ProteinFasta => "proteins.fasta",
+        UploadKind::BaktaJson => "bakta.json",
     }
 }
 
@@ -61,13 +80,36 @@ impl S3Handler {
         .await
     }
 
-    async fn sign_result_download_url(
+    pub async fn sign_upload_url_v2(
         &self,
         job_id: &str,
-        name: &str,
-        output_format: &str,
+        upload_kind: UploadKind,
     ) -> Result<String> {
-        let key = format!("jobs/{job_id}/results/result.{output_format}");
+        let key = format!("jobs/{job_id}/inputs/{}", upload_object_name(upload_kind));
+        sign_url(
+            Method::PUT,
+            &self.access_key,
+            &self.secret_key,
+            self.is_ssl,
+            false,
+            0,
+            None,
+            &self.bucket,
+            &key,
+            &self.endpoint,
+            10000,
+            None,
+        )
+        .await
+    }
+
+    async fn sign_result_download_object(
+        &self,
+        job_id: &str,
+        key_name: &str,
+        download_name: String,
+    ) -> Result<String> {
+        let key = format!("jobs/{job_id}/results/{key_name}");
         sign_url(
             Method::GET,
             &self.access_key,
@@ -79,8 +121,22 @@ impl S3Handler {
             &self.bucket,
             &key,
             &self.endpoint,
-            6 * 86400, // 6 days
-            Some(format!("{name}.{output_format}")),
+            6 * 86400,
+            Some(download_name),
+        )
+        .await
+    }
+
+    async fn sign_result_download_url(
+        &self,
+        job_id: &str,
+        name: &str,
+        output_format: &str,
+    ) -> Result<String> {
+        self.sign_result_download_object(
+            job_id,
+            &format!("result.{output_format}"),
+            format!("{name}.{output_format}"),
         )
         .await
     }
@@ -107,6 +163,66 @@ impl S3Handler {
             txt_logs: self.sign_result_download_url(job_id, name, "txt").await?,
             png_circular_plot: self.sign_result_download_url(job_id, name, "png").await?,
             svg_circular_plot: self.sign_result_download_url(job_id, name, "svg").await?,
+        })
+    }
+
+    pub async fn sign_download_urls_v2(
+        &self,
+        job_id: &str,
+        name: &str,
+        result_kind: ResultKind,
+    ) -> Result<V2ResultFiles> {
+        Ok(match result_kind {
+            ResultKind::Bakta => V2ResultFiles::Bakta(BaktaResultFiles {
+                embl: self.sign_result_download_url(job_id, name, "embl").await?,
+                faa: self.sign_result_download_url(job_id, name, "faa").await?,
+                hypotheticals_faa: self
+                    .sign_result_download_url(job_id, name, "hypotheticals.faa")
+                    .await?,
+                ffn: self.sign_result_download_url(job_id, name, "ffn").await?,
+                fna: self.sign_result_download_url(job_id, name, "fna").await?,
+                gbff: self.sign_result_download_url(job_id, name, "gbff").await?,
+                gff3: self.sign_result_download_url(job_id, name, "gff3").await?,
+                json: self.sign_result_download_url(job_id, name, "json").await?,
+                tsv: self.sign_result_download_url(job_id, name, "tsv").await?,
+                hypotheticals_tsv: self
+                    .sign_result_download_url(job_id, name, "hypotheticals.tsv")
+                    .await?,
+                logs_txt: self.sign_result_download_url(job_id, name, "txt").await?,
+                inference_tsv: self
+                    .sign_result_download_url(job_id, name, "inference.tsv")
+                    .await?,
+                circular_plot_png: self.sign_result_download_url(job_id, name, "png").await?,
+                circular_plot_svg: self.sign_result_download_url(job_id, name, "svg").await?,
+            }),
+            ResultKind::BaktaProteins => V2ResultFiles::BaktaProteins(BaktaProteinsResultFiles {
+                tsv: self.sign_result_download_url(job_id, name, "tsv").await?,
+                faa: self.sign_result_download_url(job_id, name, "faa").await?,
+                hypotheticals_tsv: self
+                    .sign_result_download_url(job_id, name, "hypotheticals.tsv")
+                    .await?,
+                json: self.sign_result_download_url(job_id, name, "json").await?,
+            }),
+            ResultKind::Baktfold => V2ResultFiles::Baktfold(BaktfoldResultFiles {
+                embl: self.sign_result_download_url(job_id, name, "embl").await?,
+                faa: self.sign_result_download_url(job_id, name, "faa").await?,
+                hypotheticals_faa: self
+                    .sign_result_download_url(job_id, name, "hypotheticals.faa")
+                    .await?,
+                ffn: self.sign_result_download_url(job_id, name, "ffn").await?,
+                fna: self.sign_result_download_url(job_id, name, "fna").await?,
+                gbff: self.sign_result_download_url(job_id, name, "gbff").await?,
+                gff3: self.sign_result_download_url(job_id, name, "gff3").await?,
+                json: self.sign_result_download_url(job_id, name, "json").await?,
+                tsv: self.sign_result_download_url(job_id, name, "tsv").await?,
+                hypotheticals_tsv: self
+                    .sign_result_download_url(job_id, name, "hypotheticals.tsv")
+                    .await?,
+                logs_txt: self.sign_result_download_url(job_id, name, "txt").await?,
+                inference_tsv: self
+                    .sign_result_download_url(job_id, name, "inference.tsv")
+                    .await?,
+            }),
         })
     }
 }
@@ -201,4 +317,19 @@ async fn sign_url(
         )
         .await?;
     Ok(parts.uri.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_upload_object_name_mapping() {
+        assert_eq!(upload_object_name(UploadKind::GenomeFasta), "genome.fasta");
+        assert_eq!(
+            upload_object_name(UploadKind::TrustedProteinsFile),
+            "trusted_proteins.faa"
+        );
+        assert_eq!(upload_object_name(UploadKind::BaktaJson), "bakta.json");
+    }
 }
