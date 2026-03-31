@@ -22,6 +22,7 @@ use crate::{
 use anyhow::Result;
 use anyhow::anyhow;
 use chrono::DateTime;
+use chrono::Duration;
 use chrono::Utc;
 use rand::distr::Alphanumeric;
 use rand::distr::SampleString;
@@ -76,6 +77,8 @@ pub struct BaktaHandler {
     pub version_v2: V2VersionResponse,
     pub state_handler: Arc<StateHandler>,
 }
+
+const JOB_RETENTION_DAYS: i64 = 35;
 
 impl ApiVersion {
     pub fn as_label_value(self) -> &'static str {
@@ -218,6 +221,20 @@ fn runtime_from_state(state: &FullJobState) -> Option<std::time::Duration> {
     let started = state.started?;
     let updated = state.updated?;
     (updated - started).to_std().ok()
+}
+
+fn state_reference_time(state: &FullJobState) -> Option<DateTime<Utc>> {
+    state.updated.or(state.started)
+}
+
+fn is_state_expired(state: &FullJobState, now: DateTime<Utc>) -> bool {
+    state_reference_time(state)
+        .map(|reference_time| reference_time < now - Duration::days(JOB_RETENTION_DAYS))
+        .unwrap_or(false)
+}
+
+fn purge_expired_states(job_state: &mut HashMap<Uuid, FullJobState>, now: DateTime<Utc>) {
+    job_state.retain(|_, state| !is_state_expired(state, now));
 }
 
 fn normalize_stage_identifier(value: &str) -> String {
@@ -484,10 +501,12 @@ impl StateHandler {
         let argo_client = self.argo_client.clone();
         tokio::spawn(async move {
             loop {
+                let now = Utc::now();
                 let initial = match argo_client.get_workflow_status().await {
                     Ok(status) => status,
                     Err(e) => {
                         self.metrics.record_poll_error();
+                        purge_expired_states(&mut *self.job_state.write().await, now);
                         tracing::error!(?e, "Failed to query workflow_status");
                         tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
                         continue;
@@ -497,6 +516,10 @@ impl StateHandler {
                 let mut write_lock = self.job_state.write().await;
                 for item in initial.items {
                     if let Some(state) = state_from_simple_status(item) {
+                        if is_state_expired(&state, now) {
+                            write_lock.remove(&state.id);
+                            continue;
+                        }
                         if let Some(previous) = write_lock.get(&state.id)
                             && !is_terminal_status(previous.status.as_ref())
                             && is_terminal_status(state.status.as_ref())
@@ -512,6 +535,7 @@ impl StateHandler {
                         write_lock.insert(state.id, state);
                     }
                 }
+                purge_expired_states(&mut write_lock, now);
                 drop(write_lock);
                 tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
             }
@@ -732,7 +756,7 @@ impl StateHandler {
                 argo_ressource_version: None,
                 status: None,
                 started: None,
-                updated: None,
+                updated: Some(Utc::now()),
                 workflowname: None,
                 secret: secret.clone(),
                 name: stripped,
@@ -1046,5 +1070,77 @@ mod tests {
         assert_eq!(stages[0].content, "bakta line");
         assert_eq!(stages[1].status, StageStatus::Running);
         assert_eq!(stages[1].content, "baktfold line");
+    }
+
+    #[test]
+    fn test_is_state_expired_after_retention_window() {
+        let now = Utc::now();
+        let state = FullJobState {
+            id: Uuid::nil(),
+            argo_uid: None,
+            argo_ressource_version: None,
+            name: "expired".to_string(),
+            status: Some(ArgoStatus::Succeeded),
+            started: Some(now - Duration::days(JOB_RETENTION_DAYS + 2)),
+            updated: Some(now - Duration::days(JOB_RETENTION_DAYS + 1)),
+            workflowname: None,
+            secret: "secret".to_string(),
+            archived: false,
+            api_version: ApiVersion::V1,
+            workflow_kind: WorkflowKind::Bakta,
+            result_kind: ResultKind::Bakta,
+        };
+
+        assert!(is_state_expired(&state, now));
+    }
+
+    #[test]
+    fn test_purge_expired_states_removes_old_jobs() {
+        let now = Utc::now();
+        let expired_id = Uuid::new_v4();
+        let fresh_id = Uuid::new_v4();
+        let mut job_state = HashMap::from([
+            (
+                expired_id,
+                FullJobState {
+                    id: expired_id,
+                    argo_uid: None,
+                    argo_ressource_version: None,
+                    name: "expired".to_string(),
+                    status: Some(ArgoStatus::Succeeded),
+                    started: Some(now - Duration::days(JOB_RETENTION_DAYS + 2)),
+                    updated: Some(now - Duration::days(JOB_RETENTION_DAYS + 1)),
+                    workflowname: None,
+                    secret: "secret".to_string(),
+                    archived: false,
+                    api_version: ApiVersion::V1,
+                    workflow_kind: WorkflowKind::Bakta,
+                    result_kind: ResultKind::Bakta,
+                },
+            ),
+            (
+                fresh_id,
+                FullJobState {
+                    id: fresh_id,
+                    argo_uid: None,
+                    argo_ressource_version: None,
+                    name: "fresh".to_string(),
+                    status: Some(ArgoStatus::Running),
+                    started: Some(now - Duration::days(1)),
+                    updated: Some(now),
+                    workflowname: None,
+                    secret: "secret".to_string(),
+                    archived: false,
+                    api_version: ApiVersion::V2,
+                    workflow_kind: WorkflowKind::BaktaBaktfold,
+                    result_kind: ResultKind::Bakta,
+                },
+            ),
+        ]);
+
+        purge_expired_states(&mut job_state, now);
+
+        assert!(!job_state.contains_key(&expired_id));
+        assert!(job_state.contains_key(&fresh_id));
     }
 }
