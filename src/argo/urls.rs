@@ -18,6 +18,15 @@ where
     format!("{url}/api/v1/workflows/{namespace}/submit")
 }
 
+pub fn get_workflow_url<T, U, V>(url: T, namespace: U, workflowname: V) -> String
+where
+    T: Display,
+    U: Display,
+    V: Display,
+{
+    format!("{url}/api/v1/workflows/{namespace}/{workflowname}")
+}
+
 pub fn get_logs_archived_url<T, U, V, W>(url: T, namespace: U, uid: V, workflowname: W) -> String
 where
     T: Display,

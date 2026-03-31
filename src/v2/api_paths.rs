@@ -12,18 +12,11 @@ use crate::{
     bakta_handler::{BaktaHandler, REGEX},
     v2::api_structs::{
         JobReference, UploadLink, V2InitRequest, V2InitResponse, V2ListRequest, V2ListResponse,
-        V2ResultResponse, V2StartRequest, V2VersionResponse, WorkflowDescriptorResponse,
+        V2LogsResponse, V2ResultResponse, V2StartRequest, V2VersionResponse,
+        WorkflowDescriptorResponse,
     },
     workflow_catalog::{workflow_descriptor, workflow_descriptors},
 };
-
-fn not_implemented() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json("V2 route is registered but not implemented yet".to_string()),
-    )
-        .into_response()
-}
 
 /// List supported V2 workflows.
 #[utoipa::path(
@@ -200,15 +193,19 @@ pub async fn start_job(
     path = "/api/v2/job/logs",
     params(JobReference),
     responses(
-        (status = 501, body = String)
+        (status = 200, body = V2LogsResponse),
+        (status = 400, body = String)
     ),
     tag = "v2",
 )]
 pub async fn job_logs(
-    State(_state): State<Arc<BaktaHandler>>,
-    Query(_job): Query<JobReference>,
+    State(state): State<Arc<BaktaHandler>>,
+    Query(job): Query<JobReference>,
 ) -> impl IntoResponse {
-    not_implemented()
+    match state.state_handler.get_logs_v2(job).await {
+        Ok(logs) => (StatusCode::OK, Json(logs)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(e.to_string())).into_response(),
+    }
 }
 
 /// Delete a V2 job.

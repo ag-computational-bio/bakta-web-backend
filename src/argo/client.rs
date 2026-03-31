@@ -5,10 +5,13 @@ use std::collections::HashMap;
 use crate::{api_structs::ArgoStatus, bakta_handler::FullJobState};
 
 use super::{
-    structs::{LogResult, SimpleStatusList, SubmitOptions, SubmitResult, SubmitWorkflowTemplate},
+    structs::{
+        Content, LogResult, SimpleStatusList, SubmitOptions, SubmitResult, SubmitWorkflowTemplate,
+        WorkflowDetails,
+    },
     urls::{
         get_delete_url_archived, get_delete_url_running, get_logs_archived_url,
-        get_logs_running_url, get_status_url_bakta, get_submit_url,
+        get_logs_running_url, get_status_url_bakta, get_submit_url, get_workflow_url,
     },
 };
 
@@ -31,6 +34,30 @@ impl ArgoClient {
 }
 
 impl ArgoClient {
+    async fn parse_log_entries(&self, response: String) -> Result<Vec<Content>> {
+        let mut entries = Vec::new();
+
+        for line in response.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let content = match serde_json::from_str::<LogResult>(line) {
+                Ok(content) => content.result,
+                Err(_) => Content {
+                    content: line.to_string(),
+                    pod_name: None,
+                },
+            };
+
+            if !content.content.contains("argo=true") {
+                entries.push(content);
+            }
+        }
+
+        Ok(entries)
+    }
+
     pub async fn get_workflow_status(&self) -> Result<SimpleStatusList> {
         let response = self
             .client
@@ -103,20 +130,42 @@ impl ArgoClient {
 
             let mut final_string = String::new();
 
-            for line in result.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let content: LogResult = serde_json::from_str(line)?;
-                if !content.result.content.contains("argo=true") {
-                    final_string.push_str(&content.result.content);
-                    final_string.push('\n');
-                }
+            for content in self.parse_log_entries(result).await? {
+                final_string.push_str(&content.content);
+                final_string.push('\n');
             }
             Ok(final_string)
         } else {
             Ok(String::new())
         }
+    }
+
+    pub async fn get_workflow_details(&self, workflow_name: &str) -> Result<WorkflowDetails> {
+        Ok(self
+            .client
+            .get(get_workflow_url(&self.url, &self.namespace, workflow_name))
+            .header("Authorization", format!("Bearer {}", &self.token))
+            .send()
+            .await?
+            .json::<WorkflowDetails>()
+            .await?)
+    }
+
+    pub async fn get_workflow_log_entries(&self, workflow_name: &str) -> Result<Vec<Content>> {
+        let response = self
+            .client
+            .get(get_logs_running_url(
+                &self.url,
+                &self.namespace,
+                workflow_name,
+            ))
+            .header("Authorization", format!("Bearer {}", &self.token))
+            .send()
+            .await?
+            .text()
+            .await?;
+
+        self.parse_log_entries(response).await
     }
 
     pub async fn submit_from_template(

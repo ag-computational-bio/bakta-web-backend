@@ -5,15 +5,16 @@ use crate::api_structs::Job;
 use crate::api_structs::ListResponse;
 use crate::api_structs::ResultResponse;
 use crate::api_structs::StartRequest;
-use crate::argo::structs::SimpleStatus;
+use crate::argo::structs::{Content, SimpleStatus, WorkflowNodeStatus};
 use crate::{
     api_structs::{JobStatus, VersionResponse},
     argo::client::ArgoClient,
     s3_handler::S3Handler,
     v2::api_structs::{
         FailedJobStatus as V2FailedJobStatus, FailedJobStatusKind, JobReference,
-        JobStatus as V2JobStatusKind, ResultKind, V2JobStatus, V2ListResponse, V2ResultResponse,
-        V2StartRequest, V2VersionResponse, WorkflowKind,
+        JobStatus as V2JobStatusKind, ResultKind, StageLog, StageStatus, V2JobStatus,
+        V2ListResponse, V2LogsResponse, V2ResultResponse, V2StartRequest, V2VersionResponse,
+        WorkflowKind,
     },
     workflow_catalog::workflow_descriptor,
 };
@@ -188,6 +189,186 @@ fn current_updated_at(state: &FullJobState) -> Option<DateTime<Utc>> {
     Some(updated)
 }
 
+fn normalize_stage_identifier(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut previous_was_separator = false;
+
+    for c in value.chars() {
+        if c.is_ascii_alphanumeric() {
+            normalized.push(c.to_ascii_lowercase());
+            previous_was_separator = false;
+        } else if !previous_was_separator && !normalized.is_empty() {
+            normalized.push('-');
+            previous_was_separator = true;
+        }
+    }
+
+    normalized.trim_matches('-').to_string()
+}
+
+fn stage_matches_candidate(candidate: &str, stage: &str) -> bool {
+    if candidate.is_empty() {
+        return false;
+    }
+
+    let normalized_candidate = normalize_stage_identifier(candidate);
+    let normalized_stage = normalize_stage_identifier(stage);
+
+    normalized_candidate == normalized_stage
+        || normalized_candidate.ends_with(&format!("-{normalized_stage}"))
+}
+
+fn stage_status_from_phase(phase: &str) -> StageStatus {
+    match phase {
+        "Init" | "Pending" => StageStatus::Pending,
+        "Running" => StageStatus::Running,
+        "Succeeded" => StageStatus::Succeeded,
+        "Failed" => StageStatus::Failed,
+        "Error" => StageStatus::Error,
+        _ => StageStatus::Unknown,
+    }
+}
+
+fn stage_status_from_nodes(
+    nodes: &HashMap<String, WorkflowNodeStatus>,
+    stage: &str,
+) -> Option<StageStatus> {
+    let mut statuses = nodes.values().filter_map(|node| {
+        (stage_matches_candidate(&node.display_name, stage)
+            || stage_matches_candidate(&node.template_name, stage)
+            || stage_matches_candidate(&node.name, stage))
+        .then(|| stage_status_from_phase(&node.phase))
+    });
+
+    let mut selected = statuses.next()?;
+    for status in statuses {
+        selected = match (selected, status) {
+            (_, StageStatus::Running) | (StageStatus::Succeeded, StageStatus::Failed) => status,
+            (StageStatus::Pending, StageStatus::Failed | StageStatus::Error) => status,
+            (StageStatus::Unknown, next) => next,
+            (current, StageStatus::Error)
+                if !matches!(current, StageStatus::Running | StageStatus::Failed) =>
+            {
+                StageStatus::Error
+            }
+            (current, _) => current,
+        };
+    }
+
+    Some(selected)
+}
+
+fn append_log_content(target: &mut String, content: &str) {
+    target.push_str(content);
+    if !content.ends_with('\n') {
+        target.push('\n');
+    }
+}
+
+fn stage_contents_from_log_entries(stage_count: usize, log_entries: &[Content]) -> Vec<String> {
+    let mut stage_contents = vec![String::new(); stage_count];
+    if stage_count == 0 {
+        return stage_contents;
+    }
+
+    let mut pod_indices = HashMap::<String, usize>::new();
+    let mut grouped_logs = Vec::<String>::new();
+    let mut ungrouped_logs = String::new();
+
+    for entry in log_entries {
+        if let Some(pod_name) = entry
+            .pod_name
+            .as_deref()
+            .filter(|pod_name| !pod_name.is_empty())
+        {
+            let index = *pod_indices.entry(pod_name.to_string()).or_insert_with(|| {
+                grouped_logs.push(String::new());
+                grouped_logs.len() - 1
+            });
+            append_log_content(&mut grouped_logs[index], &entry.content);
+        } else {
+            append_log_content(&mut ungrouped_logs, &entry.content);
+        }
+    }
+
+    for (index, grouped_log) in grouped_logs.into_iter().enumerate() {
+        let stage_index = if index < stage_count {
+            index
+        } else {
+            stage_count - 1
+        };
+        stage_contents[stage_index].push_str(&grouped_log);
+    }
+
+    if !ungrouped_logs.is_empty() {
+        stage_contents[0].push_str(&ungrouped_logs);
+    }
+
+    stage_contents
+}
+
+fn fallback_stage_status(
+    stage_index: usize,
+    last_stage_with_logs: Option<usize>,
+    overall_status: Option<&ArgoStatus>,
+) -> StageStatus {
+    match overall_status {
+        Some(ArgoStatus::Running) => match last_stage_with_logs {
+            Some(last) if stage_index < last => StageStatus::Succeeded,
+            Some(last) if stage_index == last => StageStatus::Running,
+            Some(_) => StageStatus::Pending,
+            None if stage_index == 0 => StageStatus::Running,
+            None => StageStatus::Pending,
+        },
+        Some(ArgoStatus::Succeeded) => match last_stage_with_logs {
+            Some(last) if stage_index <= last => StageStatus::Succeeded,
+            Some(_) => StageStatus::Pending,
+            None => StageStatus::Succeeded,
+        },
+        Some(ArgoStatus::Failed) => match last_stage_with_logs {
+            Some(last) if stage_index < last => StageStatus::Succeeded,
+            Some(last) if stage_index == last => StageStatus::Failed,
+            Some(_) => StageStatus::Pending,
+            None if stage_index == 0 => StageStatus::Failed,
+            None => StageStatus::Pending,
+        },
+        Some(ArgoStatus::Error) => match last_stage_with_logs {
+            Some(last) if stage_index < last => StageStatus::Succeeded,
+            Some(last) if stage_index == last => StageStatus::Error,
+            Some(_) => StageStatus::Pending,
+            None if stage_index == 0 => StageStatus::Error,
+            None => StageStatus::Pending,
+        },
+        Some(ArgoStatus::Pending | ArgoStatus::Init) | None => StageStatus::Pending,
+    }
+}
+
+fn build_stage_logs(
+    stages: &[&str],
+    nodes: Option<&HashMap<String, WorkflowNodeStatus>>,
+    log_entries: &[Content],
+    overall_status: Option<&ArgoStatus>,
+) -> Vec<StageLog> {
+    let stage_contents = stage_contents_from_log_entries(stages.len(), log_entries);
+    let last_stage_with_logs = stage_contents
+        .iter()
+        .rposition(|content| !content.is_empty());
+
+    stages
+        .iter()
+        .enumerate()
+        .map(|(index, stage)| StageLog {
+            stage: (*stage).to_string(),
+            status: nodes
+                .and_then(|nodes| stage_status_from_nodes(nodes, stage))
+                .unwrap_or_else(|| {
+                    fallback_stage_status(index, last_stage_with_logs, overall_status)
+                }),
+            content: stage_contents[index].trim_end().to_string(),
+        })
+        .collect()
+}
+
 fn into_v2_failed_status(id: Uuid, status: FailedJobStatusEnum) -> V2FailedJobStatus {
     V2FailedJobStatus {
         job_id: id,
@@ -355,6 +536,83 @@ impl StateHandler {
             return self.argo_client.get_logs(state).await;
         }
         Err(anyhow!("Job not found"))
+    }
+
+    pub async fn get_logs_v2(
+        &self,
+        JobReference { job_id, secret }: JobReference,
+    ) -> Result<V2LogsResponse> {
+        let (workflow_kind, workflow_name, overall_status) = {
+            let read_lock = self.job_state.read().await;
+            let Some(state) = read_lock.get(&job_id) else {
+                return Err(anyhow!("Job not found"));
+            };
+
+            if state.secret != secret {
+                return Err(anyhow!("Unauthorized"));
+            }
+
+            (
+                state.workflow_kind,
+                state.workflowname.clone(),
+                state.status.clone(),
+            )
+        };
+
+        let descriptor = workflow_descriptor(workflow_kind);
+
+        let Some(workflow_name) = workflow_name else {
+            return Ok(V2LogsResponse {
+                workflow_kind,
+                stages: build_stage_logs(descriptor.stages, None, &[], overall_status.as_ref()),
+            });
+        };
+
+        let workflow_details = match self.argo_client.get_workflow_details(&workflow_name).await {
+            Ok(details) => Some(details),
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    workflow_name,
+                    "Failed to retrieve workflow details for V2 logs"
+                );
+                None
+            }
+        };
+
+        let workflow_logs = match self
+            .argo_client
+            .get_workflow_log_entries(&workflow_name)
+            .await
+        {
+            Ok(log_entries) => Some(log_entries),
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    workflow_name,
+                    "Failed to retrieve workflow log entries for V2 logs"
+                );
+                None
+            }
+        };
+
+        if workflow_details.is_none() && workflow_logs.is_none() {
+            return Err(anyhow!("Failed to retrieve workflow logs"));
+        }
+
+        let workflow_logs = workflow_logs.unwrap_or_default();
+
+        Ok(V2LogsResponse {
+            workflow_kind,
+            stages: build_stage_logs(
+                descriptor.stages,
+                workflow_details
+                    .as_ref()
+                    .map(|details| &details.status.nodes),
+                workflow_logs.as_slice(),
+                overall_status.as_ref(),
+            ),
+        })
     }
 
     pub async fn delete_job(&self, (job_id, secret): (Uuid, String)) -> Result<()> {
@@ -647,5 +905,49 @@ mod tests {
         assert_eq!(state.api_version, ApiVersion::V1);
         assert_eq!(state.workflow_kind, WorkflowKind::Bakta);
         assert_eq!(state.result_kind, ResultKind::Bakta);
+    }
+
+    #[test]
+    fn test_build_stage_logs_uses_node_status_and_log_order() {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "node-1".to_string(),
+            WorkflowNodeStatus {
+                display_name: "bakta".to_string(),
+                phase: "Succeeded".to_string(),
+                ..Default::default()
+            },
+        );
+        nodes.insert(
+            "node-2".to_string(),
+            WorkflowNodeStatus {
+                display_name: "baktfold".to_string(),
+                phase: "Running".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let logs = vec![
+            Content {
+                content: "bakta line".to_string(),
+                pod_name: Some("wf-bakta-111".to_string()),
+            },
+            Content {
+                content: "baktfold line".to_string(),
+                pod_name: Some("wf-baktfold-222".to_string()),
+            },
+        ];
+
+        let stages = build_stage_logs(
+            &["bakta", "baktfold"],
+            Some(&nodes),
+            &logs,
+            Some(&ArgoStatus::Running),
+        );
+
+        assert_eq!(stages[0].status, StageStatus::Succeeded);
+        assert_eq!(stages[0].content, "bakta line");
+        assert_eq!(stages[1].status, StageStatus::Running);
+        assert_eq!(stages[1].content, "baktfold line");
     }
 }

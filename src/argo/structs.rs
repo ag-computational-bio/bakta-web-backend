@@ -158,9 +158,38 @@ pub struct SubmitResultMetadata {
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Content {
     pub content: String,
+    #[serde(rename = "podName", default)]
+    pub pod_name: Option<String>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct LogResult {
     pub result: Content,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowDetails {
+    pub status: WorkflowDetailStatus,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowDetailStatus {
+    #[serde(default)]
+    pub nodes: HashMap<String, WorkflowNodeStatus>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowNodeStatus {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub template_name: String,
+    #[serde(rename = "type", default)]
+    pub node_type: String,
+    #[serde(default)]
+    pub phase: String,
 }
