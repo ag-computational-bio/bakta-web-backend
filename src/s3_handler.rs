@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
-use reqsign::{AwsCredential, AwsV4Signer};
+use axum::http;
+use reqsign::aws::{self, StaticCredentialProvider};
 use reqwest::Method;
 use url::Url;
 
@@ -41,7 +42,7 @@ impl S3Handler {
         }
     }
 
-    pub fn sign_upload_url(&self, job_id: &str, input_type: InputType) -> Result<String> {
+    pub async fn sign_upload_url(&self, job_id: &str, input_type: InputType) -> Result<String> {
         let key = format!("jobs/{job_id}/inputs/{}", input_type.to_str());
         sign_url(
             Method::PUT,
@@ -57,40 +58,55 @@ impl S3Handler {
             10000, // 10000 seconds = 2.77 hours should be enough for uploads
             None,
         )
+        .await
     }
-    pub fn sign_download_urls(&self, job_id: &str, name: &str) -> Result<ResultFiles> {
-        let get_download_url = |output_format: &str| -> Result<String> {
-            let key = format!("jobs/{job_id}/results/result.{output_format}").to_string();
-            sign_url(
-                Method::GET,
-                &self.access_key,
-                &self.secret_key,
-                self.is_ssl,
-                false,
-                0,
-                None,
-                &self.bucket,
-                &key,
-                &self.endpoint,
-                6 * 86400, // 6 days
-                Some(format!("{name}.{output_format}")),
-            )
-        };
+
+    async fn sign_result_download_url(
+        &self,
+        job_id: &str,
+        name: &str,
+        output_format: &str,
+    ) -> Result<String> {
+        let key = format!("jobs/{job_id}/results/result.{output_format}");
+        sign_url(
+            Method::GET,
+            &self.access_key,
+            &self.secret_key,
+            self.is_ssl,
+            false,
+            0,
+            None,
+            &self.bucket,
+            &key,
+            &self.endpoint,
+            6 * 86400, // 6 days
+            Some(format!("{name}.{output_format}")),
+        )
+        .await
+    }
+
+    pub async fn sign_download_urls(&self, job_id: &str, name: &str) -> Result<ResultFiles> {
         Ok(ResultFiles {
-            embl: get_download_url("embl")?,
-            faa: get_download_url("faa")?,
-            faa_hypothetical: get_download_url("hypotheticals.faa")?,
-            ffn: get_download_url("ffn")?,
-            fna: get_download_url("fna")?,
-            gbff: get_download_url("gbff")?,
-            gff3: get_download_url("gff3")?,
-            json: get_download_url("json")?,
-            tsv: get_download_url("tsv")?,
-            tsv_hypothetical: get_download_url("hypotheticals.tsv")?,
-            tsv_inference: get_download_url("inference.tsv")?,
-            txt_logs: get_download_url("txt")?,
-            png_circular_plot: get_download_url("png")?,
-            svg_circular_plot: get_download_url("svg")?,
+            embl: self.sign_result_download_url(job_id, name, "embl").await?,
+            faa: self.sign_result_download_url(job_id, name, "faa").await?,
+            faa_hypothetical: self
+                .sign_result_download_url(job_id, name, "hypotheticals.faa")
+                .await?,
+            ffn: self.sign_result_download_url(job_id, name, "ffn").await?,
+            fna: self.sign_result_download_url(job_id, name, "fna").await?,
+            gbff: self.sign_result_download_url(job_id, name, "gbff").await?,
+            gff3: self.sign_result_download_url(job_id, name, "gff3").await?,
+            json: self.sign_result_download_url(job_id, name, "json").await?,
+            tsv: self.sign_result_download_url(job_id, name, "tsv").await?,
+            tsv_hypothetical: self
+                .sign_result_download_url(job_id, name, "hypotheticals.tsv")
+                .await?,
+            tsv_inference: self
+                .sign_result_download_url(job_id, name, "inference.tsv")
+                .await?,
+            txt_logs: self.sign_result_download_url(job_id, name, "txt").await?,
+            png_circular_plot: self.sign_result_download_url(job_id, name, "png").await?,
+            svg_circular_plot: self.sign_result_download_url(job_id, name, "svg").await?,
         })
     }
 }
@@ -117,7 +133,7 @@ impl S3Handler {
 /// * `` -
 ///
 #[allow(clippy::too_many_arguments)]
-fn sign_url(
+async fn sign_url(
     method: Method,
     access_key: &str,
     secret_key: &str,
@@ -131,7 +147,8 @@ fn sign_url(
     duration: i64,
     disposition: Option<String>,
 ) -> Result<String> {
-    let signer = AwsV4Signer::new("s3", "RegionOne");
+    let signer = aws::default_signer("s3", "RegionOne")
+        .with_credential_provider(StaticCredentialProvider::new(access_key, secret_key));
 
     // Set protocol depending if ssl
     let protocol = if ssl { "https://" } else { "http://" };
@@ -169,18 +186,19 @@ fn sign_url(
         ))?
     };
 
-    let mut req = reqwest::Request::new(method, url);
+    let mut parts = http::Request::builder()
+        .method(method)
+        .uri(url.as_str())
+        .body(())?
+        .into_parts()
+        .0;
 
     // Signing request with Signer
-    signer.sign_query(
-        &mut req,
-        std::time::Duration::new(duration as u64, 0), // Sec, nano
-        &AwsCredential {
-            access_key_id: access_key.to_string(),
-            secret_access_key: secret_key.to_string(),
-            session_token: None,
-            expires_in: None,
-        },
-    )?;
-    Ok(req.url().to_string())
+    signer
+        .sign(
+            &mut parts,
+            Some(std::time::Duration::new(duration as u64, 0)), // Sec, nano
+        )
+        .await?;
+    Ok(parts.uri.to_string())
 }

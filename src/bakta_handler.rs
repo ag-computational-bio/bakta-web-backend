@@ -11,8 +11,8 @@ use crate::{
     argo::client::ArgoClient,
     s3_handler::S3Handler,
 };
-use anyhow::anyhow;
 use anyhow::Result;
+use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Utc;
 use rand::distr::Alphanumeric;
@@ -327,7 +327,9 @@ impl StateHandler {
                 started: state.started.unwrap_or_default(),
                 updated: state.updated.unwrap_or_default(),
                 name: state.name.clone(),
-                files: s3_handler.sign_download_urls(id.to_string().as_str(), &state.name)?,
+                files: s3_handler
+                    .sign_download_urls(id.to_string().as_str(), &state.name)
+                    .await?,
             });
         }
         Err(anyhow!("Job not found"))

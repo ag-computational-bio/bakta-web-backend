@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use axum::{
+    Json,
     extract::{Query, State},
     http::HeaderMap,
     response::IntoResponse,
-    Json,
 };
 use reqwest::StatusCode;
 
@@ -79,27 +79,27 @@ pub async fn init_job(
 ) -> impl IntoResponse {
     let (id, secret) = state.state_handler.init_job(init_request.name).await;
 
-    let Ok((fasta_url, prodigal_url, replicon_url)) =
-        || -> anyhow::Result<(String, String, String)> {
-            Ok((
-                state
-                    .s3_handler
-                    .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::Fasta)?,
-                state
-                    .s3_handler
-                    .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::Prodigal)?,
-                state
-                    .s3_handler
-                    .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::RepliconsTSV)?,
-            ))
-        }()
-    else {
+    let (Ok(fasta_url), Ok(prodigal_url), Ok(replicon_url)) = (
+        state
+            .s3_handler
+            .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::Fasta)
+            .await,
+        state
+            .s3_handler
+            .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::Prodigal)
+            .await,
+        state
+            .s3_handler
+            .sign_upload_url(&id.to_string(), crate::s3_handler::InputType::RepliconsTSV)
+            .await,
+    ) else {
         return (
             StatusCode::BAD_REQUEST,
             Json("Failed to sign URL".to_string()),
         )
             .into_response();
     };
+
     (
         StatusCode::OK,
         Json(InitResponse {

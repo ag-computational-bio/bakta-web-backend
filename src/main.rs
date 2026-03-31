@@ -1,7 +1,7 @@
 use axum::{
+    Router,
     response::Redirect,
     routing::{delete, get, post},
-    Router,
 };
 use bakta_handler::BaktaHandler;
 use std::{net::SocketAddr, sync::Arc};

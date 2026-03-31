@@ -5,7 +5,9 @@ where
     T: Display,
     U: Display,
 {
-    format!("{url}/api/v1/workflows/{namespace}?fields=items.status.finishedAt,items.status.startedAt,items.metadata.name,items.metadata.uid,items.metadata.resourceVersion,items.status.phase,items.metadata.labels")
+    format!(
+        "{url}/api/v1/workflows/{namespace}?fields=items.status.finishedAt,items.status.startedAt,items.metadata.name,items.metadata.uid,items.metadata.resourceVersion,items.status.phase,items.metadata.labels"
+    )
 }
 
 pub fn get_submit_url<T, U>(url: T, namespace: U) -> String
@@ -23,7 +25,9 @@ where
     V: Display,
     W: Display,
 {
-    format!("{url}/artifact-files/{namespace}/archived-workflows/{uid}/{workflowname}/outputs/main-logs")
+    format!(
+        "{url}/artifact-files/{namespace}/archived-workflows/{uid}/{workflowname}/outputs/main-logs"
+    )
 }
 
 pub fn get_logs_running_url<T, U, V>(url: T, namespace: U, workflowname: V) -> String
