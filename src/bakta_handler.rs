@@ -1004,6 +1004,29 @@ impl StateHandler {
 mod tests {
     use super::*;
 
+    fn build_test_state(
+        id: Uuid,
+        status: Option<ArgoStatus>,
+        updated: DateTime<Utc>,
+        workflow_kind: WorkflowKind,
+    ) -> FullJobState {
+        FullJobState {
+            id,
+            argo_uid: None,
+            argo_ressource_version: None,
+            name: id.to_string(),
+            status,
+            started: Some(updated - Duration::minutes(5)),
+            updated: Some(updated),
+            workflowname: None,
+            secret: "secret".to_string(),
+            archived: false,
+            api_version: ApiVersion::V2,
+            workflow_kind,
+            result_kind: ResultKind::Bakta,
+        }
+    }
+
     #[test]
     fn test_state_from_simple_status_ignores_workflow_without_job_label() {
         let status = SimpleStatus::default();
@@ -1070,6 +1093,63 @@ mod tests {
         assert_eq!(stages[0].content, "bakta line");
         assert_eq!(stages[1].status, StageStatus::Running);
         assert_eq!(stages[1].content, "baktfold line");
+    }
+
+    #[test]
+    fn test_build_stage_logs_falls_back_when_workflow_details_are_missing() {
+        let logs = vec![
+            Content {
+                content: "initial ungrouped line".to_string(),
+                pod_name: None,
+            },
+            Content {
+                content: "bakta line".to_string(),
+                pod_name: Some("wf-bakta-111".to_string()),
+            },
+            Content {
+                content: "baktfold line".to_string(),
+                pod_name: Some("wf-baktfold-222".to_string()),
+            },
+            Content {
+                content: "extra retry line".to_string(),
+                pod_name: Some("wf-baktfold-retry-333".to_string()),
+            },
+        ];
+
+        let stages = build_stage_logs(
+            &["bakta", "baktfold"],
+            None,
+            &logs,
+            Some(&ArgoStatus::Failed),
+        );
+
+        assert_eq!(stages[0].status, StageStatus::Succeeded);
+        assert_eq!(stages[0].content, "bakta line\ninitial ungrouped line");
+        assert_eq!(stages[1].status, StageStatus::Failed);
+        assert_eq!(stages[1].content, "baktfold line\nextra retry line");
+    }
+
+    #[test]
+    fn test_build_stage_logs_uses_template_name_when_display_name_does_not_match() {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "node-1".to_string(),
+            WorkflowNodeStatus {
+                display_name: "run-annotation".to_string(),
+                template_name: "bakta_proteins".to_string(),
+                phase: "Succeeded".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let stages = build_stage_logs(
+            &["bakta_proteins"],
+            Some(&nodes),
+            &[],
+            Some(&ArgoStatus::Succeeded),
+        );
+
+        assert_eq!(stages[0].status, StageStatus::Succeeded);
     }
 
     #[test]
@@ -1142,5 +1222,56 @@ mod tests {
 
         assert!(!job_state.contains_key(&expired_id));
         assert!(job_state.contains_key(&fresh_id));
+    }
+
+    #[tokio::test]
+    async fn test_render_metrics_counts_only_active_jobs() {
+        let now = Utc::now();
+        let created_id = Uuid::new_v4();
+        let running_id = Uuid::new_v4();
+        let succeeded_id = Uuid::new_v4();
+        let state_handler = StateHandler {
+            job_state: RwLock::new(HashMap::from([
+                (
+                    created_id,
+                    build_test_state(created_id, None, now, WorkflowKind::Bakta),
+                ),
+                (
+                    running_id,
+                    build_test_state(
+                        running_id,
+                        Some(ArgoStatus::Running),
+                        now,
+                        WorkflowKind::BaktaBaktfold,
+                    ),
+                ),
+                (
+                    succeeded_id,
+                    build_test_state(
+                        succeeded_id,
+                        Some(ArgoStatus::Succeeded),
+                        now,
+                        WorkflowKind::Baktfold,
+                    ),
+                ),
+            ])),
+            argo_client: Arc::new(ArgoClient::new(
+                "token".to_string(),
+                "http://argo.example".to_string(),
+                "argo".to_string(),
+            )),
+            metrics: Arc::new(AppMetrics::new()),
+        };
+
+        let rendered = state_handler
+            .render_metrics()
+            .await
+            .expect("metrics should render");
+
+        assert!(rendered.contains("jobs_active{workflow_kind=\"bakta\",status=\"created\"} 1"));
+        assert!(
+            rendered.contains("jobs_active{workflow_kind=\"bakta_baktfold\",status=\"running\"} 1")
+        );
+        assert!(!rendered.contains("workflow_kind=\"baktfold\",status=\"succeeded\""));
     }
 }

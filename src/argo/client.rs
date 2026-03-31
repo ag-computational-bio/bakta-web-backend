@@ -223,7 +223,11 @@ mod tests {
     #[tokio::test]
     async fn test_get_workflow_status() {
         let client = ArgoClient::new("foo".to_string(), "bar".to_string(), "bakta".to_string());
-        let response = client.get_workflow_status().await.unwrap();
-        dbg!(response);
+        let error = client
+            .get_workflow_status()
+            .await
+            .expect_err("relative URL should fail deterministically");
+
+        assert!(error.to_string().contains("builder error"));
     }
 }

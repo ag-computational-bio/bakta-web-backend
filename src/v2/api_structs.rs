@@ -597,4 +597,44 @@ mod tests {
             "--min-contig-length 200 --prodigal /data/prodigal.tf --replicons /data/replicons.tsv --regions /data/regions --proteins /data/trusted_proteins.faa --hmms /data/trusted_hmms.hmm --complete --locus 'BSU_00010' --locus-tag 'BSU00010' --locus-tag-increment 5 --keep-contig-headers --genus 'Bacillus' --species 'subtilis' --strain '168' --plasmid 'pBS32' --compliant --meta --translation-table 25 --gram + --skip-trna --skip-plot"
         );
     }
+
+    #[test]
+    fn test_bakta_v2_config_rejects_invalid_translation_table() {
+        let error = BaktaV2Config {
+            translation_table: 12,
+            ..Default::default()
+        }
+        .into_parameters()
+        .expect_err("invalid translation table should be rejected");
+
+        assert_eq!(error.to_string(), "Invalid translation_table");
+    }
+
+    #[test]
+    fn test_bakta_v2_config_rejects_invalid_locus_tag_increment() {
+        let error = BaktaV2Config {
+            locus_tag_increment: 3,
+            ..Default::default()
+        }
+        .into_parameters()
+        .expect_err("invalid locus tag increment should be rejected");
+
+        assert_eq!(error.to_string(), "Invalid locus_tag_increment");
+    }
+
+    #[test]
+    fn test_bakta_v2_config_sanitizes_embedded_quotes() {
+        let params = BaktaV2Config {
+            genus: Some("Bacil'lus".to_string()),
+            strain: Some("O'Brien isolate".to_string()),
+            ..Default::default()
+        }
+        .into_parameters()
+        .expect("parameters should build");
+
+        assert!(params.contains("--genus 'Bacillus'"));
+        assert!(params.contains("--strain 'OBrien isolate'"));
+        assert!(!params.contains("Bacil'lus"));
+        assert!(!params.contains("O'Brien"));
+    }
 }

@@ -365,9 +365,9 @@ mod test {
 
         assert_eq!(
             params.into_parameters(),
-            "--prodigal /data/prodigal.tf --replicons /data/replicons.tsv --complete --locus BSU_00010 --locus-tag BSU00010 --keep-contig-headers --genus Bacillus --species subtilis --strain 168 --plasmid pBS32 --compliant --translation-table 4 --gram +"
+            "--prodigal /data/prodigal.tf --replicons /data/replicons.tsv --complete --locus 'BSU_00010' --locus-tag 'BSU00010' --keep-contig-headers --genus 'Bacillus' --species 'subtilis' --strain '168' --plasmid 'pBS32' --compliant --translation-table 4 --gram +"
         );
 
-        assert_eq!(JobConfig::default().into_parameters(), "--derm ?");
+        assert_eq!(JobConfig::default().into_parameters(), "--gram ?");
     }
 }
