@@ -217,6 +217,19 @@ impl AppMetrics {
     }
 }
 
+/// Prometheus metrics endpoint for workflow and HTTP-level service telemetry.
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    operation_id = "getPrometheusMetrics",
+    summary = "Fetch Prometheus metrics",
+    description = "Returns Prometheus-formatted counters, gauges, and histograms for job submissions, active jobs, completions, runtimes, HTTP request durations, and Argo polling or submission errors.",
+    responses(
+        (status = 200, body = String, content_type = "text/plain", description = "Prometheus metrics output."),
+        (status = 500, body = String, description = "Metrics could not be rendered.")
+    ),
+    tag = "observability",
+)]
 pub async fn metrics(State(state): State<Arc<BaktaHandler>>) -> impl IntoResponse {
     match state.state_handler.render_metrics().await {
         Ok(output) => (

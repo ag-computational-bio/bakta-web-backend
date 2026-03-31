@@ -12,8 +12,14 @@ use crate::v2::api_paths::*;
 #[openapi(
     info(
         title = "Bakta Web API V2",
-        description = "Version 2 API for scheduling Bakta, Bakta Proteins, Baktfold, and combined workflows.",
+        description = "Extensible V2 API for scheduling multiple workflow kinds, including Bakta, Bakta Proteins, Baktfold, and combined Bakta plus Baktfold jobs.",
         license(name = "MIT", url = "https://opensource.org/license/mit/")
+    ),
+    servers(
+        (url = "/", description = "Current deployment")
+    ),
+    tags(
+        (name = "v2", description = "V2 workflow scheduling API.")
     ),
     paths(
         workflows,
@@ -59,6 +65,7 @@ use crate::v2::api_paths::*;
 )]
 pub struct BaktaApiV2;
 
+/// Workflow kind exposed by the V2 API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowKind {
@@ -68,6 +75,7 @@ pub enum WorkflowKind {
     Baktfold,
 }
 
+/// Result family returned by a finished V2 workflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ResultKind {
@@ -76,6 +84,7 @@ pub enum ResultKind {
     Baktfold,
 }
 
+/// Upload slot that a V2 workflow may require before it can be started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UploadKind {
@@ -124,25 +133,31 @@ pub enum FailedJobStatusKind {
     Unauthorized,
 }
 
+/// Shared V2 job handle used for authenticated job operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, IntoParams)]
 #[into_params(style = Form, parameter_in = Query)]
 pub struct JobReference {
+    /// Secret returned during job initialization and required for later job operations.
     pub secret: String,
+    /// Unique job identifier returned during job initialization.
     pub job_id: Uuid,
 }
 
+/// Failure details for requested jobs that could not be listed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct FailedJobStatus {
     pub job_id: Uuid,
     pub status: FailedJobStatusKind,
 }
 
+/// Description of a single upload slot for a workflow kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct UploadDescriptor {
     pub upload_kind: UploadKind,
     pub required: bool,
 }
 
+/// Presigned upload URL for a workflow-specific input slot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct UploadLink {
     pub upload_kind: UploadKind,
@@ -150,6 +165,7 @@ pub struct UploadLink {
     pub url: String,
 }
 
+/// Static workflow metadata returned by `GET /api/v2/workflows`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct WorkflowDescriptorResponse {
     pub workflow_kind: WorkflowKind,
@@ -158,12 +174,14 @@ pub struct WorkflowDescriptorResponse {
     pub stages: Vec<String>,
 }
 
+/// Request body for creating a new V2 job and receiving workflow-specific upload URLs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct V2InitRequest {
     pub name: String,
     pub workflow_kind: WorkflowKind,
 }
 
+/// Upload URLs and job credentials returned by the V2 initialization endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct V2InitResponse {
     pub job: JobReference,
@@ -171,6 +189,7 @@ pub struct V2InitResponse {
     pub uploads: Vec<UploadLink>,
 }
 
+/// Empty configuration payload used for workflow kinds that currently expose no extra options.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
 pub struct EmptyConfig {}
 
@@ -178,6 +197,9 @@ fn sanitize_input(s: String) -> String {
     format!("'{}'", s.replace('\'', ""))
 }
 
+/// V2 Bakta configuration surface.
+///
+/// This is intentionally broader than V1 and includes optional upload-backed flags as booleans.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(default)]
 pub struct BaktaV2Config {
@@ -400,6 +422,7 @@ impl BaktaV2Config {
     }
 }
 
+/// Request body for starting a V2 workflow after all required uploads are complete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct V2StartRequest {
     pub job: JobReference,
@@ -407,6 +430,7 @@ pub struct V2StartRequest {
     pub workflow: WorkflowStartConfig,
 }
 
+/// Workflow-specific configuration payload accepted by the V2 start endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "workflow_kind", content = "config", rename_all = "snake_case")]
 pub enum WorkflowStartConfig {
@@ -438,11 +462,13 @@ impl WorkflowStartConfig {
     }
 }
 
+/// Request body for listing multiple V2 jobs at once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct V2ListRequest {
     pub jobs: Vec<JobReference>,
 }
 
+/// Status entry returned for a single V2 job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct V2JobStatus {
     pub job_id: Uuid,
@@ -454,12 +480,14 @@ pub struct V2JobStatus {
     pub name: String,
 }
 
+/// V2 response body for listing job states in bulk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct V2ListResponse {
     pub jobs: Vec<V2JobStatus>,
     pub failed_jobs: Vec<FailedJobStatus>,
 }
 
+/// Fixed Bakta result artifact set exposed by V2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct BaktaResultFiles {
     pub embl: String,
@@ -478,6 +506,7 @@ pub struct BaktaResultFiles {
     pub circular_plot_svg: String,
 }
 
+/// Fixed result artifact set exposed by the Bakta Proteins workflow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct BaktaProteinsResultFiles {
     pub tsv: String,
@@ -486,6 +515,7 @@ pub struct BaktaProteinsResultFiles {
     pub json: String,
 }
 
+/// Fixed reduced result artifact set exposed by standalone Baktfold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct BaktfoldResultFiles {
     pub embl: String,
@@ -502,6 +532,7 @@ pub struct BaktfoldResultFiles {
     pub inference_tsv: String,
 }
 
+/// Tagged V2 result payload for finished workflows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "result_kind", content = "files", rename_all = "snake_case")]
 pub enum V2ResultFiles {
@@ -510,6 +541,7 @@ pub enum V2ResultFiles {
     Baktfold(BaktfoldResultFiles),
 }
 
+/// V2 response body for a finished workflow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct V2ResultResponse {
     pub job_id: Uuid,
@@ -520,6 +552,7 @@ pub struct V2ResultResponse {
     pub result: V2ResultFiles,
 }
 
+/// Stage-specific log output returned by the V2 logs endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct StageLog {
     pub stage: String,
@@ -527,12 +560,14 @@ pub struct StageLog {
     pub content: String,
 }
 
+/// Structured logs for a V2 workflow, grouped by logical stage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct V2LogsResponse {
     pub workflow_kind: WorkflowKind,
     pub stages: Vec<StageLog>,
 }
 
+/// Tool and database version information exposed by V2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct V2VersionResponse {
     pub backend_version: String,

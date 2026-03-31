@@ -11,13 +11,14 @@ use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-mod api_paths;
 #[allow(clippy::upper_case_acronyms)]
 mod api_structs;
 mod argo;
 mod bakta_handler;
 mod metrics;
+mod openapi;
 mod s3_handler;
+mod v1;
 mod v2;
 mod workflow_catalog;
 
@@ -30,6 +31,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
     let listener = tokio::net::TcpListener::bind(socket_address).await.unwrap();
     let swagger = SwaggerUi::new("/swagger-ui")
+        .url(
+            "/api-docs/openapi.json",
+            openapi::BaktaServiceApi::openapi(),
+        )
         .url(
             "/api-docs/openapi-v1.json",
             api_structs::BaktaApi::openapi(),
@@ -72,13 +77,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(swagger)
         .route("/", get(|| async { Redirect::permanent("/swagger-ui") }))
         .route("/metrics", get(metrics::metrics))
-        .route("/api/v1/job/delete", delete(api_paths::delete_job))
-        .route("/api/v1/job/logs", get(api_paths::job_logs))
-        .route("/api/v1/job/init", post(api_paths::init_job))
-        .route("/api/v1/job/list", post(api_paths::list_jobs))
-        .route("/api/v1/job/result", post(api_paths::query_result))
-        .route("/api/v1/job/start", post(api_paths::start_job))
-        .route("/api/v1/version", get(api_paths::version))
+        .route("/api/v1/job/delete", delete(v1::api_paths::delete_job))
+        .route("/api/v1/job/logs", get(v1::api_paths::job_logs))
+        .route("/api/v1/job/init", post(v1::api_paths::init_job))
+        .route("/api/v1/job/list", post(v1::api_paths::list_jobs))
+        .route("/api/v1/job/result", post(v1::api_paths::query_result))
+        .route("/api/v1/job/start", post(v1::api_paths::start_job))
+        .route("/api/v1/version", get(v1::api_paths::version))
         .route("/api/v2/workflows", get(v2::api_paths::workflows))
         .route("/api/v2/job/delete", delete(v2::api_paths::delete_job))
         .route("/api/v2/job/logs", get(v2::api_paths::job_logs))

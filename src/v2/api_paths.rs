@@ -22,8 +22,11 @@ use crate::{
 #[utoipa::path(
     get,
     path = "/api/v2/workflows",
+    operation_id = "listV2Workflows",
+    summary = "List V2 workflows",
+    description = "Returns the static V2 workflow catalog, including required uploads, result families, and logical log stages for each supported workflow kind.",
     responses(
-        (status = 200, body = [WorkflowDescriptorResponse])
+        (status = 200, body = [WorkflowDescriptorResponse], description = "Supported workflow definitions.")
     ),
     tag = "v2",
 )]
@@ -56,6 +59,9 @@ pub async fn workflows() -> impl IntoResponse {
 #[utoipa::path(
     post,
     path = "/api/v2/job/init",
+    operation_id = "initV2Job",
+    summary = "Initialize V2 job",
+    description = "Creates a V2 job for a specific workflow kind and returns presigned upload URLs for all required and optional input slots of that workflow.",
     request_body = V2InitRequest,
     responses(
         (status = 200, body = V2InitResponse),
@@ -110,6 +116,9 @@ pub async fn init_job(
 #[utoipa::path(
     post,
     path = "/api/v2/job/list",
+    operation_id = "listV2Jobs",
+    summary = "List V2 jobs",
+    description = "Returns workflow-aware status information for multiple V2 jobs in a single request.",
     request_body = V2ListRequest,
     responses(
         (status = 200, body = V2ListResponse)
@@ -132,6 +141,9 @@ pub async fn list_jobs(
 #[utoipa::path(
     post,
     path = "/api/v2/job/result",
+    operation_id = "getV2JobResult",
+    summary = "Fetch V2 job result",
+    description = "Returns signed download URLs for the fixed result family of a finished V2 workflow.",
     request_body = JobReference,
     responses(
         (status = 200, body = V2ResultResponse),
@@ -157,6 +169,9 @@ pub async fn query_result(
 #[utoipa::path(
     post,
     path = "/api/v2/job/start",
+    operation_id = "startV2Job",
+    summary = "Start V2 workflow",
+    description = "Submits the selected V2 workflow template to Argo using the uploaded inputs and the workflow-specific configuration payload.",
     request_body = V2StartRequest,
     responses(
         (status = 200, body = ()),
@@ -191,6 +206,9 @@ pub async fn start_job(
 #[utoipa::path(
     get,
     path = "/api/v2/job/logs",
+    operation_id = "getV2JobLogs",
+    summary = "Fetch V2 structured logs",
+    description = "Returns structured logs grouped by logical workflow stage. Combined workflows, such as Bakta plus Baktfold, expose one log section per stage.",
     params(JobReference),
     responses(
         (status = 200, body = V2LogsResponse),
@@ -212,6 +230,9 @@ pub async fn job_logs(
 #[utoipa::path(
     delete,
     path = "/api/v2/job/delete",
+    operation_id = "deleteV2Job",
+    summary = "Delete V2 job",
+    description = "Deletes a V2 workflow and removes its internal job state if the provided `job_id` and `secret` match.",
     params(JobReference),
     responses(
         (status = 200, body = ()),
@@ -234,6 +255,9 @@ pub async fn delete_job(
 #[utoipa::path(
     get,
     path = "/api/v2/version",
+    operation_id = "getV2Version",
+    summary = "Get V2 version information",
+    description = "Returns backend, Bakta, Bakta database, Baktfold, and Baktfold database versions used by the V2 API.",
     responses(
         (status = 200, body = V2VersionResponse)
     ),
