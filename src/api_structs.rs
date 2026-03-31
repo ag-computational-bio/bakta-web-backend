@@ -14,9 +14,6 @@ use uuid::Uuid;
         description = "Stable V1 API for the original Bakta genome annotation workflow. This surface is preserved for backward compatibility.",
         license(name = "MIT", url = "https://opensource.org/license/mit/")
     ),
-    servers(
-        (url = "/", description = "Current deployment")
-    ),
     tags(
         (name = "v1", description = "Stable V1 Bakta API.")
     ),

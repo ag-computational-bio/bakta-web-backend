@@ -29,7 +29,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket_address: SocketAddr = dotenvy::var("SOCKET_ADDR")
         .unwrap_or("127.0.0.1:8080".to_string())
         .parse()?;
+    let metrics_socket_address: SocketAddr = dotenvy::var("METRICS_SOCKET_ADDR")
+        .unwrap_or("127.0.0.1:9090".to_string())
+        .parse()?;
     let listener = tokio::net::TcpListener::bind(socket_address).await.unwrap();
+    let metrics_listener = tokio::net::TcpListener::bind(metrics_socket_address)
+        .await
+        .unwrap();
     let swagger = SwaggerUi::new("/swagger-ui")
         .url(
             "/api-docs/openapi.json",
@@ -70,13 +76,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     tracing::info!(?socket_address, "Starting bakta web backend");
+    tracing::info!(?metrics_socket_address, "Starting private metrics endpoint");
 
     let metrics_state = bakta_handler.clone();
+    let metrics_app = Router::new()
+        .route("/metrics", get(metrics::metrics))
+        .with_state(metrics_state.clone());
 
     let app = Router::new()
         .merge(swagger)
         .route("/", get(|| async { Redirect::permanent("/swagger-ui") }))
-        .route("/metrics", get(metrics::metrics))
         .route("/api/v1/job/delete", delete(v1::api_paths::delete_job))
         .route("/api/v1/job/logs", get(v1::api_paths::job_logs))
         .route("/api/v1/job/init", post(v1::api_paths::init_job))
@@ -104,6 +113,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .on_body_chunk(())
                 .on_eos(()),
         );
-    axum::serve(listener, app.into_make_service()).await?;
+    tokio::try_join!(
+        axum::serve(listener, app.into_make_service()),
+        axum::serve(metrics_listener, metrics_app.into_make_service())
+    )?;
     Ok(())
 }

@@ -15,9 +15,6 @@ use crate::v2::api_paths::*;
         description = "Extensible V2 API for scheduling multiple workflow kinds, including Bakta, Bakta Proteins, Baktfold, and combined Bakta plus Baktfold jobs.",
         license(name = "MIT", url = "https://opensource.org/license/mit/")
     ),
-    servers(
-        (url = "/", description = "Current deployment")
-    ),
     tags(
         (name = "v2", description = "V2 workflow scheduling API.")
     ),

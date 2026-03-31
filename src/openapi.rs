@@ -4,16 +4,12 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "Bakta Web Service API",
-        description = "Combined OpenAPI document for the stable V1 Bakta API, the extensible V2 workflow API, and observability endpoints.",
+        description = "Combined OpenAPI document for the stable V1 Bakta API and the extensible V2 workflow API.",
         license(name = "MIT", url = "https://opensource.org/license/mit/")
-    ),
-    servers(
-        (url = "/", description = "Current deployment")
     ),
     tags(
         (name = "v1", description = "Stable V1 API for the original Bakta genome annotation workflow."),
-        (name = "v2", description = "V2 API for multiple workflow kinds including Bakta Proteins and Baktfold."),
-        (name = "observability", description = "Operational endpoints such as Prometheus metrics.")
+        (name = "v2", description = "V2 API for multiple workflow kinds including Bakta Proteins and Baktfold.")
     ),
     paths(
         crate::v1::api_paths::delete_job,
@@ -31,7 +27,6 @@ use utoipa::OpenApi;
         crate::v2::api_paths::job_logs,
         crate::v2::api_paths::delete_job,
         crate::v2::api_paths::version,
-        crate::metrics::metrics,
     ),
     components(schemas(
         crate::api_structs::Job,
