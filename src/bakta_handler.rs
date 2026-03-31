@@ -129,12 +129,9 @@ fn result_kind_from_label_value(value: Option<&str>) -> ResultKind {
 
 fn state_from_simple_status(simple_status: SimpleStatus) -> Option<FullJobState> {
     let labels = &simple_status.metadata.labels;
-    let Some(job_id) = labels
+    let job_id = labels
         .get("jobid")
-        .and_then(|value| Uuid::from_str(value).ok())
-    else {
-        return None;
-    };
+        .and_then(|value| Uuid::from_str(value).ok())?;
 
     let status = match ArgoStatus::try_from(simple_status.status.phase) {
         Ok(status) => status,
@@ -267,12 +264,14 @@ fn stage_status_from_nodes(
     nodes: &HashMap<String, WorkflowNodeStatus>,
     stage: &str,
 ) -> Option<StageStatus> {
-    let mut statuses = nodes.values().filter_map(|node| {
-        (stage_matches_candidate(&node.display_name, stage)
-            || stage_matches_candidate(&node.template_name, stage)
-            || stage_matches_candidate(&node.name, stage))
-        .then(|| stage_status_from_phase(&node.phase))
-    });
+    let mut statuses = nodes
+        .values()
+        .filter(|node| {
+            stage_matches_candidate(&node.display_name, stage)
+                || stage_matches_candidate(&node.template_name, stage)
+                || stage_matches_candidate(&node.name, stage)
+        })
+        .map(|node| stage_status_from_phase(&node.phase));
 
     let mut selected = statuses.next()?;
     for status in statuses {
@@ -414,7 +413,7 @@ fn into_v2_failed_status(id: Uuid, status: FailedJobStatusEnum) -> V2FailedJobSt
 }
 
 impl FullJobState {
-    fn into_v2_job_status(&self) -> Option<V2JobStatus> {
+    fn to_v2_job_status(&self) -> Option<V2JobStatus> {
         Some(V2JobStatus {
             job_id: self.id,
             status: self.status.clone().map(Into::into)?,
@@ -588,7 +587,7 @@ impl StateHandler {
                     continue;
                 }
 
-                if let Some(api_status) = state.into_v2_job_status() {
+                if let Some(api_status) = state.to_v2_job_status() {
                     jobs.push(api_status);
                 }
             } else {

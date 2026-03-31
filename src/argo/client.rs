@@ -217,7 +217,6 @@ impl ArgoClient {
 }
 
 #[cfg(test)]
-
 mod tests {
     use super::*;
 
