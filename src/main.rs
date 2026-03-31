@@ -17,6 +17,8 @@ mod api_structs;
 mod argo;
 mod bakta_handler;
 mod s3_handler;
+mod v2;
+mod workflow_catalog;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,7 +29,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
     let listener = tokio::net::TcpListener::bind(socket_address).await.unwrap();
     let swagger = SwaggerUi::new("/swagger-ui")
-        .url("/api-docs/openapi.json", api_structs::BaktaApi::openapi());
+        .url(
+            "/api-docs/openapi-v1.json",
+            api_structs::BaktaApi::openapi(),
+        )
+        .url(
+            "/api-docs/openapi-v2.json",
+            v2::api_structs::BaktaApiV2::openapi(),
+        );
 
     let bakta_handler = Arc::new(
         BaktaHandler::new(
@@ -64,6 +73,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/job/result", post(api_paths::query_result))
         .route("/api/v1/job/start", post(api_paths::start_job))
         .route("/api/v1/version", get(api_paths::version))
+        .route("/api/v2/workflows", get(v2::api_paths::workflows))
+        .route("/api/v2/job/delete", delete(v2::api_paths::delete_job))
+        .route("/api/v2/job/logs", get(v2::api_paths::job_logs))
+        .route("/api/v2/job/init", post(v2::api_paths::init_job))
+        .route("/api/v2/job/list", post(v2::api_paths::list_jobs))
+        .route("/api/v2/job/result", post(v2::api_paths::query_result))
+        .route("/api/v2/job/start", post(v2::api_paths::start_job))
+        .route("/api/v2/version", get(v2::api_paths::version))
         .with_state(bakta_handler)
         .layer(CorsLayer::very_permissive())
         .layer(
