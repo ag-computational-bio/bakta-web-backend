@@ -13,7 +13,7 @@ use crate::{
     v2::api_structs::{
         FailedJobStatus as V2FailedJobStatus, FailedJobStatusKind, JobReference,
         JobStatus as V2JobStatusKind, ResultKind, V2JobStatus, V2ListResponse, V2ResultResponse,
-        V2VersionResponse, WorkflowKind,
+        V2StartRequest, V2VersionResponse, WorkflowKind,
     },
     workflow_catalog::workflow_descriptor,
 };
@@ -474,6 +474,76 @@ impl StateHandler {
             state.workflow_kind = WorkflowKind::Bakta;
             state.result_kind = ResultKind::Bakta;
         }
+        Ok(())
+    }
+
+    pub async fn start_job_v2(
+        &self,
+        start_settings: V2StartRequest,
+        origin: Option<String>,
+    ) -> Result<()> {
+        let workflow_kind = start_settings.workflow.workflow_kind();
+        let parameters = start_settings.workflow.into_parameters()?;
+        let JobReference { job_id, secret } = start_settings.job;
+        let descriptor = workflow_descriptor(workflow_kind);
+
+        let mut write_lock = self.job_state.write().await;
+        let Some(state) = write_lock.get_mut(&job_id) else {
+            return Err(anyhow!("Job not found"));
+        };
+
+        if state.secret != secret {
+            return Err(anyhow!("Unauthorized"));
+        }
+
+        if state.api_version != ApiVersion::V2 {
+            return Err(anyhow!("Wrong API version"));
+        }
+
+        if state.workflow_kind != workflow_kind {
+            return Err(anyhow!("Workflow kind mismatch"));
+        }
+
+        let result = self
+            .argo_client
+            .submit_from_template(
+                descriptor.template_name.to_string(),
+                Some(HashMap::from([
+                    ("jobid".to_string(), job_id.to_string()),
+                    ("name".to_string(), state.name.clone()),
+                    ("secret".to_string(), state.secret.clone()),
+                    (
+                        "api-version".to_string(),
+                        state.api_version.as_label_value().to_string(),
+                    ),
+                    (
+                        "workflow-kind".to_string(),
+                        workflow_kind_label_value(state.workflow_kind).to_string(),
+                    ),
+                    (
+                        "result-kind".to_string(),
+                        result_kind_label_value(state.result_kind).to_string(),
+                    ),
+                    (
+                        "origin".to_string(),
+                        origin.unwrap_or_else(|| "Unknown".to_string()),
+                    ),
+                ])),
+                Some(HashMap::from([
+                    ("parameter".to_string(), parameters),
+                    ("jobid".to_string(), job_id.to_string()),
+                ])),
+                None,
+                Some(format!("{}-{}-", descriptor.template_name, job_id)),
+            )
+            .await?;
+
+        state.workflowname = Some(result.metadata.name);
+        state.status = Some(ArgoStatus::Pending);
+        state.started = Some(result.metadata.creation_timestamp);
+        state.updated = Some(Utc::now());
+        state.result_kind = descriptor.result_kind;
+
         Ok(())
     }
 

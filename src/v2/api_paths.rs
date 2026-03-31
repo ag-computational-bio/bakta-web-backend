@@ -3,15 +3,16 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Query, State},
+    http::HeaderMap,
     response::IntoResponse,
 };
 use reqwest::StatusCode;
 
 use crate::{
-    bakta_handler::BaktaHandler,
+    bakta_handler::{BaktaHandler, REGEX},
     v2::api_structs::{
         JobReference, UploadLink, V2InitRequest, V2InitResponse, V2ListRequest, V2ListResponse,
-        V2ResultResponse, V2VersionResponse, WorkflowDescriptorResponse,
+        V2ResultResponse, V2StartRequest, V2VersionResponse, WorkflowDescriptorResponse,
     },
     workflow_catalog::{workflow_descriptor, workflow_descriptors},
 };
@@ -163,17 +164,34 @@ pub async fn query_result(
 #[utoipa::path(
     post,
     path = "/api/v2/job/start",
-    request_body = crate::v2::api_structs::V2StartRequest,
+    request_body = V2StartRequest,
     responses(
-        (status = 501, body = String)
+        (status = 200, body = ()),
+        (status = 400, body = String)
     ),
     tag = "v2",
 )]
 pub async fn start_job(
-    State(_state): State<Arc<BaktaHandler>>,
-    Json(_start_request): Json<crate::v2::api_structs::V2StartRequest>,
+    State(state): State<Arc<BaktaHandler>>,
+    headers: HeaderMap,
+    Json(start_request): Json<V2StartRequest>,
 ) -> impl IntoResponse {
-    not_implemented()
+    let origin = headers.get("origin").and_then(|o| {
+        o.to_str().ok().map(|e| {
+            REGEX
+                .replace_all(e.strip_prefix("https://").unwrap_or(e), "_")
+                .to_string()
+        })
+    });
+
+    match state
+        .state_handler
+        .start_job_v2(start_request, origin)
+        .await
+    {
+        Ok(_) => (StatusCode::OK, Json(())).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(e.to_string())).into_response(),
+    }
 }
 
 /// Get logs of a V2 job.

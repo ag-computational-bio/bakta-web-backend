@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, OpenApi, ToSchema};
@@ -173,6 +174,10 @@ pub struct V2InitResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
 pub struct EmptyConfig {}
 
+fn sanitize_input(s: String) -> String {
+    format!("'{}'", s.replace('\'', ""))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(default)]
 pub struct BaktaV2Config {
@@ -249,6 +254,152 @@ impl Default for BaktaV2Config {
     }
 }
 
+impl BaktaV2Config {
+    pub fn into_parameters(self) -> Result<String> {
+        let mut parameters = Vec::new();
+
+        if self.min_contig_length > 1 {
+            parameters.push(format!("--min-contig-length {}", self.min_contig_length));
+        }
+
+        if self.use_prodigal_training_file {
+            parameters.push("--prodigal /data/prodigal.tf".to_string());
+        }
+
+        if self.use_replicons {
+            parameters.push("--replicons /data/replicons.tsv".to_string());
+        }
+
+        if self.use_regions {
+            parameters.push("--regions /data/regions".to_string());
+        }
+
+        if self.use_trusted_proteins {
+            parameters.push("--proteins /data/trusted_proteins.faa".to_string());
+        }
+
+        if self.use_hmms {
+            parameters.push("--hmms /data/trusted_hmms.hmm".to_string());
+        }
+
+        if self.complete_genome {
+            parameters.push("--complete".to_string());
+        }
+
+        if let Some(locus) = self.locus
+            && !locus.is_empty()
+        {
+            parameters.push(format!("--locus {}", sanitize_input(locus)));
+        }
+
+        if let Some(locus_tag) = self.locus_tag
+            && !locus_tag.is_empty()
+        {
+            parameters.push(format!("--locus-tag {}", sanitize_input(locus_tag)));
+        }
+
+        if !matches!(self.locus_tag_increment, 1 | 5 | 10) {
+            return Err(anyhow!("Invalid locus_tag_increment"));
+        }
+        if self.locus_tag_increment != 1 {
+            parameters.push(format!(
+                "--locus-tag-increment {}",
+                self.locus_tag_increment
+            ));
+        }
+
+        if self.keep_contig_headers {
+            parameters.push("--keep-contig-headers".to_string());
+        }
+
+        if let Some(genus) = self.genus
+            && !genus.is_empty()
+        {
+            parameters.push(format!("--genus {}", sanitize_input(genus)));
+        }
+
+        if let Some(species) = self.species
+            && !species.is_empty()
+        {
+            parameters.push(format!("--species {}", sanitize_input(species)));
+        }
+
+        if let Some(strain) = self.strain
+            && !strain.is_empty()
+        {
+            parameters.push(format!("--strain {}", sanitize_input(strain)));
+        }
+
+        if let Some(plasmid) = self.plasmid
+            && !plasmid.is_empty()
+        {
+            parameters.push(format!("--plasmid {}", sanitize_input(plasmid)));
+        }
+
+        if self.compliant {
+            parameters.push("--compliant".to_string());
+        }
+
+        if self.meta {
+            parameters.push("--meta".to_string());
+        }
+
+        match self.translation_table {
+            11 => {}
+            4 | 25 => parameters.push(format!("--translation-table {}", self.translation_table)),
+            _ => return Err(anyhow!("Invalid translation_table")),
+        }
+
+        match self.derm_type {
+            Some(DermType::Monoderm) => parameters.push("--gram +".to_string()),
+            Some(DermType::Diderm) => parameters.push("--gram -".to_string()),
+            _ => parameters.push("--gram ?".to_string()),
+        }
+
+        if self.skip_trna {
+            parameters.push("--skip-trna".to_string());
+        }
+        if self.skip_tmrna {
+            parameters.push("--skip-tmrna".to_string());
+        }
+        if self.skip_rrna {
+            parameters.push("--skip-rrna".to_string());
+        }
+        if self.skip_ncrna {
+            parameters.push("--skip-ncrna".to_string());
+        }
+        if self.skip_ncrna_region {
+            parameters.push("--skip-ncrna-region".to_string());
+        }
+        if self.skip_crispr {
+            parameters.push("--skip-crispr".to_string());
+        }
+        if self.skip_cds {
+            parameters.push("--skip-cds".to_string());
+        }
+        if self.skip_pseudo {
+            parameters.push("--skip-pseudo".to_string());
+        }
+        if self.skip_sorf {
+            parameters.push("--skip-sorf".to_string());
+        }
+        if self.skip_gap {
+            parameters.push("--skip-gap".to_string());
+        }
+        if self.skip_ori {
+            parameters.push("--skip-ori".to_string());
+        }
+        if self.skip_filter {
+            parameters.push("--skip-filter".to_string());
+        }
+        if self.skip_plot {
+            parameters.push("--skip-plot".to_string());
+        }
+
+        Ok(parameters.join(" "))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct V2StartRequest {
     pub job: JobReference,
@@ -263,6 +414,28 @@ pub enum WorkflowStartConfig {
     BaktaProteins(EmptyConfig),
     BaktaBaktfold(BaktaV2Config),
     Baktfold(EmptyConfig),
+}
+
+impl WorkflowStartConfig {
+    pub fn workflow_kind(&self) -> WorkflowKind {
+        match self {
+            WorkflowStartConfig::Bakta(_) => WorkflowKind::Bakta,
+            WorkflowStartConfig::BaktaProteins(_) => WorkflowKind::BaktaProteins,
+            WorkflowStartConfig::BaktaBaktfold(_) => WorkflowKind::BaktaBaktfold,
+            WorkflowStartConfig::Baktfold(_) => WorkflowKind::Baktfold,
+        }
+    }
+
+    pub fn into_parameters(self) -> Result<String> {
+        match self {
+            WorkflowStartConfig::Bakta(config) | WorkflowStartConfig::BaktaBaktfold(config) => {
+                config.into_parameters()
+            }
+            WorkflowStartConfig::BaktaProteins(_) | WorkflowStartConfig::Baktfold(_) => {
+                Ok(String::new())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -380,5 +553,48 @@ mod tests {
         assert_eq!(config.locus_tag_increment, 1);
         assert!(!config.use_regions);
         assert!(!config.meta);
+    }
+
+    #[test]
+    fn test_bakta_v2_config_into_parameters() {
+        let params = BaktaV2Config {
+            use_prodigal_training_file: true,
+            use_replicons: true,
+            use_regions: true,
+            use_trusted_proteins: true,
+            use_hmms: true,
+            translation_table: 25,
+            complete_genome: true,
+            keep_contig_headers: true,
+            min_contig_length: 200,
+            derm_type: Some(DermType::Monoderm),
+            genus: Some("Bacillus".to_string()),
+            species: Some("subtilis".to_string()),
+            strain: Some("168".to_string()),
+            plasmid: Some("pBS32".to_string()),
+            locus: Some("BSU_00010".to_string()),
+            locus_tag: Some("BSU00010".to_string()),
+            locus_tag_increment: 5,
+            compliant: true,
+            meta: true,
+            skip_trna: true,
+            skip_tmrna: false,
+            skip_rrna: false,
+            skip_ncrna: false,
+            skip_ncrna_region: false,
+            skip_crispr: false,
+            skip_cds: false,
+            skip_pseudo: false,
+            skip_sorf: false,
+            skip_gap: false,
+            skip_ori: false,
+            skip_filter: false,
+            skip_plot: true,
+        };
+
+        assert_eq!(
+            params.into_parameters().expect("parameters should build"),
+            "--min-contig-length 200 --prodigal /data/prodigal.tf --replicons /data/replicons.tsv --regions /data/regions --proteins /data/trusted_proteins.faa --hmms /data/trusted_hmms.hmm --complete --locus 'BSU_00010' --locus-tag 'BSU00010' --locus-tag-increment 5 --keep-contig-headers --genus 'Bacillus' --species 'subtilis' --strain '168' --plasmid 'pBS32' --compliant --meta --translation-table 25 --gram + --skip-trna --skip-plot"
+        );
     }
 }
