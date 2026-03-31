@@ -10,6 +10,12 @@ use crate::{
     api_structs::{JobStatus, VersionResponse},
     argo::client::ArgoClient,
     s3_handler::S3Handler,
+    v2::api_structs::{
+        FailedJobStatus as V2FailedJobStatus, FailedJobStatusKind, JobReference,
+        JobStatus as V2JobStatusKind, ResultKind, V2JobStatus, V2ListResponse, V2VersionResponse,
+        WorkflowKind,
+    },
+    workflow_catalog::workflow_descriptor,
 };
 use anyhow::Result;
 use anyhow::anyhow;
@@ -27,6 +33,12 @@ pub struct StateHandler {
     pub argo_client: Arc<ArgoClient>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiVersion {
+    V1,
+    V2,
+}
+
 pub struct FullJobState {
     pub id: Uuid,
     pub argo_uid: Option<Uuid>,
@@ -38,6 +50,9 @@ pub struct FullJobState {
     pub workflowname: Option<String>,
     pub secret: String,
     pub archived: bool,
+    pub api_version: ApiVersion,
+    pub workflow_kind: WorkflowKind,
+    pub result_kind: ResultKind,
 }
 
 impl From<&FullJobState> for Option<JobStatus> {
@@ -55,7 +70,149 @@ impl From<&FullJobState> for Option<JobStatus> {
 pub struct BaktaHandler {
     pub s3_handler: S3Handler,
     pub version: VersionResponse,
+    #[allow(dead_code)]
+    pub version_v2: V2VersionResponse,
     pub state_handler: Arc<StateHandler>,
+}
+
+impl ApiVersion {
+    pub fn as_label_value(self) -> &'static str {
+        match self {
+            ApiVersion::V1 => "v1",
+            ApiVersion::V2 => "v2",
+        }
+    }
+
+    fn from_label_value(value: Option<&str>) -> Self {
+        match value {
+            Some("v2") => ApiVersion::V2,
+            _ => ApiVersion::V1,
+        }
+    }
+}
+
+fn workflow_kind_label_value(kind: WorkflowKind) -> &'static str {
+    match kind {
+        WorkflowKind::Bakta => "bakta",
+        WorkflowKind::BaktaProteins => "bakta_proteins",
+        WorkflowKind::BaktaBaktfold => "bakta_baktfold",
+        WorkflowKind::Baktfold => "baktfold",
+    }
+}
+
+fn workflow_kind_from_label_value(value: Option<&str>) -> WorkflowKind {
+    match value {
+        Some("bakta_proteins") => WorkflowKind::BaktaProteins,
+        Some("bakta_baktfold") => WorkflowKind::BaktaBaktfold,
+        Some("baktfold") => WorkflowKind::Baktfold,
+        _ => WorkflowKind::Bakta,
+    }
+}
+
+fn result_kind_label_value(kind: ResultKind) -> &'static str {
+    match kind {
+        ResultKind::Bakta => "bakta",
+        ResultKind::BaktaProteins => "bakta_proteins",
+        ResultKind::Baktfold => "baktfold",
+    }
+}
+
+fn result_kind_from_label_value(value: Option<&str>) -> ResultKind {
+    match value {
+        Some("bakta_proteins") => ResultKind::BaktaProteins,
+        Some("baktfold") => ResultKind::Baktfold,
+        _ => ResultKind::Bakta,
+    }
+}
+
+fn state_from_simple_status(simple_status: SimpleStatus) -> Option<FullJobState> {
+    let labels = &simple_status.metadata.labels;
+    let Some(job_id) = labels
+        .get("jobid")
+        .and_then(|value| Uuid::from_str(value).ok())
+    else {
+        return None;
+    };
+
+    let status = match ArgoStatus::try_from(simple_status.status.phase) {
+        Ok(status) => status,
+        Err(e) => {
+            tracing::error!(?e, job_id = %job_id, "Failed to parse workflow status");
+            return None;
+        }
+    };
+
+    Some(FullJobState {
+        id: job_id,
+        argo_uid: Some(simple_status.metadata.uid),
+        argo_ressource_version: simple_status.metadata.resource_version,
+        status: Some(status),
+        started: Some(simple_status.status.started_at),
+        updated: Some(simple_status.status.finished_at.unwrap_or(Utc::now())),
+        workflowname: Some(simple_status.metadata.name),
+        secret: labels
+            .get("secret")
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string()),
+        name: labels
+            .get("name")
+            .cloned()
+            .unwrap_or_else(|| "Unknown name".to_string()),
+        archived: labels.contains_key("workflows.argoproj.io/workflow-archiving-status"),
+        api_version: ApiVersion::from_label_value(labels.get("api-version").map(String::as_str)),
+        workflow_kind: workflow_kind_from_label_value(
+            labels.get("workflow-kind").map(String::as_str),
+        ),
+        result_kind: result_kind_from_label_value(labels.get("result-kind").map(String::as_str)),
+    })
+}
+
+impl From<ArgoStatus> for V2JobStatusKind {
+    fn from(value: ArgoStatus) -> Self {
+        match value {
+            ArgoStatus::Pending | ArgoStatus::Init => V2JobStatusKind::Init,
+            ArgoStatus::Running => V2JobStatusKind::Running,
+            ArgoStatus::Succeeded => V2JobStatusKind::Successful,
+            ArgoStatus::Failed | ArgoStatus::Error => V2JobStatusKind::Error,
+        }
+    }
+}
+
+fn current_updated_at(state: &FullJobState) -> Option<DateTime<Utc>> {
+    let mut updated = state.updated?;
+    if !matches!(
+        state.status,
+        Some(ArgoStatus::Error) | Some(ArgoStatus::Succeeded) | Some(ArgoStatus::Failed)
+    ) {
+        updated = Utc::now();
+    }
+    Some(updated)
+}
+
+#[allow(dead_code)]
+fn into_v2_failed_status(id: Uuid, status: FailedJobStatusEnum) -> V2FailedJobStatus {
+    V2FailedJobStatus {
+        job_id: id,
+        status: match status {
+            FailedJobStatusEnum::NotFound => FailedJobStatusKind::NotFound,
+            FailedJobStatusEnum::Unauthorized => FailedJobStatusKind::Unauthorized,
+        },
+    }
+}
+
+impl FullJobState {
+    #[allow(dead_code)]
+    fn into_v2_job_status(&self) -> Option<V2JobStatus> {
+        Some(V2JobStatus {
+            job_id: self.id,
+            status: self.status.clone().map(Into::into)?,
+            workflow_kind: self.workflow_kind,
+            result_kind: self.result_kind,
+            started: self.started?,
+            updated: current_updated_at(self)?,
+            name: self.name.clone(),
+        })
+    }
 }
 
 impl BaktaHandler {
@@ -70,6 +227,8 @@ impl BaktaHandler {
         endpoint: String,
         bakta_version: String,
         database_version: String,
+        baktfold_version: String,
+        baktfold_database_version: String,
         backend_version: String,
     ) -> Self {
         let argo_client = Arc::new(ArgoClient::new(argo_token, argo_url, argo_namespace));
@@ -86,9 +245,16 @@ impl BaktaHandler {
         BaktaHandler {
             s3_handler,
             version: VersionResponse {
-                tool: bakta_version,
-                db: database_version,
-                backend: backend_version,
+                tool: bakta_version.clone(),
+                db: database_version.clone(),
+                backend: backend_version.clone(),
+            },
+            version_v2: V2VersionResponse {
+                backend_version,
+                bakta_version,
+                bakta_db_version: database_version,
+                baktfold_version,
+                baktfold_db_version: baktfold_database_version,
             },
             state_handler,
         }
@@ -104,70 +270,23 @@ impl StateHandler {
     async fn run(self: Arc<Self>) {
         let argo_client = self.argo_client.clone();
         tokio::spawn(async move {
-            let into_state = |simple_status: SimpleStatus| -> Result<FullJobState> {
-                let job_id = Uuid::from_str(
-                    simple_status
-                        .metadata
-                        .labels
-                        .get("jobid")
-                        .ok_or_else(|| anyhow!("Missing JobID"))?,
-                )?;
-                let workflowname = simple_status.metadata.name;
-
-                Ok(FullJobState {
-                    id: job_id,
-                    argo_uid: Some(simple_status.metadata.uid),
-                    argo_ressource_version: simple_status.metadata.resource_version,
-                    status: Some(ArgoStatus::try_from(simple_status.status.phase)?),
-                    started: Some(simple_status.status.started_at),
-                    updated: Some(simple_status.status.finished_at.unwrap_or(Utc::now())),
-                    workflowname: Some(workflowname),
-                    secret: simple_status
-                        .metadata
-                        .labels
-                        .get("secret")
-                        .cloned()
-                        .unwrap_or_else(|| "Unknown".to_string()),
-                    name: simple_status
-                        .metadata
-                        .labels
-                        .get("name")
-                        .cloned()
-                        .unwrap_or_else(|| "Unknown name".to_string()),
-                    archived: simple_status
-                        .metadata
-                        .labels
-                        .contains_key("workflows.argoproj.io/workflow-archiving-status"),
-                })
-            };
-
-            let initial = argo_client.get_workflow_status().await.map_err(|e| {
-                tracing::error!(?e, "Failed to get initial workflow status");
-                e
-            })?;
-            let mut write_lock = self.job_state.write().await;
-            for item in initial.items {
-                let state = into_state(item).map_err(|e| {
-                    tracing::error!(?e, "Failed to parse state");
-                    e
-                })?;
-                write_lock.insert(state.id, state);
-            }
-            drop(write_lock);
-            'outer: loop {
-                let Ok(initial) = argo_client.get_workflow_status().await.map_err(|e| {
-                    tracing::error!(?e, "Failed to query workflow_status");
-                }) else {
-                    continue;
+            loop {
+                let initial = match argo_client.get_workflow_status().await {
+                    Ok(status) => status,
+                    Err(e) => {
+                        tracing::error!(?e, "Failed to query workflow_status");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+                        continue;
+                    }
                 };
+
+                let mut write_lock = self.job_state.write().await;
                 for item in initial.items {
-                    let Ok(state) = into_state(item).map_err(|e| {
-                        tracing::error!(?e, "Failed to parse_state");
-                    }) else {
-                        continue 'outer;
-                    };
-                    self.job_state.write().await.insert(state.id, state);
+                    if let Some(state) = state_from_simple_status(item) {
+                        write_lock.insert(state.id, state);
+                    }
                 }
+                drop(write_lock);
                 tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
             }
             #[allow(unreachable_code)]
@@ -190,14 +309,7 @@ impl StateHandler {
                     continue;
                 }
                 if let Some(mut api_status) = Option::<JobStatus>::from(state) {
-                    if !matches!(
-                        state.status,
-                        Some(ArgoStatus::Error)
-                            | Some(ArgoStatus::Succeeded)
-                            | Some(ArgoStatus::Failed)
-                    ) {
-                        api_status.updated = Utc::now();
-                    }
+                    api_status.updated = current_updated_at(state).unwrap_or(api_status.updated);
                     jobs.push(api_status.clone());
                 }
             } else {
@@ -209,6 +321,33 @@ impl StateHandler {
         }
 
         ListResponse { jobs, failed }
+    }
+
+    #[allow(dead_code)]
+    pub async fn get_job_states_v2(&self, request_jobs: Vec<JobReference>) -> V2ListResponse {
+        let read_lock = self.job_state.read().await;
+        let mut jobs = vec![];
+        let mut failed_jobs = vec![];
+
+        for JobReference { job_id, secret } in request_jobs {
+            if let Some(state) = read_lock.get(&job_id) {
+                if state.secret != secret {
+                    failed_jobs.push(into_v2_failed_status(
+                        job_id,
+                        FailedJobStatusEnum::Unauthorized,
+                    ));
+                    continue;
+                }
+
+                if let Some(api_status) = state.into_v2_job_status() {
+                    jobs.push(api_status);
+                }
+            } else {
+                failed_jobs.push(into_v2_failed_status(job_id, FailedJobStatusEnum::NotFound));
+            }
+        }
+
+        V2ListResponse { jobs, failed_jobs }
     }
 
     pub async fn get_logs(&self, (job_id, secret): (Uuid, String)) -> Result<String> {
@@ -235,6 +374,24 @@ impl StateHandler {
     }
 
     pub async fn init_job(&self, name: String) -> (Uuid, String) {
+        self.init_job_with_metadata(name, ApiVersion::V1, WorkflowKind::Bakta, ResultKind::Bakta)
+            .await
+    }
+
+    #[allow(dead_code)]
+    pub async fn init_job_v2(&self, name: String, workflow_kind: WorkflowKind) -> (Uuid, String) {
+        let descriptor = workflow_descriptor(workflow_kind);
+        self.init_job_with_metadata(name, ApiVersion::V2, workflow_kind, descriptor.result_kind)
+            .await
+    }
+
+    async fn init_job_with_metadata(
+        &self,
+        name: String,
+        api_version: ApiVersion,
+        workflow_kind: WorkflowKind,
+        result_kind: ResultKind,
+    ) -> (Uuid, String) {
         let mut result = REGEX.replace_all(&name, "_").to_string();
         result.truncate(63);
         let stripped = result
@@ -256,6 +413,9 @@ impl StateHandler {
                 secret: secret.clone(),
                 name: stripped,
                 archived: false,
+                api_version,
+                workflow_kind,
+                result_kind,
             },
         );
         (job_id, secret)
@@ -286,6 +446,18 @@ impl StateHandler {
                         ("name".to_string(), state.name.clone()),
                         ("secret".to_string(), state.secret.clone()),
                         (
+                            "api-version".to_string(),
+                            state.api_version.as_label_value().to_string(),
+                        ),
+                        (
+                            "workflow-kind".to_string(),
+                            workflow_kind_label_value(state.workflow_kind).to_string(),
+                        ),
+                        (
+                            "result-kind".to_string(),
+                            result_kind_label_value(state.result_kind).to_string(),
+                        ),
+                        (
                             "origin".to_string(),
                             origin.unwrap_or_else(|| "Unknown".to_string()),
                         ),
@@ -303,6 +475,9 @@ impl StateHandler {
             state.status = Some(ArgoStatus::Pending);
             state.started = Some(result.metadata.creation_timestamp);
             state.updated = Some(Utc::now());
+            state.api_version = ApiVersion::V1;
+            state.workflow_kind = WorkflowKind::Bakta;
+            state.result_kind = ResultKind::Bakta;
         }
         Ok(())
     }
@@ -334,5 +509,34 @@ impl StateHandler {
             });
         }
         Err(anyhow!("Job not found"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_state_from_simple_status_ignores_workflow_without_job_label() {
+        let status = SimpleStatus::default();
+        assert!(state_from_simple_status(status).is_none());
+    }
+
+    #[test]
+    fn test_state_from_simple_status_defaults_to_v1_metadata_without_v2_labels() {
+        let mut status = SimpleStatus::default();
+        status.metadata.name = "workflow-name".to_string();
+        status
+            .metadata
+            .labels
+            .insert("jobid".to_string(), Uuid::nil().to_string());
+        status.status.phase = "Pending".to_string();
+        status.status.started_at = Utc::now();
+
+        let state = state_from_simple_status(status).expect("expected state to parse");
+
+        assert_eq!(state.api_version, ApiVersion::V1);
+        assert_eq!(state.workflow_kind, WorkflowKind::Bakta);
+        assert_eq!(state.result_kind, ResultKind::Bakta);
     }
 }

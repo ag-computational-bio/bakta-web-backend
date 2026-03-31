@@ -49,6 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dotenvy::var("S3_ENDPOINT")?,
             dotenvy::var("BAKTA_VERSION")?,
             dotenvy::var("DATABASE_VERSION")?,
+            dotenvy::var("BAKTFOLD_VERSION").unwrap_or_default(),
+            dotenvy::var("BAKTFOLD_DATABASE_VERSION").unwrap_or_default(),
             dotenvy::var("BACKEND_VERSION")?,
         )
         .await,
