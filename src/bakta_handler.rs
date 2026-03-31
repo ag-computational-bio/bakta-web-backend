@@ -12,8 +12,8 @@ use crate::{
     s3_handler::S3Handler,
     v2::api_structs::{
         FailedJobStatus as V2FailedJobStatus, FailedJobStatusKind, JobReference,
-        JobStatus as V2JobStatusKind, ResultKind, V2JobStatus, V2ListResponse, V2VersionResponse,
-        WorkflowKind,
+        JobStatus as V2JobStatusKind, ResultKind, V2JobStatus, V2ListResponse, V2ResultResponse,
+        V2VersionResponse, WorkflowKind,
     },
     workflow_catalog::workflow_descriptor,
 };
@@ -70,7 +70,6 @@ impl From<&FullJobState> for Option<JobStatus> {
 pub struct BaktaHandler {
     pub s3_handler: S3Handler,
     pub version: VersionResponse,
-    #[allow(dead_code)]
     pub version_v2: V2VersionResponse,
     pub state_handler: Arc<StateHandler>,
 }
@@ -189,7 +188,6 @@ fn current_updated_at(state: &FullJobState) -> Option<DateTime<Utc>> {
     Some(updated)
 }
 
-#[allow(dead_code)]
 fn into_v2_failed_status(id: Uuid, status: FailedJobStatusEnum) -> V2FailedJobStatus {
     V2FailedJobStatus {
         job_id: id,
@@ -201,7 +199,6 @@ fn into_v2_failed_status(id: Uuid, status: FailedJobStatusEnum) -> V2FailedJobSt
 }
 
 impl FullJobState {
-    #[allow(dead_code)]
     fn into_v2_job_status(&self) -> Option<V2JobStatus> {
         Some(V2JobStatus {
             job_id: self.id,
@@ -323,7 +320,6 @@ impl StateHandler {
         ListResponse { jobs, failed }
     }
 
-    #[allow(dead_code)]
     pub async fn get_job_states_v2(&self, request_jobs: Vec<JobReference>) -> V2ListResponse {
         let read_lock = self.job_state.read().await;
         let mut jobs = vec![];
@@ -378,7 +374,6 @@ impl StateHandler {
             .await
     }
 
-    #[allow(dead_code)]
     pub async fn init_job_v2(&self, name: String, workflow_kind: WorkflowKind) -> (Uuid, String) {
         let descriptor = workflow_descriptor(workflow_kind);
         self.init_job_with_metadata(name, ApiVersion::V2, workflow_kind, descriptor.result_kind)
@@ -480,6 +475,50 @@ impl StateHandler {
             state.result_kind = ResultKind::Bakta;
         }
         Ok(())
+    }
+
+    pub async fn get_results_v2(
+        &self,
+        JobReference { job_id, secret }: JobReference,
+        s3_handler: &S3Handler,
+    ) -> Result<V2ResultResponse> {
+        let (workflow_kind, result_kind, started, updated, name) = {
+            let read_lock = self.job_state.read().await;
+            let Some(state) = read_lock.get(&job_id) else {
+                return Err(anyhow!("Job not found"));
+            };
+
+            if state.secret != secret {
+                return Err(anyhow!("Unauthorized"));
+            }
+
+            if let Some(status) = &state.status
+                && status != &ArgoStatus::Succeeded
+            {
+                return Err(anyhow!("Job not finished"));
+            }
+
+            (
+                state.workflow_kind,
+                state.result_kind,
+                state.started.unwrap_or_default(),
+                state.updated.unwrap_or_default(),
+                state.name.clone(),
+            )
+        };
+
+        let job_id_string = job_id.to_string();
+
+        Ok(V2ResultResponse {
+            job_id,
+            workflow_kind,
+            started,
+            updated,
+            name: name.clone(),
+            result: s3_handler
+                .sign_download_urls_v2(job_id_string.as_str(), &name, result_kind)
+                .await?,
+        })
     }
 
     pub async fn get_results(
