@@ -107,20 +107,12 @@ impl ArgoClient {
     async fn get_archived_node_logs(
         &self,
         argo_uid: &Uuid,
-        workflow_name: &str,
         node: &WorkflowNodeStatus,
     ) -> Result<Option<Content>> {
         let mut artifact_names = Vec::new();
 
         if !node.id.is_empty() {
-            artifact_names.push(format!("{workflow_name}-{}", node.id));
-        }
-        if !node.name.is_empty()
-            && !artifact_names
-                .iter()
-                .any(|candidate| candidate == &node.name)
-        {
-            artifact_names.push(node.name.clone());
+            artifact_names.push(node.id.clone());
         }
 
         let mut last_error = None;
@@ -182,10 +174,7 @@ impl ArgoClient {
         let mut last_error = None;
 
         for node in nodes {
-            match self
-                .get_archived_node_logs(argo_uid, workflow_name, node)
-                .await
-            {
+            match self.get_archived_node_logs(argo_uid, node).await {
                 Ok(Some(log_entry)) => log_entries.push(log_entry),
                 Ok(None) => {}
                 Err(error) => {

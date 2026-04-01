@@ -322,7 +322,7 @@ fn stage_status_from_nodes(
 fn stage_indices_by_pod_name(
     stages: &[&str],
     nodes: Option<&HashMap<String, WorkflowNodeStatus>>,
-    workflow_name: Option<&str>,
+    _workflow_name: Option<&str>,
 ) -> HashMap<String, usize> {
     let mut pod_stage_indices = HashMap::new();
     let Some(nodes) = nodes else {
@@ -339,11 +339,9 @@ fn stage_indices_by_pod_name(
                 .entry(node.name.clone())
                 .or_insert(stage_index);
         }
-        if let Some(workflow_name) = workflow_name
-            && !node.id.is_empty()
-        {
+        if !node.id.is_empty() {
             pod_stage_indices
-                .entry(format!("{workflow_name}-{}", node.id))
+                .entry(node.id.clone())
                 .or_insert(stage_index);
         }
     }
@@ -1308,12 +1306,14 @@ mod tests {
     #[test]
     fn test_build_stage_logs_maps_pod_ids_to_stages() {
         let workflow_name = "bakta-baktfold-job-1.12.0-0.1.0-ab37efdd-46ae-4564-943e-3bpp7nj";
+        let baktfold_pod = format!("{workflow_name}-1730121812");
+        let bakta_pod = format!("{workflow_name}-2082099159");
         let mut nodes = HashMap::new();
         nodes.insert(
             "node-1".to_string(),
             WorkflowNodeStatus {
-                id: "1730121812".to_string(),
-                display_name: "bakta".to_string(),
+                id: baktfold_pod.clone(),
+                display_name: "baktfold".to_string(),
                 phase: "Succeeded".to_string(),
                 node_type: "Pod".to_string(),
                 ..Default::default()
@@ -1322,8 +1322,8 @@ mod tests {
         nodes.insert(
             "node-2".to_string(),
             WorkflowNodeStatus {
-                id: "2082099159".to_string(),
-                display_name: "baktfold".to_string(),
+                id: bakta_pod.clone(),
+                display_name: "bakta".to_string(),
                 phase: "Succeeded".to_string(),
                 node_type: "Pod".to_string(),
                 ..Default::default()
@@ -1333,11 +1333,11 @@ mod tests {
         let logs = vec![
             Content {
                 content: "baktfold line".to_string(),
-                pod_name: Some(format!("{workflow_name}-2082099159")),
+                pod_name: Some(baktfold_pod),
             },
             Content {
                 content: "bakta line".to_string(),
-                pod_name: Some(format!("{workflow_name}-1730121812")),
+                pod_name: Some(bakta_pod),
             },
         ];
 
