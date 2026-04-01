@@ -6,7 +6,6 @@ use axum::{
 use bakta_handler::BaktaHandler;
 use std::{net::SocketAddr, sync::Arc};
 use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -69,9 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or("none".into())
-        .add_directive("tower_http=debug".parse()?)
-        .add_directive("bakta_web_backend=trace".parse()?);
+        .unwrap_or_else(|_| EnvFilter::new("bakta_web_backend=info"));
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
@@ -106,13 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             metrics_state,
             metrics::track_http_metrics,
         ))
-        .layer(CorsLayer::very_permissive())
-        .layer(
-            TraceLayer::new_for_http()
-                .on_response(())
-                .on_body_chunk(())
-                .on_eos(()),
-        );
+        .layer(CorsLayer::very_permissive());
     tokio::try_join!(
         axum::serve(listener, app.into_make_service()),
         axum::serve(metrics_listener, metrics_app.into_make_service())

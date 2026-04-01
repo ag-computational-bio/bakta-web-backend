@@ -45,6 +45,7 @@ pub enum ApiVersion {
     V2,
 }
 
+#[derive(Clone)]
 pub struct FullJobState {
     pub id: Uuid,
     pub argo_uid: Option<Uuid>,
@@ -627,21 +628,49 @@ impl StateHandler {
     }
 
     pub async fn get_logs(&self, (job_id, secret): (Uuid, String)) -> Result<String> {
-        let read_lock = self.job_state.read().await;
-        if let Some(state) = read_lock.get(&job_id) {
-            if state.secret != secret {
-                return Err(anyhow!("Unauthorized"));
+        let state = {
+            let read_lock = self.job_state.read().await;
+            if let Some(state) = read_lock.get(&job_id) {
+                if state.secret != secret {
+                    return Err(anyhow!("Unauthorized"));
+                }
+                state.clone()
+            } else {
+                return Err(anyhow!("Job not found"));
             }
-            return self.argo_client.get_logs(state).await;
+        };
+
+        tracing::info!(
+            job_id = %job_id,
+            api_version = state.api_version.as_label_value(),
+            workflow_kind = workflow_kind_label_value(state.workflow_kind),
+            workflow_name = state.workflowname.as_deref().unwrap_or(""),
+            archived = state.archived,
+            "workflow_logs_requested"
+        );
+
+        let result = self.argo_client.get_logs(&state).await;
+
+        if let Err(e) = &result {
+            tracing::warn!(
+                job_id = %job_id,
+                api_version = state.api_version.as_label_value(),
+                workflow_kind = workflow_kind_label_value(state.workflow_kind),
+                workflow_name = state.workflowname.as_deref().unwrap_or(""),
+                archived = state.archived,
+                error = %e,
+                "workflow_logs_request_failed"
+            );
         }
-        Err(anyhow!("Job not found"))
+
+        result
     }
 
     pub async fn get_logs_v2(
         &self,
         JobReference { job_id, secret }: JobReference,
     ) -> Result<V2LogsResponse> {
-        let (workflow_kind, workflow_name, overall_status) = {
+        let (workflow_kind, workflow_name, overall_status, archived, argo_uid) = {
             let read_lock = self.job_state.read().await;
             let Some(state) = read_lock.get(&job_id) else {
                 return Err(anyhow!("Job not found"));
@@ -655,6 +684,8 @@ impl StateHandler {
                 state.workflow_kind,
                 state.workflowname.clone(),
                 state.status.clone(),
+                state.archived,
+                state.argo_uid,
             )
         };
 
@@ -667,29 +698,48 @@ impl StateHandler {
             });
         };
 
-        let workflow_details = match self.argo_client.get_workflow_details(&workflow_name).await {
-            Ok(details) => Some(details),
-            Err(e) => {
-                tracing::warn!(
-                    ?e,
-                    workflow_name,
-                    "Failed to retrieve workflow details for V2 logs"
-                );
-                None
+        tracing::info!(
+            job_id = %job_id,
+            api_version = ApiVersion::V2.as_label_value(),
+            workflow_kind = workflow_kind_label_value(workflow_kind),
+            workflow_name = %workflow_name,
+            archived,
+            "workflow_logs_requested"
+        );
+
+        let workflow_details = if archived {
+            None
+        } else {
+            match self.argo_client.get_workflow_details(&workflow_name).await {
+                Ok(details) => Some(details),
+                Err(e) => {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        workflow_kind = workflow_kind_label_value(workflow_kind),
+                        workflow_name = %workflow_name,
+                        archived,
+                        error = %e,
+                        "workflow_details_request_failed"
+                    );
+                    None
+                }
             }
         };
 
         let workflow_logs = match self
             .argo_client
-            .get_workflow_log_entries(&workflow_name)
+            .get_workflow_log_entries(&workflow_name, archived, argo_uid.as_ref())
             .await
         {
             Ok(log_entries) => Some(log_entries),
             Err(e) => {
                 tracing::warn!(
-                    ?e,
-                    workflow_name,
-                    "Failed to retrieve workflow log entries for V2 logs"
+                    job_id = %job_id,
+                    workflow_kind = workflow_kind_label_value(workflow_kind),
+                    workflow_name = %workflow_name,
+                    archived,
+                    error = %e,
+                    "workflow_logs_request_failed"
                 );
                 None
             }
@@ -782,6 +832,7 @@ impl StateHandler {
         let Job { id, secret } = &start_settings.job;
 
         let parameters = start_settings.config.into_parameters();
+        let template_name = format!("bakta-job-{}", bakta_version);
 
         let mut write_lock = self.job_state.write().await;
         if let Some(state) = write_lock.get_mut(id) {
@@ -792,7 +843,7 @@ impl StateHandler {
             let result = self
                 .argo_client
                 .submit_from_template(
-                    format!("bakta-job-{}", bakta_version),
+                    template_name.clone(),
                     Some(HashMap::from([
                         ("jobid".to_string(), id.to_string()),
                         ("name".to_string(), state.name.clone()),
@@ -826,12 +877,21 @@ impl StateHandler {
             let result = match result {
                 Ok(result) => result,
                 Err(e) => {
+                    tracing::warn!(
+                        job_id = %id,
+                        api_version = state.api_version.as_label_value(),
+                        workflow_kind = workflow_kind_label_value(state.workflow_kind),
+                        template = %template_name,
+                        error = %e,
+                        "workflow_submit_failed"
+                    );
                     self.metrics
                         .record_submit_error(workflow_kind_label_value(state.workflow_kind));
                     return Err(e);
                 }
             };
 
+            let workflow_name = result.metadata.name.clone();
             state.workflowname = Some(result.metadata.name);
             state.status = Some(ArgoStatus::Pending);
             state.started = Some(result.metadata.creation_timestamp);
@@ -842,6 +902,14 @@ impl StateHandler {
             self.metrics.record_job_submitted(
                 state.api_version.as_label_value(),
                 workflow_kind_label_value(state.workflow_kind),
+            );
+            tracing::info!(
+                job_id = %id,
+                api_version = state.api_version.as_label_value(),
+                workflow_kind = workflow_kind_label_value(state.workflow_kind),
+                template = %template_name,
+                workflow_name = %workflow_name,
+                "workflow_submitted"
             );
         }
         Ok(())
@@ -913,12 +981,21 @@ impl StateHandler {
         let result = match result {
             Ok(result) => result,
             Err(e) => {
+                tracing::warn!(
+                    job_id = %job_id,
+                    api_version = state.api_version.as_label_value(),
+                    workflow_kind = workflow_kind_label_value(state.workflow_kind),
+                    template = %template_name,
+                    error = %e,
+                    "workflow_submit_failed"
+                );
                 self.metrics
                     .record_submit_error(workflow_kind_label_value(state.workflow_kind));
                 return Err(e);
             }
         };
 
+        let workflow_name = result.metadata.name.clone();
         state.workflowname = Some(result.metadata.name);
         state.status = Some(ArgoStatus::Pending);
         state.started = Some(result.metadata.creation_timestamp);
@@ -927,6 +1004,14 @@ impl StateHandler {
         self.metrics.record_job_submitted(
             state.api_version.as_label_value(),
             workflow_kind_label_value(state.workflow_kind),
+        );
+        tracing::info!(
+            job_id = %job_id,
+            api_version = state.api_version.as_label_value(),
+            workflow_kind = workflow_kind_label_value(state.workflow_kind),
+            template = %template_name,
+            workflow_name = %workflow_name,
+            "workflow_submitted"
         );
 
         Ok(())
