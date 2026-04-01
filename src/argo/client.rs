@@ -1,6 +1,7 @@
 use anyhow::Result;
 use reqwest::Client;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use crate::{api_structs::ArgoStatus, bakta_handler::FullJobState};
 
@@ -58,6 +59,25 @@ impl ArgoClient {
         Ok(entries)
     }
 
+    fn workflow_logs_url(
+        &self,
+        workflow_name: &str,
+        archived: bool,
+        argo_uid: Option<&Uuid>,
+    ) -> Option<String> {
+        if archived {
+            argo_uid.map(|argo_uid| {
+                get_logs_archived_url(&self.url, &self.namespace, argo_uid, workflow_name)
+            })
+        } else {
+            Some(get_logs_running_url(
+                &self.url,
+                &self.namespace,
+                workflow_name,
+            ))
+        }
+    }
+
     pub async fn get_workflow_status(&self) -> Result<SimpleStatusList> {
         let response = self
             .client
@@ -65,6 +85,7 @@ impl ArgoClient {
             .header("Authorization", format!("Bearer {}", &self.token))
             .send()
             .await?
+            .error_for_status()?
             .json::<SimpleStatusList>()
             .await?;
         Ok(response)
@@ -88,6 +109,7 @@ impl ArgoClient {
             .header("Authorization", format!("Bearer {}", &self.token))
             .send()
             .await?
+            .error_for_status()?
             .bytes()
             .await?;
         Ok(())
@@ -101,42 +123,37 @@ impl ArgoClient {
             );
         }
 
+        let Some(workflow_name) = state.workflowname.as_deref() else {
+            return Ok(String::new());
+        };
+
+        let Some(url) =
+            self.workflow_logs_url(workflow_name, state.archived, state.argo_uid.as_ref())
+        else {
+            return Ok(String::new());
+        };
+
+        let result = self
+            .client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", &self.token))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+
         if state.archived {
-            if let Some(argo_uid) = &state.argo_uid {
-                let wfname = state.workflowname.clone().unwrap_or("".to_string());
-                let url = get_logs_archived_url(&self.url, &self.namespace, argo_uid, wfname);
-                Ok(self
-                    .client
-                    .get(url)
-                    .header("Authorization", format!("Bearer {}", &self.token))
-                    .send()
-                    .await?
-                    .text()
-                    .await?)
-            } else {
-                Ok(String::new())
-            }
-        } else if let Some(wf_name) = &state.workflowname {
-            let url = get_logs_running_url(&self.url, &self.namespace, wf_name);
-
-            let result = self
-                .client
-                .get(url)
-                .header("Authorization", format!("Bearer {}", &self.token))
-                .send()
-                .await?
-                .text()
-                .await?;
-
+            Ok(result)
+        } else {
             let mut final_string = String::new();
 
             for content in self.parse_log_entries(result).await? {
                 final_string.push_str(&content.content);
                 final_string.push('\n');
             }
+
             Ok(final_string)
-        } else {
-            Ok(String::new())
         }
     }
 
@@ -147,21 +164,28 @@ impl ArgoClient {
             .header("Authorization", format!("Bearer {}", &self.token))
             .send()
             .await?
+            .error_for_status()?
             .json::<WorkflowDetails>()
             .await?)
     }
 
-    pub async fn get_workflow_log_entries(&self, workflow_name: &str) -> Result<Vec<Content>> {
+    pub async fn get_workflow_log_entries(
+        &self,
+        workflow_name: &str,
+        archived: bool,
+        argo_uid: Option<&Uuid>,
+    ) -> Result<Vec<Content>> {
+        let Some(url) = self.workflow_logs_url(workflow_name, archived, argo_uid) else {
+            return Ok(Vec::new());
+        };
+
         let response = self
             .client
-            .get(get_logs_running_url(
-                &self.url,
-                &self.namespace,
-                workflow_name,
-            ))
+            .get(url)
             .header("Authorization", format!("Bearer {}", &self.token))
             .send()
             .await?
+            .error_for_status()?
             .text()
             .await?;
 
@@ -208,10 +232,10 @@ impl ArgoClient {
             .json(&submit_template)
             .send()
             .await?
+            .error_for_status()?
             .bytes()
             .await?;
 
-        tracing::trace!("Response: {response:?}");
         Ok(serde_json::from_slice(&response)?)
     }
 }
@@ -229,5 +253,31 @@ mod tests {
             .expect_err("relative URL should fail deterministically");
 
         assert!(error.to_string().contains("builder error"));
+    }
+
+    #[test]
+    fn test_workflow_logs_url_uses_running_and_archived_paths() {
+        let client = ArgoClient::new(
+            "foo".to_string(),
+            "https://argo.example".to_string(),
+            "bakta".to_string(),
+        );
+        let uid =
+            Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").expect("test uid should parse");
+
+        assert_eq!(
+            client.workflow_logs_url("workflow-a", false, None),
+            Some(
+                "https://argo.example/api/v1/workflows/bakta/workflow-a/log?logOptions.container=main"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            client.workflow_logs_url("workflow-a", true, Some(&uid)),
+            Some(format!(
+                "https://argo.example/artifact-files/bakta/archived-workflows/{uid}/workflow-a/outputs/main-logs"
+            ))
+        );
+        assert_eq!(client.workflow_logs_url("workflow-a", true, None), None);
     }
 }

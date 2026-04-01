@@ -325,7 +325,10 @@ mod tests {
 
     #[test]
     fn test_upload_object_name_mapping() {
-        assert_eq!(upload_object_name(UploadKind::GenomeFasta), "fastadata.fasta");
+        assert_eq!(
+            upload_object_name(UploadKind::GenomeFasta),
+            "fastadata.fasta"
+        );
         assert_eq!(
             upload_object_name(UploadKind::TrustedProteinsFile),
             "trusted_proteins.faa"
