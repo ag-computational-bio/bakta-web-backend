@@ -38,7 +38,7 @@ impl InputType {
 
 fn upload_object_name(kind: UploadKind) -> &'static str {
     match kind {
-        UploadKind::GenomeFasta => "genome.fasta",
+        UploadKind::GenomeFasta => "fastadata.fasta",
         UploadKind::ProdigalTrainingFile => "prodigal.tf",
         UploadKind::RepliconsTable => "replicons.tsv",
         UploadKind::RegionsFile => "regions",
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_upload_object_name_mapping() {
-        assert_eq!(upload_object_name(UploadKind::GenomeFasta), "genome.fasta");
+        assert_eq!(upload_object_name(UploadKind::GenomeFasta), "fastadata.fasta");
         assert_eq!(
             upload_object_name(UploadKind::TrustedProteinsFile),
             "trusted_proteins.faa"
