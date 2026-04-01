@@ -27,6 +27,21 @@ where
     format!("{url}/api/v1/workflows/{namespace}/{workflowname}")
 }
 
+pub fn get_archived_workflow_url<T, U, V, W>(
+    url: T,
+    uid: U,
+    namespace: V,
+    workflowname: W,
+) -> String
+where
+    T: Display,
+    U: Display,
+    V: Display,
+    W: Display,
+{
+    format!("{url}/api/v1/archived-workflows/{uid}?namespace={namespace}&name={workflowname}")
+}
+
 pub fn get_logs_archived_url<T, U, V, W>(url: T, namespace: U, uid: V, workflowname: W) -> String
 where
     T: Display,

@@ -183,6 +183,8 @@ pub struct WorkflowDetailStatus {
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowNodeStatus {
     #[serde(default)]
+    pub id: String,
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub display_name: String,
@@ -192,4 +194,6 @@ pub struct WorkflowNodeStatus {
     pub node_type: String,
     #[serde(default)]
     pub phase: String,
+    #[serde(rename = "startedAt", default)]
+    pub started_at: Option<DateTime<Utc>>,
 }

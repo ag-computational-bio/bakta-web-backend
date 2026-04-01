@@ -280,17 +280,25 @@ fn stage_status_from_phase(phase: &str) -> StageStatus {
     }
 }
 
+fn node_matches_stage(node: &WorkflowNodeStatus, stage: &str) -> bool {
+    stage_matches_candidate(&node.display_name, stage)
+        || stage_matches_candidate(&node.template_name, stage)
+        || stage_matches_candidate(&node.name, stage)
+}
+
+fn stage_index_for_node(node: &WorkflowNodeStatus, stages: &[&str]) -> Option<usize> {
+    stages
+        .iter()
+        .position(|stage| node_matches_stage(node, stage))
+}
+
 fn stage_status_from_nodes(
     nodes: &HashMap<String, WorkflowNodeStatus>,
     stage: &str,
 ) -> Option<StageStatus> {
     let mut statuses = nodes
         .values()
-        .filter(|node| {
-            stage_matches_candidate(&node.display_name, stage)
-                || stage_matches_candidate(&node.template_name, stage)
-                || stage_matches_candidate(&node.name, stage)
-        })
+        .filter(|node| node_matches_stage(node, stage))
         .map(|node| stage_status_from_phase(&node.phase));
 
     let mut selected = statuses.next()?;
@@ -311,6 +319,38 @@ fn stage_status_from_nodes(
     Some(selected)
 }
 
+fn stage_indices_by_pod_name(
+    stages: &[&str],
+    nodes: Option<&HashMap<String, WorkflowNodeStatus>>,
+    workflow_name: Option<&str>,
+) -> HashMap<String, usize> {
+    let mut pod_stage_indices = HashMap::new();
+    let Some(nodes) = nodes else {
+        return pod_stage_indices;
+    };
+
+    for node in nodes.values() {
+        let Some(stage_index) = stage_index_for_node(node, stages) else {
+            continue;
+        };
+
+        if !node.name.is_empty() {
+            pod_stage_indices
+                .entry(node.name.clone())
+                .or_insert(stage_index);
+        }
+        if let Some(workflow_name) = workflow_name
+            && !node.id.is_empty()
+        {
+            pod_stage_indices
+                .entry(format!("{workflow_name}-{}", node.id))
+                .or_insert(stage_index);
+        }
+    }
+
+    pod_stage_indices
+}
+
 fn append_log_content(target: &mut String, content: &str) {
     target.push_str(content);
     if !content.ends_with('\n') {
@@ -318,12 +358,18 @@ fn append_log_content(target: &mut String, content: &str) {
     }
 }
 
-fn stage_contents_from_log_entries(stage_count: usize, log_entries: &[Content]) -> Vec<String> {
-    let mut stage_contents = vec![String::new(); stage_count];
-    if stage_count == 0 {
+fn stage_contents_from_log_entries(
+    stages: &[&str],
+    nodes: Option<&HashMap<String, WorkflowNodeStatus>>,
+    workflow_name: Option<&str>,
+    log_entries: &[Content],
+) -> Vec<String> {
+    let mut stage_contents = vec![String::new(); stages.len()];
+    if stages.is_empty() {
         return stage_contents;
     }
 
+    let pod_stage_indices = stage_indices_by_pod_name(stages, nodes, workflow_name);
     let mut pod_indices = HashMap::<String, usize>::new();
     let mut grouped_logs = Vec::<String>::new();
     let mut ungrouped_logs = String::new();
@@ -334,6 +380,11 @@ fn stage_contents_from_log_entries(stage_count: usize, log_entries: &[Content]) 
             .as_deref()
             .filter(|pod_name| !pod_name.is_empty())
         {
+            if let Some(&stage_index) = pod_stage_indices.get(pod_name) {
+                append_log_content(&mut stage_contents[stage_index], &entry.content);
+                continue;
+            }
+
             let index = *pod_indices.entry(pod_name.to_string()).or_insert_with(|| {
                 grouped_logs.push(String::new());
                 grouped_logs.len() - 1
@@ -345,10 +396,10 @@ fn stage_contents_from_log_entries(stage_count: usize, log_entries: &[Content]) 
     }
 
     for (index, grouped_log) in grouped_logs.into_iter().enumerate() {
-        let stage_index = if index < stage_count {
+        let stage_index = if index < stages.len() {
             index
         } else {
-            stage_count - 1
+            stages.len() - 1
         };
         stage_contents[stage_index].push_str(&grouped_log);
     }
@@ -399,10 +450,11 @@ fn fallback_stage_status(
 fn build_stage_logs(
     stages: &[&str],
     nodes: Option<&HashMap<String, WorkflowNodeStatus>>,
+    workflow_name: Option<&str>,
     log_entries: &[Content],
     overall_status: Option<&ArgoStatus>,
 ) -> Vec<StageLog> {
-    let stage_contents = stage_contents_from_log_entries(stages.len(), log_entries);
+    let stage_contents = stage_contents_from_log_entries(stages, nodes, workflow_name, log_entries);
     let last_stage_with_logs = stage_contents
         .iter()
         .rposition(|content| !content.is_empty());
@@ -694,7 +746,13 @@ impl StateHandler {
         let Some(workflow_name) = workflow_name else {
             return Ok(V2LogsResponse {
                 workflow_kind,
-                stages: build_stage_logs(descriptor.stages, None, &[], overall_status.as_ref()),
+                stages: build_stage_logs(
+                    descriptor.stages,
+                    None,
+                    None,
+                    &[],
+                    overall_status.as_ref(),
+                ),
             });
         };
 
@@ -707,22 +765,22 @@ impl StateHandler {
             "workflow_logs_requested"
         );
 
-        let workflow_details = if archived {
-            None
-        } else {
-            match self.argo_client.get_workflow_details(&workflow_name).await {
-                Ok(details) => Some(details),
-                Err(e) => {
-                    tracing::warn!(
-                        job_id = %job_id,
-                        workflow_kind = workflow_kind_label_value(workflow_kind),
-                        workflow_name = %workflow_name,
-                        archived,
-                        error = %e,
-                        "workflow_details_request_failed"
-                    );
-                    None
-                }
+        let workflow_details = match self
+            .argo_client
+            .get_workflow_details(&workflow_name, archived, argo_uid.as_ref())
+            .await
+        {
+            Ok(details) => Some(details),
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %job_id,
+                    workflow_kind = workflow_kind_label_value(workflow_kind),
+                    workflow_name = %workflow_name,
+                    archived,
+                    error = %e,
+                    "workflow_details_request_failed"
+                );
+                None
             }
         };
 
@@ -758,6 +816,7 @@ impl StateHandler {
                 workflow_details
                     .as_ref()
                     .map(|details| &details.status.nodes),
+                Some(&workflow_name),
                 workflow_logs.as_slice(),
                 overall_status.as_ref(),
             ),
@@ -1176,6 +1235,7 @@ mod tests {
         let stages = build_stage_logs(
             &["bakta", "baktfold"],
             Some(&nodes),
+            None,
             &logs,
             Some(&ArgoStatus::Running),
         );
@@ -1210,6 +1270,7 @@ mod tests {
         let stages = build_stage_logs(
             &["bakta", "baktfold"],
             None,
+            None,
             &logs,
             Some(&ArgoStatus::Failed),
         );
@@ -1236,11 +1297,60 @@ mod tests {
         let stages = build_stage_logs(
             &["bakta_proteins"],
             Some(&nodes),
+            None,
             &[],
             Some(&ArgoStatus::Succeeded),
         );
 
         assert_eq!(stages[0].status, StageStatus::Succeeded);
+    }
+
+    #[test]
+    fn test_build_stage_logs_maps_pod_ids_to_stages() {
+        let workflow_name = "bakta-baktfold-job-1.12.0-0.1.0-ab37efdd-46ae-4564-943e-3bpp7nj";
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "node-1".to_string(),
+            WorkflowNodeStatus {
+                id: "1730121812".to_string(),
+                display_name: "bakta".to_string(),
+                phase: "Succeeded".to_string(),
+                node_type: "Pod".to_string(),
+                ..Default::default()
+            },
+        );
+        nodes.insert(
+            "node-2".to_string(),
+            WorkflowNodeStatus {
+                id: "2082099159".to_string(),
+                display_name: "baktfold".to_string(),
+                phase: "Succeeded".to_string(),
+                node_type: "Pod".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let logs = vec![
+            Content {
+                content: "baktfold line".to_string(),
+                pod_name: Some(format!("{workflow_name}-2082099159")),
+            },
+            Content {
+                content: "bakta line".to_string(),
+                pod_name: Some(format!("{workflow_name}-1730121812")),
+            },
+        ];
+
+        let stages = build_stage_logs(
+            &["bakta", "baktfold"],
+            Some(&nodes),
+            Some(workflow_name),
+            &logs,
+            Some(&ArgoStatus::Succeeded),
+        );
+
+        assert_eq!(stages[0].content, "bakta line");
+        assert_eq!(stages[1].content, "baktfold line");
     }
 
     #[test]

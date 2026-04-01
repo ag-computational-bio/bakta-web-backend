@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use reqwest::Client;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -8,11 +8,12 @@ use crate::{api_structs::ArgoStatus, bakta_handler::FullJobState};
 use super::{
     structs::{
         Content, LogResult, SimpleStatusList, SubmitOptions, SubmitResult, SubmitWorkflowTemplate,
-        WorkflowDetails,
+        WorkflowDetails, WorkflowNodeStatus,
     },
     urls::{
-        get_delete_url_archived, get_delete_url_running, get_logs_archived_url,
-        get_logs_running_url, get_status_url_bakta, get_submit_url, get_workflow_url,
+        get_archived_workflow_url, get_delete_url_archived, get_delete_url_running,
+        get_logs_archived_url, get_logs_running_url, get_status_url_bakta, get_submit_url,
+        get_workflow_url,
     },
 };
 
@@ -78,6 +79,130 @@ impl ArgoClient {
         }
     }
 
+    fn collect_logs(log_entries: Vec<Content>) -> String {
+        let mut final_string = String::new();
+
+        for entry in log_entries {
+            final_string.push_str(&entry.content);
+            if !entry.content.ends_with('\n') {
+                final_string.push('\n');
+            }
+        }
+
+        final_string
+    }
+
+    async fn get_text_response(&self, url: String) -> Result<String> {
+        Ok(self
+            .client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", &self.token))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?)
+    }
+
+    async fn get_archived_node_logs(
+        &self,
+        argo_uid: &Uuid,
+        workflow_name: &str,
+        node: &WorkflowNodeStatus,
+    ) -> Result<Option<Content>> {
+        let mut artifact_names = Vec::new();
+
+        if !node.id.is_empty() {
+            artifact_names.push(format!("{workflow_name}-{}", node.id));
+        }
+        if !node.name.is_empty()
+            && !artifact_names
+                .iter()
+                .any(|candidate| candidate == &node.name)
+        {
+            artifact_names.push(node.name.clone());
+        }
+
+        let mut last_error = None;
+        for artifact_name in artifact_names {
+            match self
+                .get_text_response(get_logs_archived_url(
+                    &self.url,
+                    &self.namespace,
+                    argo_uid,
+                    &artifact_name,
+                ))
+                .await
+            {
+                Ok(content) if !content.trim().is_empty() => {
+                    return Ok(Some(Content {
+                        content,
+                        pod_name: Some(artifact_name),
+                    }));
+                }
+                Ok(_) => return Ok(None),
+                Err(error) => {
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        match last_error {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_archived_log_entries(
+        &self,
+        workflow_name: &str,
+        argo_uid: &Uuid,
+    ) -> Result<Vec<Content>> {
+        let details = self
+            .get_workflow_details(workflow_name, true, Some(argo_uid))
+            .await?;
+        let mut nodes = details
+            .status
+            .nodes
+            .values()
+            .filter(|node| {
+                node.node_type == "Pod" && (!node.id.is_empty() || !node.name.is_empty())
+            })
+            .collect::<Vec<_>>();
+
+        nodes.sort_by(|left, right| {
+            left.started_at
+                .cmp(&right.started_at)
+                .then_with(|| left.display_name.cmp(&right.display_name))
+                .then_with(|| left.id.cmp(&right.id))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
+        let mut log_entries = Vec::new();
+        let mut last_error = None;
+
+        for node in nodes {
+            match self
+                .get_archived_node_logs(argo_uid, workflow_name, node)
+                .await
+            {
+                Ok(Some(log_entry)) => log_entries.push(log_entry),
+                Ok(None) => {}
+                Err(error) => {
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        if log_entries.is_empty() {
+            if let Some(error) = last_error {
+                return Err(error);
+            }
+        }
+
+        Ok(log_entries)
+    }
+
     pub async fn get_workflow_status(&self) -> Result<SimpleStatusList> {
         let response = self
             .client
@@ -127,40 +252,30 @@ impl ArgoClient {
             return Ok(String::new());
         };
 
-        let Some(url) =
-            self.workflow_logs_url(workflow_name, state.archived, state.argo_uid.as_ref())
-        else {
-            return Ok(String::new());
-        };
-
-        let result = self
-            .client
-            .get(url)
-            .header("Authorization", format!("Bearer {}", &self.token))
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
-
-        if state.archived {
-            Ok(result)
-        } else {
-            let mut final_string = String::new();
-
-            for content in self.parse_log_entries(result).await? {
-                final_string.push_str(&content.content);
-                final_string.push('\n');
-            }
-
-            Ok(final_string)
-        }
+        Ok(Self::collect_logs(
+            self.get_workflow_log_entries(workflow_name, state.archived, state.argo_uid.as_ref())
+                .await?,
+        ))
     }
 
-    pub async fn get_workflow_details(&self, workflow_name: &str) -> Result<WorkflowDetails> {
+    pub async fn get_workflow_details(
+        &self,
+        workflow_name: &str,
+        archived: bool,
+        argo_uid: Option<&Uuid>,
+    ) -> Result<WorkflowDetails> {
+        let url = if archived {
+            let Some(argo_uid) = argo_uid else {
+                return Err(anyhow!("Missing archived workflow uid"));
+            };
+            get_archived_workflow_url(&self.url, argo_uid, &self.namespace, workflow_name)
+        } else {
+            get_workflow_url(&self.url, &self.namespace, workflow_name)
+        };
+
         Ok(self
             .client
-            .get(get_workflow_url(&self.url, &self.namespace, workflow_name))
+            .get(url)
             .header("Authorization", format!("Bearer {}", &self.token))
             .send()
             .await?
@@ -175,19 +290,37 @@ impl ArgoClient {
         archived: bool,
         argo_uid: Option<&Uuid>,
     ) -> Result<Vec<Content>> {
+        if archived {
+            if let Some(argo_uid) = argo_uid {
+                match self.get_archived_log_entries(workflow_name, argo_uid).await {
+                    Ok(log_entries) if !log_entries.is_empty() => return Ok(log_entries),
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::debug!(
+                            ?error,
+                            workflow_name,
+                            argo_uid = %argo_uid,
+                            "failed_to_retrieve_archived_pod_logs"
+                        );
+                    }
+                }
+            }
+
+            let Some(url) = self.workflow_logs_url(workflow_name, true, argo_uid) else {
+                return Ok(Vec::new());
+            };
+
+            return Ok(vec![Content {
+                content: self.get_text_response(url).await?,
+                pod_name: None,
+            }]);
+        }
+
         let Some(url) = self.workflow_logs_url(workflow_name, archived, argo_uid) else {
             return Ok(Vec::new());
         };
 
-        let response = self
-            .client
-            .get(url)
-            .header("Authorization", format!("Bearer {}", &self.token))
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+        let response = self.get_text_response(url).await?;
 
         self.parse_log_entries(response).await
     }
