@@ -143,10 +143,10 @@ pub async fn list_jobs(
     path = "/api/v2/job/result",
     operation_id = "getV2JobResult",
     summary = "Fetch V2 job result",
-    description = "Returns signed download URLs for the fixed result family of a finished V2 workflow.",
+    description = "Returns signed download URLs for the finished V2 workflow. The `json` artifact is always required; other artifact URLs are omitted when the workflow did not produce the file.",
     request_body = JobReference,
     responses(
-        (status = 200, body = V2ResultResponse),
+        (status = 200, body = V2ResultResponse, description = "Signed result artifact URLs. Optional artifacts are omitted when the corresponding result file is absent."),
         (status = 400, body = String)
     ),
     tag = "v2",

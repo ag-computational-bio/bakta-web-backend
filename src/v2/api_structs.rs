@@ -484,49 +484,85 @@ pub struct V2ListResponse {
     pub failed_jobs: Vec<FailedJobStatus>,
 }
 
-/// Fixed Bakta result artifact set exposed by V2.
+/// Bakta result artifact set exposed by V2.
+///
+/// The `json` artifact is required. All other artifacts are omitted when the
+/// workflow did not produce them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct BaktaResultFiles {
-    pub embl: String,
-    pub faa: String,
-    pub hypotheticals_faa: String,
-    pub ffn: String,
-    pub fna: String,
-    pub gbff: String,
-    pub gff3: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embl: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub faa: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hypotheticals_faa: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ffn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fna: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gbff: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gff3: Option<String>,
     pub json: String,
-    pub tsv: String,
-    pub hypotheticals_tsv: String,
-    pub logs_txt: String,
-    pub inference_tsv: String,
-    pub circular_plot_png: String,
-    pub circular_plot_svg: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tsv: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hypotheticals_tsv: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logs_txt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference_tsv: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub circular_plot_png: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub circular_plot_svg: Option<String>,
 }
 
-/// Fixed result artifact set exposed by the Bakta Proteins workflow.
+/// Bakta Proteins result artifact set exposed by V2.
+///
+/// The `json` artifact is required. All other artifacts are omitted when the
+/// workflow did not produce them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct BaktaProteinsResultFiles {
-    pub tsv: String,
-    pub faa: String,
-    pub hypotheticals_tsv: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tsv: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub faa: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hypotheticals_tsv: Option<String>,
     pub json: String,
 }
 
-/// Fixed reduced result artifact set exposed by standalone Baktfold.
+/// Baktfold result artifact set exposed by V2.
+///
+/// The `json` artifact is required. All other artifacts are omitted when the
+/// workflow did not produce them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct BaktfoldResultFiles {
-    pub embl: String,
-    pub faa: String,
-    pub hypotheticals_faa: String,
-    pub ffn: String,
-    pub fna: String,
-    pub gbff: String,
-    pub gff3: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embl: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub faa: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hypotheticals_faa: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ffn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fna: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gbff: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gff3: Option<String>,
     pub json: String,
-    pub tsv: String,
-    pub hypotheticals_tsv: String,
-    pub logs_txt: String,
-    pub inference_tsv: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tsv: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hypotheticals_tsv: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logs_txt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference_tsv: Option<String>,
 }
 
 /// Tagged V2 result payload for finished workflows.
@@ -668,5 +704,74 @@ mod tests {
         assert!(params.contains("--strain 'OBrien isolate'"));
         assert!(!params.contains("Bacil'lus"));
         assert!(!params.contains("O'Brien"));
+    }
+
+    #[test]
+    fn test_bakta_result_files_skip_missing_optional_urls() {
+        let value = serde_json::to_value(BaktaResultFiles {
+            embl: None,
+            faa: Some("faa-url".to_string()),
+            hypotheticals_faa: None,
+            ffn: None,
+            fna: None,
+            gbff: None,
+            gff3: None,
+            json: "json-url".to_string(),
+            tsv: None,
+            hypotheticals_tsv: None,
+            logs_txt: None,
+            inference_tsv: None,
+            circular_plot_png: None,
+            circular_plot_svg: None,
+        })
+        .expect("serialization should succeed");
+
+        assert_eq!(value.get("json").and_then(|v| v.as_str()), Some("json-url"));
+        assert_eq!(value.get("faa").and_then(|v| v.as_str()), Some("faa-url"));
+        assert!(value.get("embl").is_none());
+        assert!(value.get("circular_plot_png").is_none());
+    }
+
+    #[test]
+    fn test_bakta_proteins_result_files_skip_missing_optional_urls() {
+        let value = serde_json::to_value(BaktaProteinsResultFiles {
+            tsv: None,
+            faa: None,
+            hypotheticals_tsv: Some("hypotheticals-url".to_string()),
+            json: "json-url".to_string(),
+        })
+        .expect("serialization should succeed");
+
+        assert_eq!(value.get("json").and_then(|v| v.as_str()), Some("json-url"));
+        assert_eq!(
+            value.get("hypotheticals_tsv").and_then(|v| v.as_str()),
+            Some("hypotheticals-url")
+        );
+        assert!(value.get("tsv").is_none());
+        assert!(value.get("faa").is_none());
+    }
+
+    #[test]
+    fn test_baktfold_result_files_skip_missing_optional_urls() {
+        let value = serde_json::to_value(BaktfoldResultFiles {
+            embl: None,
+            faa: None,
+            hypotheticals_faa: None,
+            ffn: None,
+            fna: None,
+            gbff: None,
+            gff3: Some("gff3-url".to_string()),
+            json: "json-url".to_string(),
+            tsv: None,
+            hypotheticals_tsv: None,
+            logs_txt: None,
+            inference_tsv: None,
+        })
+        .expect("serialization should succeed");
+
+        assert_eq!(value.get("json").and_then(|v| v.as_str()), Some("json-url"));
+        assert_eq!(value.get("gff3").and_then(|v| v.as_str()), Some("gff3-url"));
+        assert!(value.get("faa").is_none());
+        assert!(value.get("logs_txt").is_none());
     }
 }

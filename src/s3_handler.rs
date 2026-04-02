@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use axum::http;
 use reqsign::aws::{self, StaticCredentialProvider};
-use reqwest::Method;
+use reqwest::{Client, Method, StatusCode};
 use url::Url;
 
 use crate::{
@@ -18,7 +18,11 @@ pub struct S3Handler {
     bucket: String,
     endpoint: String,
     is_ssl: bool,
+    client: Client,
 }
+
+const RESULT_DOWNLOAD_DURATION_SECONDS: i64 = 6 * 86400;
+const RESULT_EXISTENCE_CHECK_DURATION_SECONDS: i64 = 60;
 
 pub enum InputType {
     Fasta,
@@ -58,6 +62,7 @@ impl S3Handler {
             bucket,
             endpoint,
             is_ssl: ssl,
+            client: Client::new(),
         }
     }
 
@@ -103,15 +108,17 @@ impl S3Handler {
         .await
     }
 
-    async fn sign_result_download_object(
+    async fn sign_result_object_url(
         &self,
         job_id: &str,
         key_name: &str,
-        download_name: String,
+        method: Method,
+        duration: i64,
+        disposition: Option<String>,
     ) -> Result<String> {
         let key = format!("jobs/{job_id}/results/{key_name}");
         sign_url(
-            Method::GET,
+            method,
             &self.access_key,
             &self.secret_key,
             self.is_ssl,
@@ -121,10 +128,47 @@ impl S3Handler {
             &self.bucket,
             &key,
             &self.endpoint,
-            6 * 86400,
+            duration,
+            disposition,
+        )
+        .await
+    }
+
+    async fn sign_result_download_object(
+        &self,
+        job_id: &str,
+        key_name: &str,
+        download_name: String,
+    ) -> Result<String> {
+        self.sign_result_object_url(
+            job_id,
+            key_name,
+            Method::GET,
+            RESULT_DOWNLOAD_DURATION_SECONDS,
             Some(download_name),
         )
         .await
+    }
+
+    async fn result_object_exists(&self, job_id: &str, key_name: &str) -> Result<bool> {
+        let url = self
+            .sign_result_object_url(
+                job_id,
+                key_name,
+                Method::HEAD,
+                RESULT_EXISTENCE_CHECK_DURATION_SECONDS,
+                None,
+            )
+            .await?;
+
+        let response = self.client.head(url).send().await?;
+        match response.status() {
+            StatusCode::OK => Ok(true),
+            StatusCode::NOT_FOUND => Ok(false),
+            status => Err(anyhow!(
+                "Failed to check result file existence for {key_name}: {status}"
+            )),
+        }
     }
 
     async fn sign_result_download_url(
@@ -139,6 +183,37 @@ impl S3Handler {
             format!("{name}.{output_format}"),
         )
         .await
+    }
+
+    async fn sign_optional_result_download_url(
+        &self,
+        job_id: &str,
+        name: &str,
+        output_format: &str,
+    ) -> Result<Option<String>> {
+        let key_name = format!("result.{output_format}");
+        if !self.result_object_exists(job_id, &key_name).await? {
+            return Ok(None);
+        }
+
+        self.sign_result_download_object(job_id, &key_name, format!("{name}.{output_format}"))
+            .await
+            .map(Some)
+    }
+
+    async fn sign_required_result_download_url(
+        &self,
+        job_id: &str,
+        name: &str,
+        output_format: &str,
+    ) -> Result<String> {
+        let key_name = format!("result.{output_format}");
+        if !self.result_object_exists(job_id, &key_name).await? {
+            return Err(anyhow!("Missing required result file: {key_name}"));
+        }
+
+        self.sign_result_download_object(job_id, &key_name, format!("{name}.{output_format}"))
+            .await
     }
 
     pub async fn sign_download_urls(&self, job_id: &str, name: &str) -> Result<ResultFiles> {
@@ -174,53 +249,99 @@ impl S3Handler {
     ) -> Result<V2ResultFiles> {
         Ok(match result_kind {
             ResultKind::Bakta => V2ResultFiles::Bakta(BaktaResultFiles {
-                embl: self.sign_result_download_url(job_id, name, "embl").await?,
-                faa: self.sign_result_download_url(job_id, name, "faa").await?,
+                embl: self
+                    .sign_optional_result_download_url(job_id, name, "embl")
+                    .await?,
+                faa: self
+                    .sign_optional_result_download_url(job_id, name, "faa")
+                    .await?,
                 hypotheticals_faa: self
-                    .sign_result_download_url(job_id, name, "hypotheticals.faa")
+                    .sign_optional_result_download_url(job_id, name, "hypotheticals.faa")
                     .await?,
-                ffn: self.sign_result_download_url(job_id, name, "ffn").await?,
-                fna: self.sign_result_download_url(job_id, name, "fna").await?,
-                gbff: self.sign_result_download_url(job_id, name, "gbff").await?,
-                gff3: self.sign_result_download_url(job_id, name, "gff3").await?,
-                json: self.sign_result_download_url(job_id, name, "json").await?,
-                tsv: self.sign_result_download_url(job_id, name, "tsv").await?,
+                ffn: self
+                    .sign_optional_result_download_url(job_id, name, "ffn")
+                    .await?,
+                fna: self
+                    .sign_optional_result_download_url(job_id, name, "fna")
+                    .await?,
+                gbff: self
+                    .sign_optional_result_download_url(job_id, name, "gbff")
+                    .await?,
+                gff3: self
+                    .sign_optional_result_download_url(job_id, name, "gff3")
+                    .await?,
+                json: self
+                    .sign_required_result_download_url(job_id, name, "json")
+                    .await?,
+                tsv: self
+                    .sign_optional_result_download_url(job_id, name, "tsv")
+                    .await?,
                 hypotheticals_tsv: self
-                    .sign_result_download_url(job_id, name, "hypotheticals.tsv")
+                    .sign_optional_result_download_url(job_id, name, "hypotheticals.tsv")
                     .await?,
-                logs_txt: self.sign_result_download_url(job_id, name, "txt").await?,
+                logs_txt: self
+                    .sign_optional_result_download_url(job_id, name, "txt")
+                    .await?,
                 inference_tsv: self
-                    .sign_result_download_url(job_id, name, "inference.tsv")
+                    .sign_optional_result_download_url(job_id, name, "inference.tsv")
                     .await?,
-                circular_plot_png: self.sign_result_download_url(job_id, name, "png").await?,
-                circular_plot_svg: self.sign_result_download_url(job_id, name, "svg").await?,
+                circular_plot_png: self
+                    .sign_optional_result_download_url(job_id, name, "png")
+                    .await?,
+                circular_plot_svg: self
+                    .sign_optional_result_download_url(job_id, name, "svg")
+                    .await?,
             }),
             ResultKind::BaktaProteins => V2ResultFiles::BaktaProteins(BaktaProteinsResultFiles {
-                tsv: self.sign_result_download_url(job_id, name, "tsv").await?,
-                faa: self.sign_result_download_url(job_id, name, "faa").await?,
-                hypotheticals_tsv: self
-                    .sign_result_download_url(job_id, name, "hypotheticals.tsv")
+                tsv: self
+                    .sign_optional_result_download_url(job_id, name, "tsv")
                     .await?,
-                json: self.sign_result_download_url(job_id, name, "json").await?,
+                faa: self
+                    .sign_optional_result_download_url(job_id, name, "faa")
+                    .await?,
+                hypotheticals_tsv: self
+                    .sign_optional_result_download_url(job_id, name, "hypotheticals.tsv")
+                    .await?,
+                json: self
+                    .sign_required_result_download_url(job_id, name, "json")
+                    .await?,
             }),
             ResultKind::Baktfold => V2ResultFiles::Baktfold(BaktfoldResultFiles {
-                embl: self.sign_result_download_url(job_id, name, "embl").await?,
-                faa: self.sign_result_download_url(job_id, name, "faa").await?,
+                embl: self
+                    .sign_optional_result_download_url(job_id, name, "embl")
+                    .await?,
+                faa: self
+                    .sign_optional_result_download_url(job_id, name, "faa")
+                    .await?,
                 hypotheticals_faa: self
-                    .sign_result_download_url(job_id, name, "hypotheticals.faa")
+                    .sign_optional_result_download_url(job_id, name, "hypotheticals.faa")
                     .await?,
-                ffn: self.sign_result_download_url(job_id, name, "ffn").await?,
-                fna: self.sign_result_download_url(job_id, name, "fna").await?,
-                gbff: self.sign_result_download_url(job_id, name, "gbff").await?,
-                gff3: self.sign_result_download_url(job_id, name, "gff3").await?,
-                json: self.sign_result_download_url(job_id, name, "json").await?,
-                tsv: self.sign_result_download_url(job_id, name, "tsv").await?,
+                ffn: self
+                    .sign_optional_result_download_url(job_id, name, "ffn")
+                    .await?,
+                fna: self
+                    .sign_optional_result_download_url(job_id, name, "fna")
+                    .await?,
+                gbff: self
+                    .sign_optional_result_download_url(job_id, name, "gbff")
+                    .await?,
+                gff3: self
+                    .sign_optional_result_download_url(job_id, name, "gff3")
+                    .await?,
+                json: self
+                    .sign_required_result_download_url(job_id, name, "json")
+                    .await?,
+                tsv: self
+                    .sign_optional_result_download_url(job_id, name, "tsv")
+                    .await?,
                 hypotheticals_tsv: self
-                    .sign_result_download_url(job_id, name, "hypotheticals.tsv")
+                    .sign_optional_result_download_url(job_id, name, "hypotheticals.tsv")
                     .await?,
-                logs_txt: self.sign_result_download_url(job_id, name, "txt").await?,
+                logs_txt: self
+                    .sign_optional_result_download_url(job_id, name, "txt")
+                    .await?,
                 inference_tsv: self
-                    .sign_result_download_url(job_id, name, "inference.tsv")
+                    .sign_optional_result_download_url(job_id, name, "inference.tsv")
                     .await?,
             }),
         })
