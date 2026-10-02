@@ -411,7 +411,8 @@ async fn sign_url(
         let url_encoded_disposition = url::form_urlencoded::byte_serialize(
             format!(r#"attachment; filename="{}""#, disposition.unwrap()).as_bytes(),
         )
-        .collect::<String>();
+        .collect::<String>()
+        .replace('+', "%20");
         Url::parse(&format!(
             "{}{}.{}/{}?response-content-disposition={}",
             protocol, bucket, endpoint_sanitized, key, url_encoded_disposition
@@ -443,6 +444,26 @@ async fn sign_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_download_disposition_encodes_spaces_for_signing() {
+        let handler = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            "https://s3.example.com".to_string(),
+        );
+        let url = handler
+            .sign_result_download_url("job", "sample", "json")
+            .await
+            .unwrap();
+        let url = Url::parse(&url).unwrap();
+        assert!(
+            url.query().unwrap().contains(
+                "response-content-disposition=attachment%3B%20filename%3D%22sample.json%22"
+            )
+        );
+    }
 
     #[test]
     fn test_upload_object_name_mapping() {
