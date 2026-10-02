@@ -23,6 +23,7 @@ pub struct S3Handler {
 
 const RESULT_DOWNLOAD_DURATION_SECONDS: i64 = 6 * 86400;
 const RESULT_EXISTENCE_CHECK_DURATION_SECONDS: i64 = 60;
+pub const V2_UPLOAD_CONTENT_TYPE: &str = "application/octet-stream";
 
 pub enum InputType {
     Fasta,
@@ -81,6 +82,7 @@ impl S3Handler {
             &self.endpoint,
             10000, // 10000 seconds = 2.77 hours should be enough for uploads
             None,
+            None,
         )
         .await
     }
@@ -104,6 +106,7 @@ impl S3Handler {
             &self.endpoint,
             10000,
             None,
+            Some(V2_UPLOAD_CONTENT_TYPE),
         )
         .await
     }
@@ -130,6 +133,7 @@ impl S3Handler {
             &self.endpoint,
             duration,
             disposition,
+            None,
         )
         .await
     }
@@ -383,6 +387,7 @@ async fn sign_url(
     endpoint: &str,
     duration: i64,
     disposition: Option<String>,
+    content_type: Option<&str>,
 ) -> Result<String> {
     let signer = aws::default_signer("s3", "RegionOne")
         .with_credential_provider(StaticCredentialProvider::new(access_key, secret_key));
@@ -431,6 +436,13 @@ async fn sign_url(
         .into_parts()
         .0;
 
+    if let Some(content_type) = content_type {
+        parts.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_str(content_type)?,
+        );
+    }
+
     // Signing request with Signer
     signer
         .sign(
@@ -444,6 +456,34 @@ async fn sign_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_v2_signs_content_type_without_changing_v1_uploads() {
+        let handler = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            "https://s3.example.com".to_string(),
+        );
+        let legacy = handler
+            .sign_upload_url("job", InputType::Fasta)
+            .await
+            .unwrap();
+        let v2 = handler
+            .sign_upload_url_v2("job", UploadKind::GenomeFasta)
+            .await
+            .unwrap();
+        for (url, expected) in [(legacy, "host"), (v2, "content-type;host")] {
+            let url = Url::parse(&url).unwrap();
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(key, _)| key == "X-Amz-SignedHeaders")
+                    .unwrap()
+                    .1,
+                expected
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_download_disposition_encodes_spaces_for_signing() {

@@ -98,6 +98,10 @@ pub async fn init_job(
             upload_kind: upload.kind,
             required: upload.required,
             url,
+            headers: std::collections::HashMap::from([(
+                "Content-Type".to_string(),
+                crate::s3_handler::V2_UPLOAD_CONTENT_TYPE.to_string(),
+            )]),
         });
     }
 

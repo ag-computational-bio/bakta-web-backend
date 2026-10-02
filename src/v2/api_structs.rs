@@ -160,6 +160,8 @@ pub struct UploadLink {
     pub upload_kind: UploadKind,
     pub required: bool,
     pub url: String,
+    /// Required headers that must be sent unchanged with the upload PUT request.
+    pub headers: std::collections::HashMap<String, String>,
 }
 
 /// Static workflow metadata returned by `GET /api/v2/workflows`.
