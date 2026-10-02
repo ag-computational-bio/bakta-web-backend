@@ -23,7 +23,6 @@ pub struct S3Handler {
 
 const RESULT_DOWNLOAD_DURATION_SECONDS: i64 = 6 * 86400;
 const RESULT_EXISTENCE_CHECK_DURATION_SECONDS: i64 = 60;
-pub const V2_UPLOAD_CONTENT_TYPE: &str = "application/octet-stream";
 
 pub enum InputType {
     Fasta,
@@ -106,7 +105,7 @@ impl S3Handler {
             &self.endpoint,
             10000,
             None,
-            Some(V2_UPLOAD_CONTENT_TYPE),
+            None,
         )
         .await
     }
@@ -458,7 +457,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_v2_signs_content_type_without_changing_v1_uploads() {
+    async fn test_v2_preserves_legacy_upload_signing() {
         let handler = S3Handler::new(
             "access".to_string(),
             "secret".to_string(),
@@ -473,14 +472,14 @@ mod tests {
             .sign_upload_url_v2("job", UploadKind::GenomeFasta)
             .await
             .unwrap();
-        for (url, expected) in [(legacy, "host"), (v2, "content-type;host")] {
+        for url in [legacy, v2] {
             let url = Url::parse(&url).unwrap();
             assert_eq!(
                 url.query_pairs()
                     .find(|(key, _)| key == "X-Amz-SignedHeaders")
                     .unwrap()
                     .1,
-                expected
+                "host"
             );
         }
     }
