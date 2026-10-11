@@ -443,6 +443,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_token_signed_with_a_newly_published_key_is_accepted() {
+        let keycloak = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jwks()))
+            .up_to_n_times(1)
+            .mount(&keycloak)
+            .await;
+        // After the rotation Keycloak publishes the new key next to the old one.
+        let mut rotated = jwks();
+        let mut new_key = rotated["keys"][1].clone();
+        new_key["kid"] = "rotated-key".into();
+        rotated["keys"].as_array_mut().unwrap().push(new_key);
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rotated))
+            .mount(&keycloak)
+            .await;
+        let issuer = format!("{}/realms/bakta", keycloak.uri());
+        let auth = AdminAuth::new(AdminAuthConfig {
+            issuer: issuer.clone(),
+            client_id: TEST_CLIENT.to_string(),
+            group: TEST_GROUP.to_string(),
+        })
+        .with_min_refresh_interval(Duration::ZERO);
+        check(&auth, &claims(&issuer)).await.unwrap();
+
+        let rotated_token = token_with_kid(&claims(&issuer), "rotated-key");
+        let user = auth
+            .authenticate(Some(&format!("Bearer {rotated_token}")))
+            .await
+            .unwrap();
+        assert_eq!(user.username, "jdoe");
+        assert_eq!(keycloak.received_requests().await.unwrap().len(), 2);
+        // The old key still works.
+        check(&auth, &claims(&issuer)).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_failed_refreshes_are_throttled() {
         let keycloak = MockServer::start().await;
         Mock::given(method("GET"))
