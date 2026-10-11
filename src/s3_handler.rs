@@ -373,6 +373,33 @@ impl S3Handler {
         format!("{protocol}{}.{endpoint}/", self.bucket)
     }
 
+    /// URL of the object `key` below `prefix`. Rejects keys with empty, `.` or
+    /// `..` segments (also percent-encoded) and backslashes, because the URL
+    /// library would normalize them to another object. Each segment is
+    /// percent-encoded, so the URL path is exactly the key.
+    fn object_url(&self, prefix: &str, key: &str) -> Result<Url> {
+        let is_dot_segment = |segment: &str| {
+            matches!(
+                segment.to_ascii_lowercase().replace("%2e", ".").as_str(),
+                "." | ".."
+            )
+        };
+        let valid = key.starts_with(prefix)
+            && !key.contains('\\')
+            && key
+                .split('/')
+                .all(|segment| !segment.is_empty() && !is_dot_segment(segment));
+        if !valid {
+            return Err(anyhow!("Refusing to delete unsafe object key: {key}"));
+        }
+        let mut url = Url::parse(&self.bucket_url())?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow!("Invalid bucket URL"))?
+            .pop_if_empty()
+            .extend(key.split('/'));
+        Ok(url)
+    }
+
     /// Deletes all objects of a job (inputs and results) and returns how many were deleted.
     pub async fn purge_job_objects(&self, job_id: &str) -> Result<u64> {
         lazy_static::lazy_static! {
@@ -420,10 +447,14 @@ impl S3Handler {
             }
         }
 
+        // Check all keys first, so a bad listing deletes nothing.
+        let mut urls = Vec::with_capacity(keys.len());
+        for key in &keys {
+            urls.push(self.object_url(&prefix, key)?);
+        }
+
         let mut deleted = 0;
-        for key in keys {
-            let mut url = Url::parse(&self.bucket_url())?;
-            url.set_path(&key);
+        for url in urls {
             let signed = presign(
                 &self.access_key,
                 &self.secret_key,
@@ -431,6 +462,9 @@ impl S3Handler {
                 url.as_str(),
             )
             .await?;
+            if Url::parse(&signed)?.path() != url.path() {
+                return Err(anyhow!("Signed URL path differs from the object key"));
+            }
             self.client
                 .delete(signed)
                 .send()
@@ -699,6 +733,70 @@ mod tests {
                 .unwrap_or_default()
                 .contains("X-Amz-Signature")
         }));
+    }
+
+    #[tokio::test]
+    async fn test_purge_job_objects_rejects_keys_that_leave_the_job_prefix() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let handler = |server: &MockServer| {
+            S3Handler::new(
+                "access".to_string(),
+                "secret".to_string(),
+                "bucket".to_string(),
+                format!("http://s3.test:{}", server.address().port()),
+            )
+            .with_bucket_host_address(*server.address())
+        };
+        for bad_key in [
+            "jobs/A/../B/results/file",
+            "jobs/A/./results/file",
+            "jobs/A//results/file",
+            "jobs/A/%2e%2E/B/file",
+            "jobs/A/.%2e/B/file",
+            "jobs/A/results\\..\\file",
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                    "<ListBucketResult><Contents><Key>jobs/A/inputs/ok</Key></Contents><Contents><Key>{bad_key}</Key></Contents><IsTruncated>false</IsTruncated></ListBucketResult>"
+                )))
+                .mount(&server)
+                .await;
+            Mock::given(method("DELETE"))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(0)
+                .mount(&server)
+                .await;
+            assert!(
+                handler(&server).purge_job_objects("A").await.is_err(),
+                "{bad_key}"
+            );
+        }
+
+        // Special characters are percent-encoded, so the path stays the key.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "<ListBucketResult><Contents><Key>jobs/A/results/a%2e b?#.json</Key></Contents><IsTruncated>false</IsTruncated></ListBucketResult>",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        assert_eq!(handler(&server).purge_job_objects("A").await.unwrap(), 1);
+        let requests = server.received_requests().await.unwrap();
+        let deleted = requests
+            .iter()
+            .find(|request| request.method.as_str() == "DELETE")
+            .unwrap();
+        assert_eq!(deleted.url.path(), "/jobs/A/results/a%252e%20b%3F%23.json");
     }
 
     #[test]
