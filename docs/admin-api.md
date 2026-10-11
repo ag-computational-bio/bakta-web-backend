@@ -41,6 +41,7 @@ Migrations are embedded in the backend and run at startup. Table `jobs`, one row
 | `workflow_kind` | text | `bakta`, `bakta_baktfold`, `bakta_proteins`, `baktfold` |
 | `api_version` | text | `v1` or `v2` |
 | `status` | text | `created`, `submitted`, `running`, `succeeded`, `failed`, `error`, `deleted`, `expired` |
+| `outcome` | text, null | Final workflow result: `succeeded`, `failed` or `error`. Kept when the status later becomes `deleted` or `expired`. |
 | `name` | text, null | Job name as entered by the user |
 | `genus`, `species`, `strain` | text, null | Organism as entered by the user |
 | `sequence_count` | integer, null | Number of input sequences (from `input_stats`, see below) |
@@ -60,6 +61,7 @@ Rules:
 - The job secret, upload URLs and IP addresses are never stored.
 - Writes never block or fail a user request. If the database is unreachable, the backend logs a warning and continues.
 - Records are kept forever. Expired or deleted jobs keep their row with status `expired` or `deleted`.
+- Statistics count finished, succeeded, failed and error jobs by `outcome`, so a job still counts after it was deleted or has expired.
 
 ### Input statistics in the V2 start request
 
@@ -79,7 +81,7 @@ The web UI fills it from the parsed FASTA input. The backend stores it in `seque
 ## Common query parameters
 
 - `environment`: `production` (default), `staging` or `all`.
-- `from`, `to`: RFC 3339 timestamps, filter on `created_at`. Default: all time.
+- `from`, `to`: RFC 3339 timestamps, filter on `created_at` (`from` inclusive, `to` exclusive). Default: all time.
 - Times in responses are RFC 3339 strings in UTC. Durations are seconds as numbers.
 
 ## Endpoints
@@ -112,7 +114,9 @@ All paths start with `/api/admin`. All responses are JSON. Errors use `{ "error"
 }
 ```
 
+`jobs_finished`, `jobs_succeeded`, `jobs_failed` and `jobs_error` count by `outcome`. `jobs_active` counts jobs with status `submitted` or `running`.
 `success_rate` is `jobs_succeeded / jobs_finished` (null when nothing finished). Percentiles use `percentile_cont`.
+Duration values are null when no job in the range has that duration.
 
 ### `GET /stats/timeseries?environment&from&to&interval&group_by`
 
@@ -124,7 +128,7 @@ All paths start with `/api/admin`. All responses are JSON. Errors use `{ "error"
   "interval": "month",
   "group_by": "workflow_kind",
   "buckets": [
-    { "period_start": "2026-09-01T00:00:00Z", "group": "bakta", "jobs_total": 120, "jobs_succeeded": 115, "jobs_failed": 5, "runtime_p50": 390.0, "runtime_avg": 420.0, "total_input_bp": 600000000 }
+    { "period_start": "2026-09-01T00:00:00Z", "group": "bakta", "jobs_total": 120, "jobs_succeeded": 115, "jobs_failed": 4, "jobs_error": 1, "runtime_p50": 390.0, "runtime_avg": 420.0, "total_input_bp": 600000000 }
   ]
 }
 ```
@@ -142,14 +146,14 @@ With `group_by=none`, `group` is `null`. Buckets without jobs are left out; the 
 - `status`, `workflow_kind`: comma separated lists.
 - `q`: matches the job ID prefix, organism (genus, species, strain) or name, case insensitive.
 - `limit` default 50, max 500. `offset` default 0.
-- `sort`: `created_at` (default, newest first), `-created_at`, `runtime_seconds`, `-runtime_seconds`, `total_length`, `-total_length`.
+- `sort`: `created_at`, `-created_at` (default, newest first), `runtime_seconds`, `-runtime_seconds`, `total_length`, `-total_length`. A leading `-` sorts in descending order, without it the order is ascending. Empty values come last.
 
 ```json
 {
   "total": 1234,
   "items": [
     {
-      "id": "...", "environment": "production", "workflow_kind": "bakta", "status": "succeeded",
+      "id": "...", "environment": "production", "workflow_kind": "bakta", "status": "succeeded", "outcome": "succeeded",
       "organism": "Escherichia coli Sakai", "sequence_count": 3, "total_length": 5594605,
       "created_at": "...", "finished_at": "...", "runtime_seconds": 401.2
     }
@@ -165,7 +169,7 @@ The full database record plus the live Argo state (null if the workflow no longe
 
 ```json
 {
-  "job": { "id": "...", "environment": "production", "workflow_kind": "bakta", "api_version": "v2", "status": "succeeded",
+  "job": { "id": "...", "environment": "production", "workflow_kind": "bakta", "api_version": "v2", "status": "succeeded", "outcome": "succeeded",
            "name": "...", "genus": "...", "species": "...", "strain": "...", "sequence_count": 3, "total_length": 5594605,
            "config": { }, "bakta_version": "1.12.2", "bakta_db_version": "6.0", "baktfold_version": null, "baktfold_db_version": null,
            "workflow_name": "bakta-job-1.12.2-...", "created_at": "...", "submitted_at": "...", "started_at": "...", "finished_at": "...",
@@ -200,6 +204,8 @@ Argo terminate of a running workflow. `409` if the workflow is not running. Resp
 Deletes the Argo workflow (Argo removes its pods) and sets the job status to `deleted`. With `purge_data=true` the job's S3 objects are deleted too. Response: `{ "deleted_workflow": true, "purged_objects": 12 }`.
 
 ### `GET /workflows?environment&phase`
+
+For this endpoint and for `POST /cleanup`, `environment` defaults to the backend's own `ENVIRONMENT`.
 
 Live Argo workflows of this backend, including ones without a job record. `phase`: comma separated (`Pending`, `Running`, `Succeeded`, `Failed`, `Error`).
 
