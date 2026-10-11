@@ -83,12 +83,12 @@ impl AppMetrics {
 
         let mut registry = Registry::default();
         registry.register(
-            "jobs_submitted_total",
+            "jobs_submitted",
             "Number of job submissions by API version and workflow kind.",
             jobs_submitted_total.clone(),
         );
         registry.register(
-            "jobs_completed_total",
+            "jobs_completed",
             "Number of jobs that reached a terminal status by workflow kind.",
             jobs_completed_total.clone(),
         );
@@ -108,12 +108,12 @@ impl AppMetrics {
             http_request_duration_seconds.clone(),
         );
         registry.register(
-            "argo_submit_errors_total",
+            "argo_submit_errors",
             "Number of Argo submission failures by workflow kind.",
             argo_submit_errors_total.clone(),
         );
         registry.register(
-            "argo_poll_errors_total",
+            "argo_poll_errors",
             "Number of Argo workflow status polling failures.",
             argo_poll_errors_total.clone(),
         );
@@ -308,6 +308,36 @@ mod tests {
         assert!(encoded.contains("workflow_kind=\"bakta\""));
         assert!(encoded.contains("jobs_active"));
         assert!(encoded.contains("http_request_duration_seconds"));
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn test_counter_names_have_a_single_total_suffix() {
+        let metrics = AppMetrics::new();
+        metrics.record_job_submitted("v2", "bakta");
+        metrics.record_job_completed("bakta", "succeeded", None);
+        metrics.record_submit_error("bakta");
+        metrics.record_poll_error();
+        let encoded = metrics.encode().unwrap();
+        let names: std::collections::BTreeSet<_> = encoded
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .filter_map(|line| line.split(['{', ' ']).next())
+            .filter(|name| name.ends_with("_total"))
+            .collect();
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            [
+                "argo_poll_errors_total",
+                "argo_submit_errors_total",
+                "jobs_completed_total",
+                "jobs_submitted_total",
+            ]
+        );
     }
 }
 
