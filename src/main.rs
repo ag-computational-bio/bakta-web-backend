@@ -23,6 +23,8 @@ mod v1;
 #[cfg(test)]
 mod v1_api_tests;
 mod v2;
+#[cfg(test)]
+mod v2_api_tests;
 mod workflow_catalog;
 
 #[tokio::main]
