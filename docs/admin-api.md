@@ -109,7 +109,7 @@ A start request can fail in a way that leaves open whether Argo created the work
 
 While a job is unresolved, start and delete requests for it are refused with `409` and `The result of an earlier start request is not known yet, try again later`. The polling loop resolves the job:
 
-- A polled workflow list that contains a workflow with the job's `jobid` label resolves it at once. The job then uses that workflow.
+- A polled workflow list that contains a workflow with the job's `jobid` label resolves it at once. The job then uses that workflow. A poll that runs while the job is being started, deleted or resubmitted skips the job and keeps the mark. A later poll resolves it.
 - Otherwise it stays unresolved until at least 3 polls fetched after the mark found no such workflow and at least 10 minutes have passed since the mark. Then a new start is allowed.
 
 ## Common query parameters

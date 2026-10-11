@@ -670,3 +670,59 @@ async fn start_checks_the_unknown_submission_after_taking_the_reservation() {
         assert!(text.contains("not known"), "{uri}: {text}");
     }
 }
+
+#[tokio::test]
+async fn a_poll_keeps_the_unknown_submission_of_a_reserved_job() {
+    let argo = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/bakta/submit"))
+        .respond_with(submit_response("duplicate"))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let router = test_router(handler.clone());
+    let state = &handler.state_handler;
+    let id = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    let marked_at = chrono::Utc::now();
+    state
+        .unknown_submissions
+        .lock()
+        .unwrap()
+        .insert(id, crate::bakta_handler::UnknownSubmission::new(marked_at));
+    let now = marked_at + chrono::Duration::seconds(15);
+    let listed: crate::argo::structs::SimpleStatus = serde_json::from_value(json!({
+        "metadata": {"name": "wf-late", "uid": Uuid::new_v4(), "creationTimestamp": now.to_rfc3339(),
+                     "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}},
+        "status": {"phase": "Pending", "startedAt": now.to_rfc3339()}
+    }))
+    .unwrap();
+
+    // A refused start or delete holds the reservation while the poll that
+    // lists the workflow is applied. The poll skips the job.
+    let reservation = state.reserve_start(id).unwrap();
+    state
+        .apply_workflow_statuses(vec![listed.clone()], now)
+        .await;
+    drop(reservation);
+    assert!(state.job_state.read().await[&id].workflowname.is_none());
+
+    // So the job keeps its mark, and a start after that is still refused.
+    let body = start_body(id, TEST_SECRET, "bakta", json!({}));
+    let (status, text) = call(&router, "POST", "/api/v2/job/start", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{text}");
+    assert!(text.contains("not known"), "{text}");
+
+    // The next poll applies the workflow and clears the mark.
+    state
+        .apply_workflow_statuses(vec![listed], now + chrono::Duration::seconds(15))
+        .await;
+    assert!(!state.is_submission_unknown(&id));
+    assert_eq!(
+        state.job_state.read().await[&id].workflowname.as_deref(),
+        Some("wf-late")
+    );
+    let (status, text) = call(&router, "POST", "/api/v2/job/start", Some(body)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(text.contains("already started"), "{text}");
+}

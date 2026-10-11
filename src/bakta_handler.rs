@@ -80,13 +80,11 @@ impl UnknownSubmission {
         }
     }
 
-    /// Counts a poll from `now` and returns true while the submission is
-    /// still unknown. A found workflow resolves it at once. Otherwise it is
-    /// resolved after enough empty polls over enough time.
-    fn still_unknown(&mut self, found: bool, now: DateTime<Utc>) -> bool {
-        if found {
-            return false;
-        }
+    /// Counts a poll from `now` that found no workflow for the job and
+    /// returns true while the submission is still unknown. It is resolved
+    /// after enough empty polls over enough time. A found workflow resolves
+    /// it when the poll applies the workflow to the job state.
+    fn still_unknown(&mut self, now: DateTime<Utc>) -> bool {
         if now > self.marked_at {
             self.empty_polls += 1;
         }
@@ -1009,14 +1007,24 @@ impl StateHandler {
         let recorded_in_db = self.recorded_workflow_names(&items).await;
         let mut write_lock = self.job_state.write().await;
         let current = current_workflows(&write_lock, &recorded_in_db, &items);
-        // A found workflow resolves a marked submission and is recorded below.
-        // An empty list does not prove that none was created, because Argo
-        // may still be creating it, so several empty polls are needed.
-        let with_workflow = workflows_by_job(&items);
+        // Jobs that are being started, deleted or resubmitted keep their
+        // state until that is done. The next poll updates them.
+        let reserved = self
+            .starting_jobs
+            .lock()
+            .expect("starting jobs lock poisoned")
+            .clone();
+        // A found workflow resolves a marked submission when it is applied
+        // to the job state below. A reserved job keeps its mark, because the
+        // workflow is not applied. An empty list does not prove that none was
+        // created, because Argo may still be creating it, so several empty
+        // polls are needed.
         self.unknown_submissions
             .lock()
             .expect("unknown submissions lock poisoned")
-            .retain(|id, marker| marker.still_unknown(with_workflow.contains_key(id), now));
+            .retain(|id, marker| {
+                reserved.contains(id) || current.contains_key(id) || marker.still_unknown(now)
+            });
         let is_current = |item: &SimpleStatus| {
             job_id_label(item)
                 .and_then(|id| current.get(&id))
@@ -1040,13 +1048,6 @@ impl StateHandler {
             .write()
             .expect("live workflows lock poisoned") = live;
 
-        // Jobs that are being started or deleted keep their state until
-        // that is done. The next poll updates them.
-        let reserved = self
-            .starting_jobs
-            .lock()
-            .expect("starting jobs lock poisoned")
-            .clone();
         let mut expired = Vec::new();
         let mut polled = Vec::new();
         for item in items {
@@ -1058,6 +1059,12 @@ impl StateHandler {
             let Some(state) = state_from_simple_status(item.clone()) else {
                 continue;
             };
+            // The workflow is applied (or the job expires) in this step, so
+            // the job state now knows whether a workflow exists.
+            self.unknown_submissions
+                .lock()
+                .expect("unknown submissions lock poisoned")
+                .remove(&state.id);
             if is_state_expired(&state, now) {
                 if write_lock.remove(&state.id).is_some() {
                     expired.push((state.id, state.workflowname.clone()));
@@ -2206,17 +2213,16 @@ mod tests {
         let marked_at = Utc::now();
         let mut marker = UnknownSubmission::new(marked_at);
         // A list fetched before the mark does not count.
-        assert!(marker.still_unknown(false, marked_at - Duration::seconds(1)));
-        assert!(marker.still_unknown(false, marked_at + Duration::minutes(20)));
-        assert!(marker.still_unknown(false, marked_at + Duration::minutes(21)));
-        assert!(!marker.still_unknown(false, marked_at + Duration::minutes(22)));
+        assert!(marker.still_unknown(marked_at - Duration::seconds(1)));
+        assert!(marker.still_unknown(marked_at + Duration::minutes(20)));
+        assert!(marker.still_unknown(marked_at + Duration::minutes(21)));
+        assert!(!marker.still_unknown(marked_at + Duration::minutes(22)));
 
         let mut marker = UnknownSubmission::new(marked_at);
         for minutes in [1, 2, 3, 4, 5] {
-            assert!(marker.still_unknown(false, marked_at + Duration::minutes(minutes)));
+            assert!(marker.still_unknown(marked_at + Duration::minutes(minutes)));
         }
-        assert!(!marker.still_unknown(false, marked_at + Duration::minutes(10)));
-        assert!(!UnknownSubmission::new(marked_at).still_unknown(true, marked_at));
+        assert!(!marker.still_unknown(marked_at + Duration::minutes(10)));
     }
 
     #[test]
