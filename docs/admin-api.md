@@ -345,6 +345,7 @@ Runs one action on all live workflows that match a filter.
 - `workflow_names`: when given (a real run after a dry run), only workflows in this list that still match the filter are processed.
 - Applicability: `stop` for `Pending` and `Running`, `retry` for `Failed` and `Error`, `resume` only for suspended workflows, `resubmit` for any finished workflow (`Succeeded`, `Failed`, `Error`), `delete` for any.
 - `retry` and `resubmit` only apply to the job's current workflow. An older workflow of a job that was resubmitted is not applicable (`reason` names the current workflow).
+- When the job's current workflow cannot be determined (for example the job is not in memory after a restart and the statistics database fails, or the job's workflow is not recorded yet), `retry` and `resubmit` do not apply: `applicable` is false and `reason` is `Current workflow unknown, try again later`. A workflow without a `jobid` label, or whose job has no record, counts as current. The single `retry` and `resubmit` endpoints answer `503` when the job lookup fails.
 - `retry` and `resubmit` do not apply when the input data is gone: `applicable` is false and `reason` is `Input data deleted after the retention period`. The reference time is the job's `finished_at` or `created_at` (see Data retention). For a workflow without a job record, it is the workflow's finish time or, if it has none, its creation time.
 - Workflows are processed one by one. One failure does not stop the others. Each action is logged with the admin user name.
 

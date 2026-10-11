@@ -874,6 +874,68 @@ async fn bulk_retry_and_resubmit_skip_superseded_workflows() {
 }
 
 #[tokio::test]
+async fn retry_and_resubmit_are_refused_when_the_current_workflow_is_unknown() {
+    let Some(db) = test_db("retry_and_resubmit_are_refused_when_the_current_workflow").await else {
+        return;
+    };
+    // After a restart the job is not in memory, and the database fails.
+    sqlx::query("DROP TABLE jobs")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let argo = MockServer::start().await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+    let restarted = Uuid::new_v4();
+    // A job in memory whose workflow is not recorded yet.
+    let unrecorded = v2_state(&setup.handler, WorkflowKind::Bakta, None).await;
+    let items = json!({"items": [
+        listed_workflow("wf-restarted", "Failed", Some(&restarted.to_string()), Some(48)),
+        listed_workflow("wf-unrecorded", "Failed", Some(&unrecorded.to_string()), Some(48)),
+    ]});
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(items))
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(workflow("any", "Running"))
+        .mount(&argo)
+        .await;
+
+    for action in ["retry", "resubmit"] {
+        for dry_run in [true, false] {
+            let (status, body) = admin_call(
+                &setup,
+                "POST",
+                "/api/admin/workflows/bulk",
+                Some(json!({"action": action, "dry_run": dry_run})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            for item in body["items"].as_array().unwrap() {
+                assert_eq!(item["applicable"], false, "{body}");
+                assert_eq!(
+                    item["reason"], "Current workflow unknown, try again later",
+                    "{body}"
+                );
+                if !dry_run {
+                    assert_eq!(item["result"], "skipped");
+                }
+            }
+        }
+        let (status, body) = admin_call(
+            &setup,
+            "POST",
+            &format!("/api/admin/jobs/{restarted}/{action}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
+    assert!(argo_changes(argo.received_requests().await.unwrap()).is_empty());
+}
+
+#[tokio::test]
 async fn resume_only_accepts_suspended_workflows() {
     let argo = MockServer::start().await;
     let mut paused = suspended_workflow();

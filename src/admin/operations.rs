@@ -566,17 +566,52 @@ fn bulk_matches(
     q_matches && phase_matches && kind_matches && age_matches
 }
 
-/// The job's current workflow when `workflow` belongs to a job that has
-/// another current workflow (after a resubmit).
-async fn superseded_by(state: &BaktaHandler, workflow: &ArgoWorkflow) -> Option<String> {
-    let id = workflow
+const CURRENT_WORKFLOW_UNKNOWN: &str = "Current workflow unknown, try again later";
+
+/// Whether a workflow is the current workflow of its job.
+enum CurrentWorkflow {
+    /// The job's current workflow, or a workflow without a known job.
+    Current,
+    /// The job has another current workflow (after a resubmit).
+    SupersededBy(String),
+    /// The job's current workflow cannot be determined, for example while
+    /// the statistics database fails.
+    Unknown,
+}
+
+async fn current_workflow(state: &BaktaHandler, workflow: &ArgoWorkflow) -> CurrentWorkflow {
+    let Some(id) = workflow
         .metadata
         .labels
-        .get("jobid")?
-        .parse::<Uuid>()
-        .ok()?;
-    let current = find_job(state, id).await.ok()?.workflow_name?;
-    (current != workflow.metadata.name).then_some(current)
+        .get("jobid")
+        .and_then(|value| value.parse::<Uuid>().ok())
+    else {
+        return CurrentWorkflow::Current;
+    };
+    let handler = &state.state_handler;
+    let in_memory = handler
+        .job_state
+        .read()
+        .await
+        .get(&id)
+        .map(|job| job.workflowname.clone());
+    let current = match (in_memory, handler.stats.db()) {
+        (Some(name), _) => name,
+        (None, None) => return CurrentWorkflow::Current,
+        (None, Some(db)) => match db.get_job(id).await {
+            Ok(Some(record)) => record.workflow_name,
+            Ok(None) => return CurrentWorkflow::Current,
+            Err(error) => {
+                tracing::warn!(%error, job_id = %id, "admin_current_workflow_lookup_failed");
+                return CurrentWorkflow::Unknown;
+            }
+        },
+    };
+    match current {
+        None => CurrentWorkflow::Unknown,
+        Some(name) if name == workflow.metadata.name => CurrentWorkflow::Current,
+        Some(name) => CurrentWorkflow::SupersededBy(name),
+    }
 }
 
 /// True while the S3 data of the workflow's job exists. The reference time
@@ -705,12 +740,16 @@ pub async fn bulk_workflows(
                 workflow.status.phase
             )
         });
-        // Retry and resubmit only act on the job's current workflow.
-        if reason.is_none()
-            && matches!(action, BulkAction::Retry | BulkAction::Resubmit)
-            && let Some(current) = superseded_by(&state, &workflow).await
-        {
-            reason = Some(format!("Workflow was superseded by {current}"));
+        // Retry and resubmit only act on the job's current workflow, and
+        // not when it cannot be determined.
+        if reason.is_none() && matches!(action, BulkAction::Retry | BulkAction::Resubmit) {
+            match current_workflow(&state, &workflow).await {
+                CurrentWorkflow::Current => {}
+                CurrentWorkflow::SupersededBy(current) => {
+                    reason = Some(format!("Workflow was superseded by {current}"));
+                }
+                CurrentWorkflow::Unknown => reason = Some(CURRENT_WORKFLOW_UNKNOWN.to_string()),
+            }
         }
         if reason.is_none()
             && matches!(action, BulkAction::Retry | BulkAction::Resubmit)
