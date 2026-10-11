@@ -385,8 +385,6 @@ impl ArgoClient {
     }
 
     /// Lists live workflows, optionally filtered by a Kubernetes label selector.
-    // Used by the workflow list and cleanup endpoints, added in the next step.
-    #[allow(dead_code)]
     pub async fn list_workflows(&self, label_selector: Option<&str>) -> Result<Vec<ArgoWorkflow>> {
         let mut url =
             url::Url::parse(&format!("{}/api/v1/workflows/{}", self.url, self.namespace))?;

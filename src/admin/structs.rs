@@ -120,3 +120,61 @@ pub struct DeleteJobResponse {
     pub deleted_workflow: bool,
     pub purged_objects: u64,
 }
+
+#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct WorkflowListParams {
+    /// Environment label, default the backend's own environment, or `all`.
+    pub environment: Option<String>,
+    /// Comma separated phases: `Pending`, `Running`, `Succeeded`, `Failed`, `Error`.
+    pub phase: Option<String>,
+}
+
+/// A live Argo workflow of this backend.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorkflowSummary {
+    pub name: String,
+    /// Null when the workflow has no `jobid` label.
+    pub job_id: Option<String>,
+    /// Null when the workflow has no `workflow-kind` label.
+    pub workflow_kind: Option<String>,
+    pub phase: String,
+    pub template: Option<String>,
+    pub environment: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorkflowListResponse {
+    pub items: Vec<WorkflowSummary>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct CleanupRequest {
+    /// Default `["Failed", "Error"]`.
+    pub phases: Option<Vec<String>>,
+    /// Default 24.
+    pub older_than_hours: Option<f64>,
+    /// Default the backend's own environment, or `all`.
+    pub environment: Option<String>,
+    /// Default `true`: only list what would be deleted.
+    pub dry_run: Option<bool>,
+    /// When given, only these workflows are deleted, if they still match the filters.
+    pub workflow_names: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CleanupItem {
+    pub name: String,
+    pub job_id: Option<String>,
+    pub phase: String,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CleanupResponse {
+    pub dry_run: bool,
+    pub workflows: Vec<CleanupItem>,
+}
