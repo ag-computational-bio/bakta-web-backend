@@ -636,6 +636,7 @@ async fn workflow_list_argo() -> MockServer {
         listed_workflow("new-failed", "Failed", Some("job-3"), Some(1)),
         listed_workflow("running", "Running", Some("job-4"), None),
         suspended_workflow(),
+        listed_workflow("pending", "Pending", Some("job-6"), None),
     ]});
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/bakta"))
@@ -683,7 +684,7 @@ async fn workflows_lists_live_workflows_of_the_environment() {
     let (status, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let items = body["items"].as_array().unwrap();
-    assert_eq!(items.len(), 5);
+    assert_eq!(items.len(), 6);
     assert_eq!(items[3]["suspended"], false);
     assert_eq!(items[4]["suspended"], true);
     assert_eq!(items[0]["name"], "old-failed");
@@ -811,7 +812,7 @@ async fn bulk_dry_run_lists_matches_without_changes() {
     .await;
     assert_eq!(
         names(&body),
-        ["old-failed", "new-failed", "running", "paused"]
+        ["old-failed", "new-failed", "running", "paused", "pending"]
     );
     let applicable: Vec<_> = body["items"]
         .as_array()
@@ -819,7 +820,7 @@ async fn bulk_dry_run_lists_matches_without_changes() {
         .iter()
         .map(|item| item["applicable"].as_bool().unwrap())
         .collect();
-    assert_eq!(applicable, [false, false, true, true]);
+    assert_eq!(applicable, [false, false, true, true, true]);
 
     let (_, body) = admin_call(
         &setup,
@@ -915,7 +916,7 @@ async fn bulk_delete_skips_pending_and_running_workflows() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        for name in ["running", "paused"] {
+        for name in ["running", "paused", "pending"] {
             let item = bulk_item(&body, name);
             assert_eq!(item["applicable"], false, "{body}");
             assert_eq!(item["reason"], "Still running, stop it first");

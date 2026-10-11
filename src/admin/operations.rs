@@ -188,7 +188,8 @@ async fn after_resubmit(state: &BaktaHandler, id: Uuid, old_name: &str, workflow
         (status = 403, body = AdminErrorResponse),
         (status = 404, body = AdminErrorResponse),
         (status = 409, body = AdminErrorResponse, description = "Workflow is not in Failed or Error."),
-        (status = 502, body = AdminErrorResponse)
+        (status = 502, body = AdminErrorResponse),
+        (status = 503, body = AdminErrorResponse, description = "The statistics database failed.")
     ),
     security(("bearer_auth" = [])),
     tag = "admin",
@@ -236,7 +237,8 @@ pub async fn retry_job(
         (status = 403, body = AdminErrorResponse),
         (status = 404, body = AdminErrorResponse),
         (status = 409, body = AdminErrorResponse),
-        (status = 502, body = AdminErrorResponse)
+        (status = 502, body = AdminErrorResponse),
+        (status = 503, body = AdminErrorResponse, description = "The statistics database failed.")
     ),
     security(("bearer_auth" = [])),
     tag = "admin",

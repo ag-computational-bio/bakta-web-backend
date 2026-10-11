@@ -211,6 +211,16 @@ mod tests {
                 assert!(operation["security"][0]["bearer_auth"].is_array(), "{path}");
             }
         }
+        // A failed job lookup in the statistics database answers 503.
+        for path in [
+            "/api/admin/jobs/{id}/retry",
+            "/api/admin/jobs/{id}/resubmit",
+        ] {
+            assert!(
+                paths[path]["post"]["responses"]["503"].is_object(),
+                "{path}"
+            );
+        }
         // The input statistics of the start request and the admin schemas use distinct names.
         let schemas = &doc["components"]["schemas"];
         assert!(schemas["InputStats"]["properties"]["total_length"].is_object());
