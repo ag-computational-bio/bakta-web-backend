@@ -100,3 +100,23 @@ pub struct JobDetail {
     /// Null when the workflow no longer exists.
     pub workflow: Option<WorkflowView>,
 }
+
+/// Result of a retry, resubmit or stop.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorkflowActionResponse {
+    pub workflow_name: String,
+    pub phase: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct DeleteJobParams {
+    /// Also delete the job's S3 objects. Default `false`.
+    pub purge_data: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeleteJobResponse {
+    pub deleted_workflow: bool,
+    pub purged_objects: u64,
+}

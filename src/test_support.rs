@@ -60,12 +60,7 @@ pub fn test_handler_full(
     });
     Arc::new(BaktaHandler {
         admin_auth,
-        s3_handler: S3Handler::new(
-            "access".to_string(),
-            "secret".to_string(),
-            "bucket".to_string(),
-            s3_url.to_string(),
-        ),
+        s3_handler: test_s3_handler(s3_url),
         version: crate::api_structs::VersionResponse {
             tool: "1.9.0".to_string(),
             db: "5.1".to_string(),
@@ -80,6 +75,23 @@ pub fn test_handler_full(
         },
         state_handler,
     })
+}
+
+/// S3 handler for tests. An `http://s3.test:<port>` endpoint sends the
+/// bucket requests to a local mock server on that port.
+fn test_s3_handler(s3_url: &str) -> S3Handler {
+    let handler = S3Handler::new(
+        "access".to_string(),
+        "secret".to_string(),
+        "bucket".to_string(),
+        s3_url.to_string(),
+    );
+    match s3_url.strip_prefix("http://s3.test:") {
+        Some(port) => {
+            handler.with_bucket_host_address(([127, 0, 0, 1], port.parse().unwrap()).into())
+        }
+        None => handler,
+    }
 }
 
 /// Same routes as main.rs, without swagger, metrics middleware and CORS.

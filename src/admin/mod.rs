@@ -2,6 +2,7 @@
 
 pub mod api_paths;
 pub mod auth;
+pub mod operations;
 pub mod structs;
 #[cfg(test)]
 mod test_keys;
@@ -13,7 +14,7 @@ use axum::{
     extract::FromRequestParts,
     http::{StatusCode, header::AUTHORIZATION, request::Parts},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 
 use crate::{bakta_handler::BaktaHandler, stats::StatsDb};
@@ -28,8 +29,14 @@ pub fn router() -> Router<Arc<BaktaHandler>> {
         .route("/stats/timeseries", get(api_paths::stats_timeseries))
         .route("/stats/versions", get(api_paths::stats_versions))
         .route("/jobs", get(api_paths::list_jobs))
-        .route("/jobs/{id}", get(api_paths::get_job))
+        .route(
+            "/jobs/{id}",
+            get(api_paths::get_job).delete(operations::delete_job),
+        )
         .route("/jobs/{id}/logs", get(api_paths::job_logs))
+        .route("/jobs/{id}/retry", post(operations::retry_job))
+        .route("/jobs/{id}/resubmit", post(operations::resubmit_job))
+        .route("/jobs/{id}/stop", post(operations::stop_job))
 }
 
 #[derive(Debug)]
@@ -38,8 +45,6 @@ pub enum AdminError {
     Unauthorized(String),
     Forbidden,
     NotFound(String),
-    // Used by the workflow operations, added in the next step.
-    #[allow(dead_code)]
     Conflict(String),
     Unavailable(String),
     BadGateway(String),
@@ -62,8 +67,6 @@ impl AdminError {
         AdminError::Unavailable("Statistics database error".to_string())
     }
 
-    // Used by the workflow operations, added in the next step.
-    #[allow(dead_code)]
     /// Maps an Argo API error to 404, 409 or 502.
     pub fn argo(error: anyhow::Error) -> Self {
         let status = error

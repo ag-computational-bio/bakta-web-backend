@@ -351,8 +351,6 @@ impl S3Handler {
     }
 }
 
-// Used by the admin API once its routes are added.
-#[allow(dead_code)]
 fn xml_unescape(value: &str) -> String {
     value
         .replace("&lt;", "<")
@@ -363,12 +361,8 @@ fn xml_unescape(value: &str) -> String {
 }
 
 /// Upper limit of list pages for one purge, so a broken listing cannot loop forever.
-// Used by the admin API once its routes are added.
-#[allow(dead_code)]
 const MAX_LIST_PAGES: usize = 100;
 
-// Used by the admin API once its routes are added.
-#[allow(dead_code)]
 impl S3Handler {
     fn bucket_url(&self) -> String {
         let protocol = if self.is_ssl { "https://" } else { "http://" };
@@ -461,8 +455,6 @@ impl S3Handler {
     }
 }
 
-// Used by the admin API once its routes are added.
-#[allow(dead_code)]
 async fn presign(access_key: &str, secret_key: &str, method: Method, url: &str) -> Result<String> {
     let signer = aws::default_signer("s3", "RegionOne")
         .with_credential_provider(StaticCredentialProvider::new(access_key, secret_key));

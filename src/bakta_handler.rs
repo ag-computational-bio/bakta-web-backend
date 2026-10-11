@@ -784,6 +784,15 @@ impl StateHandler {
                 }
                 continue;
             }
+            // After an admin resubmit, two workflows carry the same job ID.
+            // The newer one describes the job.
+            if let Some(previous) = write_lock.get(&state.id)
+                && previous.workflowname.is_some()
+                && previous.workflowname != state.workflowname
+                && previous.started > state.started
+            {
+                continue;
+            }
             let previous_status = write_lock
                 .get(&state.id)
                 .and_then(|previous| previous.status.clone());

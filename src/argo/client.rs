@@ -370,8 +370,6 @@ impl ArgoClient {
 }
 
 /// Workflow operations used by the admin API.
-// The allow is removed when the admin routes are added.
-#[allow(dead_code)]
 impl ArgoClient {
     /// Fetches a live (not archived) workflow.
     pub async fn get_workflow(&self, workflow_name: &str) -> Result<ArgoWorkflow> {
@@ -387,6 +385,8 @@ impl ArgoClient {
     }
 
     /// Lists live workflows, optionally filtered by a Kubernetes label selector.
+    // Used by the workflow list and cleanup endpoints, added in the next step.
+    #[allow(dead_code)]
     pub async fn list_workflows(&self, label_selector: Option<&str>) -> Result<Vec<ArgoWorkflow>> {
         let mut url =
             url::Url::parse(&format!("{}/api/v1/workflows/{}", self.url, self.namespace))?;

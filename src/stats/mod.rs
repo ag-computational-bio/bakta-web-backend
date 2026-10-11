@@ -75,13 +75,9 @@ pub enum StatsEvent {
     Created(NewJob),
     Submitted(Box<SubmittedJob>),
     Status(StatusUpdate),
-    // Used by the workflow operations, added in the next step.
-    #[allow(dead_code)]
     Retried {
         id: Uuid,
     },
-    // Used by the workflow operations, added in the next step.
-    #[allow(dead_code)]
     Resubmitted {
         id: Uuid,
         workflow_name: String,
