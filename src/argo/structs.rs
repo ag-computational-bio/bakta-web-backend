@@ -198,4 +198,60 @@ pub struct WorkflowNodeStatus {
     pub phase: String,
     #[serde(rename = "startedAt", default)]
     pub started_at: Option<DateTime<Utc>>,
+    #[serde(rename = "finishedAt", default)]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Workflow as returned by the Argo workflow endpoints, reduced to the
+/// fields the admin API uses.
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArgoWorkflow {
+    #[serde(default)]
+    pub metadata: ArgoWorkflowMetadata,
+    #[serde(default)]
+    pub spec: ArgoWorkflowSpec,
+    #[serde(default)]
+    pub status: ArgoWorkflowStatus,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArgoWorkflowMetadata {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub creation_timestamp: Option<DateTime<Utc>>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArgoWorkflowSpec {
+    #[serde(default)]
+    pub workflow_template_ref: Option<WorkflowTemplateRef>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArgoWorkflowStatus {
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub nodes: HashMap<String, WorkflowNodeStatus>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgoWorkflowList {
+    #[serde(default)]
+    pub items: Option<Vec<ArgoWorkflow>>,
 }

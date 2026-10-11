@@ -7,8 +7,8 @@ use crate::{api_structs::ArgoStatus, bakta_handler::FullJobState};
 
 use super::{
     structs::{
-        Content, LogResult, SimpleStatusList, SubmitOptions, SubmitResult, SubmitWorkflowTemplate,
-        WorkflowDetails, WorkflowNodeStatus,
+        ArgoWorkflow, ArgoWorkflowList, Content, LogResult, SimpleStatusList, SubmitOptions,
+        SubmitResult, SubmitWorkflowTemplate, WorkflowDetails, WorkflowNodeStatus,
     },
     urls::{
         get_archived_workflow_url, get_delete_url_archived, get_delete_url_running,
@@ -366,6 +366,119 @@ impl ArgoClient {
             .await?;
 
         Ok(serde_json::from_slice(&response)?)
+    }
+}
+
+/// Workflow operations used by the admin API.
+// The allow is removed when the admin routes are added.
+#[allow(dead_code)]
+impl ArgoClient {
+    /// Fetches a live (not archived) workflow.
+    pub async fn get_workflow(&self, workflow_name: &str) -> Result<ArgoWorkflow> {
+        Ok(self
+            .client
+            .get(get_workflow_url(&self.url, &self.namespace, workflow_name))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ArgoWorkflow>()
+            .await?)
+    }
+
+    /// Lists live workflows, optionally filtered by a Kubernetes label selector.
+    pub async fn list_workflows(&self, label_selector: Option<&str>) -> Result<Vec<ArgoWorkflow>> {
+        let mut url =
+            url::Url::parse(&format!("{}/api/v1/workflows/{}", self.url, self.namespace))?;
+        url.query_pairs_mut().append_pair(
+            "fields",
+            "items.metadata.name,items.metadata.labels,items.metadata.creationTimestamp,items.spec.workflowTemplateRef,items.status.phase,items.status.startedAt,items.status.finishedAt,items.status.message",
+        );
+        if let Some(selector) = label_selector {
+            url.query_pairs_mut()
+                .append_pair("listOptions.labelSelector", selector);
+        }
+        let request = self
+            .client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", self.token));
+        Ok(request
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ArgoWorkflowList>()
+            .await?
+            .items
+            .unwrap_or_default())
+    }
+
+    async fn workflow_action(
+        &self,
+        workflow_name: &str,
+        action: &str,
+        body: serde_json::Value,
+    ) -> Result<ArgoWorkflow> {
+        Ok(self
+            .client
+            .put(format!(
+                "{}/{action}",
+                get_workflow_url(&self.url, &self.namespace, workflow_name)
+            ))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ArgoWorkflow>()
+            .await?)
+    }
+
+    /// Reruns the failed steps of a failed or errored workflow.
+    pub async fn retry_workflow(&self, workflow_name: &str) -> Result<ArgoWorkflow> {
+        self.workflow_action(
+            workflow_name,
+            "retry",
+            serde_json::json!({"name": workflow_name, "namespace": self.namespace}),
+        )
+        .await
+    }
+
+    /// Creates a new workflow with the same parameters and labels.
+    pub async fn resubmit_workflow(&self, workflow_name: &str) -> Result<ArgoWorkflow> {
+        self.workflow_action(
+            workflow_name,
+            "resubmit",
+            serde_json::json!({"name": workflow_name, "namespace": self.namespace, "memoized": false}),
+        )
+        .await
+    }
+
+    pub async fn terminate_workflow(&self, workflow_name: &str) -> Result<ArgoWorkflow> {
+        self.workflow_action(
+            workflow_name,
+            "terminate",
+            serde_json::json!({"name": workflow_name, "namespace": self.namespace}),
+        )
+        .await
+    }
+
+    /// Deletes a live workflow. Returns `false` when it does not exist.
+    pub async fn delete_workflow_by_name(&self, workflow_name: &str) -> Result<bool> {
+        let response = self
+            .client
+            .delete(get_delete_url_running(
+                &self.url,
+                &self.namespace,
+                workflow_name,
+            ))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        response.error_for_status()?;
+        Ok(true)
     }
 }
 

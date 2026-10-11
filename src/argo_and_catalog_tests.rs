@@ -242,3 +242,112 @@ async fn archived_logs_without_uid_are_empty() {
         .unwrap();
     assert!(entries.is_empty());
 }
+
+#[tokio::test]
+async fn admin_workflow_operations_use_the_argo_api() {
+    let server = MockServer::start().await;
+    let workflow = json!({
+        "metadata": {"name": "wf-1", "labels": {"jobid": "abc"}},
+        "spec": {"workflowTemplateRef": {"name": "bakta-job-1.9.0"}},
+        "status": {"phase": "Failed", "startedAt": "2026-01-01T00:00:00Z",
+                   "finishedAt": "2026-01-01T00:05:00Z", "message": "boom",
+                   "nodes": {"n": {"id": "n", "name": "wf-1", "type": "Pod", "phase": "Failed",
+                                   "finishedAt": "2026-01-01T00:05:00Z", "message": "OOMKilled"}}}
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta/wf-1"))
+        .and(header("authorization", "Bearer tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(workflow.clone()))
+        .mount(&server)
+        .await;
+    for action in ["retry", "resubmit", "terminate"] {
+        Mock::given(method("PUT"))
+            .and(path(format!("/api/v1/workflows/bakta/wf-1/{action}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "metadata": {"name": format!("wf-{action}")}, "status": {"phase": "Running"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/gone"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .and(query_param(
+            "listOptions.labelSelector",
+            "bakta-environment=staging",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [workflow]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": null})))
+        .mount(&server)
+        .await;
+    let client = client(&server);
+
+    let details = client.get_workflow("wf-1").await.unwrap();
+    assert_eq!(details.status.phase, "Failed");
+    assert_eq!(details.status.message.as_deref(), Some("boom"));
+    assert_eq!(
+        details.status.nodes["n"].message.as_deref(),
+        Some("OOMKilled")
+    );
+    assert_eq!(
+        details.spec.workflow_template_ref.unwrap().name,
+        "bakta-job-1.9.0"
+    );
+    assert_eq!(
+        client.retry_workflow("wf-1").await.unwrap().metadata.name,
+        "wf-retry"
+    );
+    assert_eq!(
+        client
+            .resubmit_workflow("wf-1")
+            .await
+            .unwrap()
+            .metadata
+            .name,
+        "wf-resubmit"
+    );
+    assert_eq!(
+        client
+            .terminate_workflow("wf-1")
+            .await
+            .unwrap()
+            .status
+            .phase,
+        "Running"
+    );
+    assert!(client.delete_workflow_by_name("wf-1").await.unwrap());
+    assert!(!client.delete_workflow_by_name("gone").await.unwrap());
+    let listed = client
+        .list_workflows(Some("bakta-environment=staging"))
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].metadata.labels["jobid"], "abc");
+    assert!(client.list_workflows(None).await.unwrap().is_empty());
+
+    let requests = server.received_requests().await.unwrap();
+    let resubmit = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/resubmit"))
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&resubmit.body).unwrap();
+    assert_eq!(
+        body,
+        json!({"name": "wf-1", "namespace": "bakta", "memoized": false})
+    );
+    assert!(client.get_workflow("missing").await.is_err());
+}
