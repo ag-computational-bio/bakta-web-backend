@@ -29,6 +29,7 @@ pub fn router() -> Router<Arc<BaktaHandler>> {
         .route("/stats/timeseries", get(api_paths::stats_timeseries))
         .route("/stats/versions", get(api_paths::stats_versions))
         .route("/stats/runtimes", get(api_paths::stats_runtimes))
+        .route("/stats/inputs", get(api_paths::stats_inputs))
         .route("/jobs", get(api_paths::list_jobs))
         .route(
             "/jobs/{id}",

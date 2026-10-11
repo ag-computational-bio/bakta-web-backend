@@ -12,6 +12,7 @@ use super::{Admin, AdminError, parse_environment, stats_db, structs::*};
 use crate::{
     argo::structs::ArgoWorkflow,
     bakta_handler::{BaktaHandler, argo_v2_pod_name, workflow_kind_from_label_value},
+    stats::inputs::InputStats,
     stats::queries::{
         JobList, JobListQuery, JobSort, StatsFilter, StatsSummary, Timeseries, VersionList,
     },
@@ -184,6 +185,37 @@ pub async fn stats_runtimes(
     let db = stats_db(&state)?;
     Ok(Json(
         db.runtimes(&filter, &kinds)
+            .await
+            .map_err(AdminError::database)?,
+    ))
+}
+
+/// Input size and sequence count statistics.
+#[utoipa::path(
+    get,
+    path = "/api/admin/stats/inputs",
+    operation_id = "getAdminStatsInputs",
+    params(KindStatsQuery),
+    responses(
+        (status = 200, body = InputStats),
+        (status = 400, body = AdminErrorResponse),
+        (status = 401, body = AdminErrorResponse),
+        (status = 403, body = AdminErrorResponse),
+        (status = 503, body = AdminErrorResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "admin",
+)]
+pub async fn stats_inputs(
+    _admin: Admin,
+    State(state): State<Arc<BaktaHandler>>,
+    Query(query): Query<KindStatsQuery>,
+) -> Result<Json<InputStats>, AdminError> {
+    let filter = stats_filter(query.environment.as_deref(), query.from, query.to)?;
+    let kinds = comma_list(query.workflow_kind.as_deref());
+    let db = stats_db(&state)?;
+    Ok(Json(
+        db.inputs(&filter, &kinds)
             .await
             .map_err(AdminError::database)?,
     ))

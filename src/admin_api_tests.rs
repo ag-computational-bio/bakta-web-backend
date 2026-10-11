@@ -254,6 +254,19 @@ async fn admin_stats_endpoints_return_the_contract_shapes() {
     assert_eq!(runtimes["by_input_size"][0]["max_bp"], 1_000_000);
     assert_eq!(runtimes["slowest"][0]["organism"], "Escherichia coli");
 
+    let (status, inputs) = admin_call(
+        &setup,
+        "GET",
+        &format!("/api/admin/stats/inputs?environment={env}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{inputs}");
+    assert_eq!(inputs["jobs"], 3);
+    assert_eq!(inputs["sequence_count"]["min"], 2);
+    assert_eq!(inputs["size_histogram"][1]["jobs"], 0);
+    assert_eq!(inputs["largest"][0]["status"], "succeeded");
+
     for uri in [
         "/api/admin/stats/summary?environment=bad%20env",
         "/api/admin/stats/timeseries?interval=hour",

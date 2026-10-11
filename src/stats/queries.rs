@@ -163,6 +163,8 @@ pub struct TimeseriesBucket {
     pub runtime_p90: Option<f64>,
     pub runtime_avg: Option<f64>,
     pub total_input_bp: i64,
+    pub input_p50_bp: Option<f64>,
+    pub input_avg_bp: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -406,7 +408,9 @@ impl StatsDb {
                 percentile_cont(0.9) WITHIN GROUP (ORDER BY runtime_seconds)
                     FILTER (WHERE outcome = 'succeeded') AS runtime_p90,
                 avg(runtime_seconds) FILTER (WHERE outcome = 'succeeded') AS runtime_avg,
-                COALESCE(sum(total_length), 0)::bigint AS total_input_bp
+                COALESCE(sum(total_length), 0)::bigint AS total_input_bp,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY total_length) AS input_p50_bp,
+                avg(total_length)::double precision AS input_avg_bp
              FROM jobs",
             );
         push_filter(&mut builder, filter);

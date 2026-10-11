@@ -2,6 +2,7 @@
 
 use super::{
     StatsDb,
+    inputs::LengthStats,
     queries::*,
     test_db::{test_db, unique_environment},
 };
@@ -437,4 +438,88 @@ async fn runtimes_use_succeeded_jobs_and_fixed_buckets() {
         .unwrap();
     assert_eq!(series.buckets[0].runtime_p50, Some(300.0));
     assert!(series.buckets[0].runtime_p90.unwrap() > 300.0);
+}
+
+#[tokio::test]
+async fn inputs_describe_sizes_and_sequence_counts() {
+    let Some(db) = test_db("inputs_describe_sizes_and_sequence_counts").await else {
+        return;
+    };
+    let env = unique_environment();
+    for (length, sequences, kind) in [
+        (500_000, Some(1), "bakta"),
+        (3_000_000, Some(3), "bakta"),
+        (5_000_000, Some(150), "bakta"),
+        (15_000_000, None, "baktfold"),
+    ] {
+        let id = insert(
+            &db,
+            &env,
+            Row {
+                length: Some(length),
+                ..row(kind, "succeeded", day(9, 1))
+            },
+        )
+        .await;
+        sqlx::query("UPDATE jobs SET sequence_count = $2 WHERE id = $1")
+            .bind(id)
+            .bind(sequences)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+    insert(&db, &env, row("bakta", "created", day(9, 2))).await;
+
+    let stats = db.inputs(&filter(&env), &[]).await.unwrap();
+    assert_eq!(stats.jobs, 4);
+    assert_eq!(stats.total_bp, 23_500_000);
+    assert_eq!(stats.total_length.min, Some(500_000.0));
+    assert_eq!(stats.total_length.max, Some(15_000_000.0));
+    assert_eq!(stats.total_length.p50, Some(4_000_000.0));
+    assert_eq!(stats.sequence_count.min, Some(1));
+    assert_eq!(stats.sequence_count.max, Some(150));
+    assert_eq!(stats.sequence_count.p50, Some(3.0));
+    let sizes: Vec<_> = stats
+        .size_histogram
+        .iter()
+        .map(|bucket| bucket.jobs)
+        .collect();
+    assert_eq!(sizes, [1, 0, 1, 1, 0, 0, 1]);
+    let sequences: Vec<_> = stats
+        .sequence_histogram
+        .iter()
+        .map(|bucket| bucket.jobs)
+        .collect();
+    assert_eq!(sequences, [1, 1, 0, 0, 1, 0, 0]);
+    assert_eq!(stats.sequence_histogram[0].max_sequences, Some(1));
+    assert_eq!(stats.sequence_histogram[1].max_sequences, Some(5));
+    assert_eq!(stats.sequence_histogram[6].max_sequences, None);
+    assert_eq!(stats.by_workflow_kind[0].workflow_kind, "bakta");
+    assert_eq!(stats.by_workflow_kind[0].total_bp, 8_500_000);
+    assert_eq!(stats.by_workflow_kind[0].p50_sequences, Some(3.0));
+    assert_eq!(stats.largest[0].total_length, 15_000_000);
+    assert_eq!(stats.largest.len(), 4);
+
+    let bakta = db
+        .inputs(&filter(&env), &["bakta".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(bakta.jobs, 3);
+
+    let empty = db
+        .inputs(&filter(&unique_environment()), &[])
+        .await
+        .unwrap();
+    assert_eq!(empty.jobs, 0);
+    assert_eq!(empty.total_length, LengthStats::default());
+    assert_eq!(empty.sequence_count.avg, None);
+    assert_eq!(empty.size_histogram.len(), 7);
+    assert_eq!(empty.sequence_histogram.len(), 7);
+
+    let series = db
+        .timeseries(&filter(&env), Interval::Year, GroupBy::None)
+        .await
+        .unwrap();
+    assert_eq!(series.buckets[0].input_p50_bp, Some(4_000_000.0));
+    assert_eq!(series.buckets[0].input_avg_bp, Some(5_875_000.0));
 }

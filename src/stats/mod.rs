@@ -1,6 +1,7 @@
 //! Job statistics database: schema migrations, job lifecycle recording and
 //! the queries used by the admin API.
 
+pub mod inputs;
 pub mod queries;
 #[cfg(test)]
 mod queries_tests;
