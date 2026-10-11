@@ -10,8 +10,6 @@ use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-// Wired into the router in a later step.
-#[allow(dead_code)]
 mod admin;
 #[allow(clippy::upper_case_acronyms)]
 mod api_structs;
@@ -22,11 +20,9 @@ mod bakta_handler;
 mod metrics;
 mod openapi;
 mod s3_handler;
+mod stats;
 #[cfg(test)]
 mod stats_recording_tests;
-// Parts are used by the admin API, added in a later step.
-#[allow(dead_code)]
-mod stats;
 #[cfg(test)]
 mod test_support;
 mod v1;
@@ -104,25 +100,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let bakta_handler = Arc::new(
-        BaktaHandler::new(
-            dotenvy::var("ARGO_TOKEN")?,
-            dotenvy::var("ARGO_URL")?,
-            dotenvy::var("ARGO_NAMESPACE")?,
-            dotenvy::var("S3_ACCESS_KEY")?,
-            dotenvy::var("S3_SECRET_KEY")?,
-            dotenvy::var("S3_BUCKET")?,
-            dotenvy::var("S3_ENDPOINT")?,
-            dotenvy::var("BAKTA_VERSION")?,
-            dotenvy::var("DATABASE_VERSION")?,
-            dotenvy::var("BAKTFOLD_VERSION").unwrap_or_default(),
-            dotenvy::var("BAKTFOLD_DATABASE_VERSION").unwrap_or_default(),
-            dotenvy::var("BACKEND_VERSION")?,
-            environment,
-            stats,
-        )
-        .await,
-    );
+    let mut bakta_handler = BaktaHandler::new(
+        dotenvy::var("ARGO_TOKEN")?,
+        dotenvy::var("ARGO_URL")?,
+        dotenvy::var("ARGO_NAMESPACE")?,
+        dotenvy::var("S3_ACCESS_KEY")?,
+        dotenvy::var("S3_SECRET_KEY")?,
+        dotenvy::var("S3_BUCKET")?,
+        dotenvy::var("S3_ENDPOINT")?,
+        dotenvy::var("BAKTA_VERSION")?,
+        dotenvy::var("DATABASE_VERSION")?,
+        dotenvy::var("BAKTFOLD_VERSION").unwrap_or_default(),
+        dotenvy::var("BAKTFOLD_DATABASE_VERSION").unwrap_or_default(),
+        dotenvy::var("BACKEND_VERSION")?,
+        environment,
+        stats,
+    )
+    .await;
+    bakta_handler.admin_auth = match dotenvy::var("ADMIN_OIDC_ISSUER") {
+        Ok(issuer) if !issuer.is_empty() => Some(Arc::new(admin::auth::AdminAuth::new(
+            admin::auth::AdminAuthConfig {
+                issuer,
+                client_id: dotenvy::var("ADMIN_OIDC_CLIENT_ID")
+                    .unwrap_or_else(|_| "bakta-admin".to_string()),
+                group: dotenvy::var("ADMIN_GROUP").unwrap_or_else(|_| "bakta-admin".to_string()),
+            },
+        ))),
+        _ => {
+            tracing::info!("ADMIN_OIDC_ISSUER is not set, the admin API is disabled");
+            None
+        }
+    };
+    let bakta_handler = Arc::new(bakta_handler);
 
     tracing::info!(?socket_address, "Starting bakta web backend");
     tracing::info!(?metrics_socket_address, "Starting private metrics endpoint");
@@ -150,6 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v2/job/result", post(v2::api_paths::query_result))
         .route("/api/v2/job/start", post(v2::api_paths::start_job))
         .route("/api/v2/version", get(v2::api_paths::version))
+        .nest("/api/admin", admin::router())
         .with_state(bakta_handler)
         .layer(middleware::from_fn_with_state(
             metrics_state,

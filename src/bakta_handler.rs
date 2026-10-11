@@ -101,6 +101,8 @@ impl From<&FullJobState> for Option<JobStatus> {
 
 pub struct BaktaHandler {
     pub s3_handler: S3Handler,
+    /// Token validation for the admin API. `None` disables the admin API.
+    pub admin_auth: Option<Arc<crate::admin::auth::AdminAuth>>,
     pub version: VersionResponse,
     pub version_v2: V2VersionResponse,
     pub state_handler: Arc<StateHandler>,
@@ -711,6 +713,7 @@ impl BaktaHandler {
 
         BaktaHandler {
             s3_handler,
+            admin_auth: None,
             version: VersionResponse {
                 tool: bakta_version.clone(),
                 db: database_version.clone(),

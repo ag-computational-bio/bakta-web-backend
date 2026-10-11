@@ -254,6 +254,8 @@ pub struct JobList {
     pub items: Vec<JobListItem>,
 }
 
+// Used by the job detail endpoint, added in the next step.
+#[allow(dead_code)]
 /// Full statistics record of one job.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, FromRow)]
 pub struct JobRecord {
@@ -458,6 +460,8 @@ impl StatsDb {
         Ok(JobList { total, items })
     }
 
+    // Used by the job detail endpoint, added in the next step.
+    #[allow(dead_code)]
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobRecord>> {
         Ok(sqlx::query_as("SELECT * FROM jobs WHERE id = $1")
             .bind(id)

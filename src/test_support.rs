@@ -35,6 +35,15 @@ pub fn test_handler_with_stats(
     s3_url: &str,
     stats: crate::stats::StatsRecorder,
 ) -> Arc<BaktaHandler> {
+    test_handler_full(argo_url, s3_url, stats, None)
+}
+
+pub fn test_handler_full(
+    argo_url: &str,
+    s3_url: &str,
+    stats: crate::stats::StatsRecorder,
+    admin_auth: Option<Arc<crate::admin::auth::AdminAuth>>,
+) -> Arc<BaktaHandler> {
     let state_handler = Arc::new(StateHandler {
         job_state: RwLock::new(HashMap::new()),
         argo_client: Arc::new(ArgoClient::new(
@@ -50,6 +59,7 @@ pub fn test_handler_with_stats(
         stats,
     });
     Arc::new(BaktaHandler {
+        admin_auth,
         s3_handler: S3Handler::new(
             "access".to_string(),
             "secret".to_string(),
@@ -90,6 +100,7 @@ pub fn test_router(handler: Arc<BaktaHandler>) -> Router {
         .route("/api/v2/job/result", post(v2::api_paths::query_result))
         .route("/api/v2/job/start", post(v2::api_paths::start_job))
         .route("/api/v2/version", get(v2::api_paths::version))
+        .nest("/api/admin", crate::admin::router())
         .with_state(handler)
 }
 
