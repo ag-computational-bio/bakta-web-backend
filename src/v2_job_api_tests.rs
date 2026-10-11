@@ -11,7 +11,7 @@ use serde_json::json;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{method, path, query_param},
 };
 
 #[tokio::test]
@@ -303,4 +303,43 @@ async fn delete_of_unknown_job_succeeds() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn delete_removes_a_workflow_the_job_state_does_not_know() {
+    let argo = MockServer::start().await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let id = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .and(query_param("listOptions.labelSelector", format!("jobid={id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+            {"metadata": {"name": "wf-unknown", "labels": {"jobid": id.to_string()}}, "status": {"phase": "Running"}}
+        ]})))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-unknown"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let router = test_router(handler.clone());
+    let (status, body) = call(
+        &router,
+        "DELETE",
+        &format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
 }

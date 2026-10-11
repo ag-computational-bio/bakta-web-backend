@@ -308,7 +308,15 @@ async fn result_checks_secret_and_status_and_signs_all_files() {
 
 #[tokio::test]
 async fn delete_checks_secret_and_removes_state() {
-    let handler = test_handler("http://127.0.0.1:1", "https://s3.example.com");
+    // The job has no workflow name, so the delete looks for its workflows.
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
     let id = insert_state(&handler, v1_state(None)).await;
     let router = test_router(handler.clone());
     let (status, _) = call(

@@ -13,7 +13,9 @@ use crate::{
         InitRequest, InitResponse, Job, ListRequest, ListResponse, ResultResponse, StartRequest,
         VersionResponse,
     },
-    bakta_handler::{BaktaHandler, JobAlreadyStarted, REGEX, SubmissionUnknown},
+    bakta_handler::{
+        BaktaHandler, JobAlreadyStarted, REGEX, SubmissionUnknown, WorkflowLookupFailed,
+    },
 };
 
 /// Delete an existing V1 Bakta job.
@@ -27,7 +29,8 @@ use crate::{
     responses(
         (status = 200, description = "Job deleted successfully."),
         (status = 400, body = String, description = "Job not found, unauthorized, or deletion failed."),
-        (status = 409, body = String, description = "The result of an earlier start request is not known yet.")
+        (status = 409, body = String, description = "The result of an earlier start request is not known yet."),
+        (status = 503, body = String, description = "The job has no known workflow and its workflows could not be looked up in Argo.")
     ),
     tag = "v1",
 )]
@@ -42,6 +45,8 @@ pub async fn delete_job(
         .map_err(|e| {
             let status = if e.is::<SubmissionUnknown>() {
                 StatusCode::CONFLICT
+            } else if e.is::<WorkflowLookupFailed>() {
+                StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::BAD_REQUEST
             };

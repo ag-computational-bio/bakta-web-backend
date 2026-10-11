@@ -189,6 +189,19 @@ impl std::fmt::Display for SubmissionUnknown {
 
 impl std::error::Error for SubmissionUnknown {}
 
+/// Returned when a delete cannot list the job's workflows in Argo, so it
+/// cannot tell whether a workflow still runs.
+#[derive(Debug)]
+pub struct WorkflowLookupFailed;
+
+impl std::fmt::Display for WorkflowLookupFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Could not look up the workflows of the job, try again later")
+    }
+}
+
+impl std::error::Error for WorkflowLookupFailed {}
+
 /// True when a failed submit may still have created a workflow: timeouts,
 /// errors after the request was sent, gateway errors and unreadable
 /// responses. Connection failures and error answers from Argo created nothing.
@@ -1314,7 +1327,11 @@ impl StateHandler {
             if self.is_submission_unknown(&job_id) {
                 return Err(SubmissionUnknown.into());
             }
-            self.argo_client.delete_workflow(state).await?;
+            if state.workflowname.is_some() || state.archived {
+                self.argo_client.delete_workflow(state).await?;
+            } else {
+                self.delete_job_workflows(job_id).await?;
+            }
         }
         if write_lock.remove(&job_id).is_some() {
             self.stats.record(StatsEvent::Deleted { id: job_id });
@@ -1447,6 +1464,31 @@ impl StateHandler {
                 Err(SubmissionUnknown.into())
             }
         }
+    }
+
+    /// Deletes the live workflows with the job's `jobid` label and returns
+    /// true when one was deleted. Deletes use it for jobs without a known
+    /// workflow name, because a start may have created a workflow that the
+    /// backend does not know, for example after a restart. Fails with
+    /// `WorkflowLookupFailed` when Argo cannot list the workflows.
+    pub(crate) async fn delete_job_workflows(&self, job_id: Uuid) -> Result<bool> {
+        let selector = format!("jobid={job_id}");
+        let workflows = self
+            .argo_client
+            .list_workflows(Some(&selector))
+            .await
+            .map_err(|error| {
+                tracing::warn!(job_id = %job_id, %error, "job_workflow_lookup_failed");
+                anyhow::Error::new(WorkflowLookupFailed)
+            })?;
+        let mut deleted = false;
+        for workflow in workflows {
+            deleted |= self
+                .argo_client
+                .delete_workflow_by_name(&workflow.metadata.name)
+                .await?;
+        }
+        Ok(deleted)
     }
 
     fn mark_submission_unknown(&self, job_id: Uuid) {

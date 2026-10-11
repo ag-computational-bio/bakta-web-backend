@@ -305,6 +305,11 @@ async fn delete_removes_the_workflow_and_can_purge_data() {
     );
 
     let unstarted = v2_state(&setup.handler, WorkflowKind::Bakta, None).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+        .mount(&argo)
+        .await;
     let (status, body) = admin_call(
         &setup,
         "DELETE",
@@ -336,6 +341,11 @@ async fn start_is_refused_while_an_admin_delete_runs() {
             "metadata": {"name": "wf", "creationTimestamp": Utc::now().to_rfc3339()}
         })))
         .expect(0)
+        .mount(&argo)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
         .mount(&argo)
         .await;
     let s3 = MockServer::start().await;
@@ -439,6 +449,11 @@ async fn delete_marks_database_only_jobs_as_deleted() {
         return;
     };
     let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+        .mount(&argo)
+        .await;
     Mock::given(method("DELETE"))
         .respond_with(ResponseTemplate::new(404))
         .mount(&argo)
@@ -470,6 +485,118 @@ async fn delete_marks_database_only_jobs_as_deleted() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     panic!("job was not marked as deleted");
+}
+
+#[tokio::test]
+async fn delete_removes_a_workflow_the_backend_does_not_know() {
+    let Some(db) = test_db("delete_removes_a_workflow_the_backend_does_not_know").await else {
+        return;
+    };
+    // Argo created a workflow, but the backend restarted before a poll found
+    // it: the database has a created job without a workflow name.
+    let id = Uuid::new_v4();
+    db.apply(&StatsEvent::Created(NewJob {
+        id,
+        environment: unique_environment(),
+        workflow_kind: "bakta".to_string(),
+        api_version: "v2".to_string(),
+        name: None,
+        created_at: Utc::now(),
+    }))
+    .await
+    .unwrap();
+    let argo = MockServer::start().await;
+    let running = listed_workflow("wf-unknown", "Running", Some(&id.to_string()), None);
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .and(query_param(
+            "listOptions.labelSelector",
+            format!("jobid={id}"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [running]})))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-unknown"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let s3 = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            "<ListBucketResult><Contents><Key>jobs/{id}/inputs/a</Key></Contents><IsTruncated>false</IsTruncated></ListBucketResult>"
+        )))
+        .mount(&s3)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&s3)
+        .await;
+    let s3_url = format!("http://s3.test:{}", s3.address().port());
+    let setup = admin_setup(&argo.uri(), &s3_url, Some(db.clone())).await;
+
+    let (status, body) = admin_call(
+        &setup,
+        "DELETE",
+        &format!("/api/admin/jobs/{id}?purge_data=true"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"deleted_workflow": true, "purged_objects": 1}));
+}
+
+#[tokio::test]
+async fn delete_is_refused_when_the_workflow_lookup_fails() {
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let s3 = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&s3)
+        .await;
+    let s3_url = format!("http://s3.test:{}", s3.address().port());
+    let setup = admin_setup(&argo.uri(), &s3_url, None).await;
+    let id = v2_state(&setup.handler, WorkflowKind::Bakta, None).await;
+
+    let (status, body) = admin_call(
+        &setup,
+        "DELETE",
+        &format!("/api/admin/jobs/{id}?purge_data=true"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    for uri in [
+        format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+        format!("/api/v1/job/delete?jobID={id}&secret={TEST_SECRET}"),
+    ] {
+        let (status, body) = call(&setup.router, "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
+    assert!(
+        setup
+            .handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
 }
 
 fn listed_workflow(

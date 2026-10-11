@@ -9,7 +9,9 @@ use axum::{
 use reqwest::StatusCode;
 
 use crate::{
-    bakta_handler::{BaktaHandler, JobAlreadyStarted, REGEX, SubmissionUnknown},
+    bakta_handler::{
+        BaktaHandler, JobAlreadyStarted, REGEX, SubmissionUnknown, WorkflowLookupFailed,
+    },
     v2::api_structs::{
         JobReference, UploadLink, V2InitRequest, V2InitResponse, V2ListRequest, V2ListResponse,
         V2LogsResponse, V2ResultResponse, V2StartRequest, V2VersionResponse,
@@ -242,7 +244,8 @@ pub async fn job_logs(
     responses(
         (status = 200, body = ()),
         (status = 400, body = String),
-        (status = 409, body = String, description = "The result of an earlier start request is not known yet.")
+        (status = 409, body = String, description = "The result of an earlier start request is not known yet."),
+        (status = 503, body = String, description = "The job has no known workflow and its workflows could not be looked up in Argo.")
     ),
     tag = "v2",
 )]
@@ -257,6 +260,8 @@ pub async fn delete_job(
         .map_err(|e| {
             let status = if e.is::<SubmissionUnknown>() {
                 StatusCode::CONFLICT
+            } else if e.is::<WorkflowLookupFailed>() {
+                StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::BAD_REQUEST
             };

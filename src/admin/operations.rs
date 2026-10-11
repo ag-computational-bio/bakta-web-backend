@@ -15,7 +15,9 @@ use super::{
 use crate::{
     api_structs::ArgoStatus,
     argo::structs::ArgoWorkflow,
-    bakta_handler::{BaktaHandler, FullJobState, SubmissionUnknown, state_reference_time},
+    bakta_handler::{
+        BaktaHandler, FullJobState, SubmissionUnknown, WorkflowLookupFailed, state_reference_time,
+    },
     retention::{data_expires_at, is_data_available, reference_time},
     stats::StatsEvent,
     workflow_catalog::is_bakta_web_template,
@@ -349,7 +351,8 @@ pub async fn resume_job(
         (status = 403, body = AdminErrorResponse),
         (status = 404, body = AdminErrorResponse),
         (status = 409, body = AdminErrorResponse, description = "The job is being started, or the result of an earlier start request is not known yet."),
-        (status = 502, body = AdminErrorResponse)
+        (status = 502, body = AdminErrorResponse),
+        (status = 503, body = AdminErrorResponse, description = "The job has no known workflow and its workflows could not be looked up in Argo, or the statistics database failed.")
     ),
     security(("bearer_auth" = [])),
     tag = "admin",
@@ -385,7 +388,14 @@ pub async fn delete_job(
             .delete_workflow_by_name(name)
             .await
             .map_err(AdminError::argo)?,
-        (_, None) => false,
+        // A start may have created a workflow that the backend does not know.
+        (_, None) => handler.delete_job_workflows(id).await.map_err(|error| {
+            if error.is::<WorkflowLookupFailed>() {
+                AdminError::Unavailable(error.to_string())
+            } else {
+                AdminError::argo(error)
+            }
+        })?,
     };
     // Without S3 data there is nothing to list or purge.
     let purge = params.purge_data.unwrap_or(false)
