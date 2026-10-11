@@ -289,20 +289,63 @@ fn is_state_expired(state: &FullJobState, now: DateTime<Utc>) -> bool {
         .unwrap_or(false)
 }
 
-/// Removes expired jobs and returns their IDs.
+/// Removes expired jobs and returns their IDs and workflow names.
 fn purge_expired_states(
     job_state: &mut HashMap<Uuid, FullJobState>,
     now: DateTime<Utc>,
-) -> Vec<Uuid> {
+) -> Vec<(Uuid, Option<String>)> {
     let mut expired = Vec::new();
     job_state.retain(|id, state| {
         let keep = !is_state_expired(state, now);
         if !keep {
-            expired.push(*id);
+            expired.push((*id, state.workflowname.clone()));
         }
         keep
     });
     expired
+}
+
+fn job_id_label(item: &SimpleStatus) -> Option<Uuid> {
+    item.metadata
+        .labels
+        .get("jobid")
+        .and_then(|value| Uuid::from_str(value).ok())
+}
+
+/// The current workflow of each job in a workflow list. After a resubmit,
+/// several workflows carry the same job ID. The workflow recorded in the job
+/// state is the current one. Without a recorded workflow, the newest one is.
+fn current_workflows(
+    job_state: &HashMap<Uuid, FullJobState>,
+    items: &[SimpleStatus],
+) -> HashMap<Uuid, String> {
+    let mut by_job = HashMap::<Uuid, Vec<&SimpleStatus>>::new();
+    for item in items {
+        if let Some(id) = job_id_label(item) {
+            by_job.entry(id).or_default().push(item);
+        }
+    }
+    by_job
+        .into_iter()
+        .filter_map(|(id, workflows)| {
+            let name = match job_state
+                .get(&id)
+                .and_then(|state| state.workflowname.clone())
+            {
+                Some(recorded) => workflows
+                    .iter()
+                    .any(|item| item.metadata.name == recorded)
+                    .then_some(recorded)?,
+                None => workflows
+                    .iter()
+                    .max_by_key(|item| item.status.started_at)?
+                    .metadata
+                    .name
+                    .clone(),
+            };
+            Some((id, name))
+        })
+        .collect()
 }
 
 const MAX_ERROR_MESSAGE_LENGTH: usize = 500;
@@ -780,37 +823,39 @@ impl StateHandler {
         items: Vec<SimpleStatus>,
         now: DateTime<Utc>,
     ) {
-        let mut live = HashMap::<Uuid, LiveWorkflow>::new();
-        for item in &items {
-            let Some(id) = item
-                .metadata
-                .labels
-                .get("jobid")
-                .and_then(|value| Uuid::from_str(value).ok())
-            else {
-                continue;
-            };
-            let workflow = LiveWorkflow {
-                name: item.metadata.name.clone(),
-                phase: item.status.phase.clone(),
-                started_at: item.status.started_at,
-            };
-            // With two workflows for one job (after a resubmit), keep the newer one.
-            if live
-                .get(&id)
-                .is_none_or(|known| known.started_at < workflow.started_at)
-            {
-                live.insert(id, workflow);
-            }
-        }
+        let mut write_lock = self.job_state.write().await;
+        let current = current_workflows(&write_lock, &items);
+        let is_current = |item: &SimpleStatus| {
+            job_id_label(item)
+                .and_then(|id| current.get(&id))
+                .is_some_and(|name| *name == item.metadata.name)
+        };
+        let live = items
+            .iter()
+            .filter(|item| is_current(item))
+            .filter_map(|item| {
+                Some((
+                    job_id_label(item)?,
+                    LiveWorkflow {
+                        name: item.metadata.name.clone(),
+                        phase: item.status.phase.clone(),
+                        started_at: item.status.started_at,
+                    },
+                ))
+            })
+            .collect();
         *self
             .live_workflows
             .write()
             .expect("live workflows lock poisoned") = live;
 
-        let mut write_lock = self.job_state.write().await;
         let mut expired = Vec::new();
         for item in items {
+            // Superseded workflows of a job (after a resubmit) never change
+            // or expire the job.
+            if !is_current(&item) {
+                continue;
+            }
             let environment = item.metadata.labels.get("bakta-environment").cloned();
             let finished_at = item.status.finished_at;
             let message = item.status.message.clone();
@@ -819,17 +864,8 @@ impl StateHandler {
             };
             if is_state_expired(&state, now) {
                 if write_lock.remove(&state.id).is_some() {
-                    expired.push(state.id);
+                    expired.push((state.id, state.workflowname.clone()));
                 }
-                continue;
-            }
-            // After an admin resubmit, two workflows carry the same job ID.
-            // The newer one describes the job.
-            if let Some(previous) = write_lock.get(&state.id)
-                && previous.workflowname.is_some()
-                && previous.workflowname != state.workflowname
-                && previous.started > state.started
-            {
                 continue;
             }
             let previous_status = write_lock
@@ -1207,9 +1243,9 @@ impl StateHandler {
         })
     }
 
-    fn record_expired(&self, expired: Vec<Uuid>) {
-        for id in expired {
-            self.stats.record(StatsEvent::Expired { id });
+    fn record_expired(&self, expired: Vec<(Uuid, Option<String>)>) {
+        for (id, workflow_name) in expired {
+            self.stats.record(StatsEvent::Expired { id, workflow_name });
         }
     }
 
@@ -1885,7 +1921,7 @@ mod tests {
 
         let expired = purge_expired_states(&mut job_state, now);
 
-        assert_eq!(expired, vec![expired_id]);
+        assert_eq!(expired, vec![(expired_id, None)]);
 
         assert!(!job_state.contains_key(&expired_id));
         assert!(job_state.contains_key(&fresh_id));

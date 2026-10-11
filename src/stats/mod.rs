@@ -88,8 +88,11 @@ pub enum StatsEvent {
     Deleted {
         id: Uuid,
     },
+    /// `workflow_name` is the job's workflow, if any. The record is only
+    /// changed when it still points to this workflow.
     Expired {
         id: Uuid,
+        workflow_name: Option<String>,
     },
 }
 
@@ -181,7 +184,8 @@ impl StatsDb {
                              ELSE GREATEST(0, EXTRACT(EPOCH FROM ($5 - COALESCE(started_at, $4))))::double precision END,
                          queue_seconds = GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(started_at, $4) - COALESCE(submitted_at, $4))))::double precision,
                          updated_at = now()
-                     WHERE id = $1 AND status NOT IN ('deleted', 'expired')",
+                     WHERE id = $1 AND status NOT IN ('deleted', 'expired')
+                         AND (workflow_name IS NULL OR workflow_name = $3)",
                 )
                 .bind(update.job.id)
                 .bind(update.status)
@@ -227,12 +231,14 @@ impl StatsDb {
                     .execute(&self.pool)
                     .await?;
             }
-            StatsEvent::Expired { id } => {
+            StatsEvent::Expired { id, workflow_name } => {
                 sqlx::query(
                     "UPDATE jobs SET status = 'expired', updated_at = now()
-                     WHERE id = $1 AND status <> 'deleted'",
+                     WHERE id = $1 AND status <> 'deleted'
+                         AND ($2::text IS NULL OR workflow_name IS NULL OR workflow_name = $2)",
                 )
                 .bind(id)
+                .bind(workflow_name)
                 .execute(&self.pool)
                 .await?;
             }
@@ -276,6 +282,18 @@ impl StatsRecorder {
             db: Some(db),
             versions,
         }
+    }
+
+    /// Recorder that sends all events to the returned receiver. Only for tests.
+    #[cfg(test)]
+    pub fn capturing() -> (Self, mpsc::Receiver<StatsEvent>) {
+        let (sender, receiver) = mpsc::channel(EVENT_QUEUE_SIZE);
+        let recorder = Self {
+            sender: Some(sender),
+            db: None,
+            versions: JobVersions::default(),
+        };
+        (recorder, receiver)
     }
 
     pub fn db(&self) -> Option<&StatsDb> {
@@ -408,7 +426,12 @@ mod tests {
             Some("1.12.2")
         );
 
-        db.apply(&StatsEvent::Expired { id }).await.unwrap();
+        db.apply(&StatsEvent::Expired {
+            id,
+            workflow_name: None,
+        })
+        .await
+        .unwrap();
         db.apply(&StatsEvent::Status(StatusUpdate {
             job: job.clone(),
             workflow_name: "wf-1".to_string(),
@@ -427,7 +450,12 @@ mod tests {
         );
 
         db.apply(&StatsEvent::Deleted { id }).await.unwrap();
-        db.apply(&StatsEvent::Expired { id }).await.unwrap();
+        db.apply(&StatsEvent::Expired {
+            id,
+            workflow_name: None,
+        })
+        .await
+        .unwrap();
         assert_eq!(row(&db, id).await.get::<String, _>("status"), "deleted");
     }
 
@@ -475,6 +503,55 @@ mod tests {
 
         db.apply(&StatsEvent::Retried { id }).await.unwrap();
         assert_eq!(row(&db, id).await.get::<String, _>("status"), "running");
+    }
+
+    #[tokio::test]
+    async fn test_updates_of_a_superseded_workflow_are_ignored() {
+        let Some(db) = test_db("test_updates_of_a_superseded_workflow_are_ignored").await else {
+            return;
+        };
+        let t0 = Utc::now();
+        let job = new_job(&unique_environment(), t0);
+        let id = job.id;
+        db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
+        db.apply(&StatsEvent::Resubmitted {
+            id,
+            workflow_name: "wf-b".to_string(),
+            submitted_at: t0,
+        })
+        .await
+        .unwrap();
+        db.apply(&StatsEvent::Status(StatusUpdate {
+            job,
+            workflow_name: "wf-a".to_string(),
+            status: "failed",
+            started_at: t0,
+            finished_at: Some(t0),
+            error_message: None,
+        }))
+        .await
+        .unwrap();
+        db.apply(&StatsEvent::Expired {
+            id,
+            workflow_name: Some("wf-a".to_string()),
+        })
+        .await
+        .unwrap();
+        let record = row(&db, id).await;
+        assert_eq!(record.get::<String, _>("status"), "submitted");
+        assert_eq!(record.get::<Option<String>, _>("outcome"), None);
+        assert_eq!(
+            record.get::<Option<String>, _>("workflow_name").as_deref(),
+            Some("wf-b")
+        );
+
+        db.apply(&StatsEvent::Expired {
+            id,
+            workflow_name: Some("wf-b".to_string()),
+        })
+        .await
+        .unwrap();
+        assert_eq!(row(&db, id).await.get::<String, _>("status"), "expired");
     }
 
     #[tokio::test]

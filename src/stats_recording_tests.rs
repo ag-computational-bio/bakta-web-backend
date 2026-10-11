@@ -4,7 +4,7 @@ use crate::{
     api_structs::ArgoStatus,
     argo::structs::SimpleStatus,
     bakta_handler::ApiVersion,
-    stats::{JobVersions, StatsDb, StatsRecorder, test_db::test_db},
+    stats::{JobVersions, StatsDb, StatsEvent, StatsRecorder, test_db::test_db},
     test_support::*,
     v2::api_structs::{ResultKind, WorkflowKind},
 };
@@ -298,4 +298,77 @@ async fn v1_start_and_expiry_are_recorded() {
         .apply_workflow_statuses(Vec::new(), Utc::now())
         .await;
     wait_for_row(&db, id, |row| status_of(row) == "expired").await;
+}
+
+fn job_workflow(
+    id: Uuid,
+    name: &str,
+    phase: &str,
+    started: chrono::DateTime<Utc>,
+    finished: Option<chrono::DateTime<Utc>>,
+) -> SimpleStatus {
+    serde_json::from_value(json!({
+        "metadata": {
+            "name": name,
+            "uid": Uuid::new_v4(),
+            "creationTimestamp": started.to_rfc3339(),
+            "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}
+        },
+        "status": {
+            "phase": phase,
+            "startedAt": started.to_rfc3339(),
+            "finishedAt": finished.map(|time| time.to_rfc3339()),
+        }
+    }))
+    .unwrap()
+}
+
+fn drain(events: &mut tokio::sync::mpsc::Receiver<StatsEvent>) -> Vec<StatsEvent> {
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        seen.push(event);
+    }
+    seen
+}
+
+#[tokio::test]
+async fn expired_old_workflow_does_not_expire_its_resubmission() {
+    let (stats, mut events) = StatsRecorder::capturing();
+    let handler = test_handler_with_stats("http://127.0.0.1:1", "https://s3.example.com", stats);
+    let mut state = job_state(
+        ApiVersion::V2,
+        WorkflowKind::Bakta,
+        ResultKind::Bakta,
+        Some(ArgoStatus::Running),
+    );
+    state.workflowname = Some("wf-b".to_string());
+    let id = insert_state(&handler, state).await;
+    let now = Utc::now();
+    handler
+        .state_handler
+        .apply_workflow_statuses(
+            vec![
+                job_workflow(
+                    id,
+                    "wf-a",
+                    "Succeeded",
+                    now - Duration::days(41),
+                    Some(now - Duration::days(40)),
+                ),
+                job_workflow(id, "wf-b", "Running", now - Duration::hours(1), None),
+            ],
+            now,
+        )
+        .await;
+
+    let seen = drain(&mut events);
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, StatsEvent::Expired { .. })),
+        "{seen:?}"
+    );
+    let states = handler.state_handler.job_state.read().await;
+    assert_eq!(states[&id].workflowname.as_deref(), Some("wf-b"));
+    assert!(matches!(states[&id].status, Some(ArgoStatus::Running)));
 }
