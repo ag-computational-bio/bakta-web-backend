@@ -96,7 +96,7 @@ impl ArgoClient {
         Ok(self
             .client
             .get(url)
-            .header("Authorization", format!("Bearer {}", &self.token))
+            .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?
             .error_for_status()?
@@ -183,10 +183,10 @@ impl ArgoClient {
             }
         }
 
-        if log_entries.is_empty() {
-            if let Some(error) = last_error {
-                return Err(error);
-            }
+        if log_entries.is_empty()
+            && let Some(error) = last_error
+        {
+            return Err(error);
         }
 
         Ok(log_entries)
@@ -196,7 +196,7 @@ impl ArgoClient {
         let response = self
             .client
             .get(get_status_url_bakta(&self.url, &self.namespace))
-            .header("Authorization", format!("Bearer {}", &self.token))
+            .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?
             .error_for_status()?
@@ -220,7 +220,7 @@ impl ArgoClient {
 
         self.client
             .delete(url)
-            .header("Authorization", format!("Bearer {}", &self.token))
+            .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?
             .error_for_status()?
@@ -265,7 +265,7 @@ impl ArgoClient {
         Ok(self
             .client
             .get(url)
-            .header("Authorization", format!("Bearer {}", &self.token))
+            .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?
             .error_for_status()?
@@ -350,7 +350,7 @@ impl ArgoClient {
         let response = self
             .client
             .post(get_submit_url(&self.url, &self.namespace))
-            .header("Authorization", format!("Bearer {}", &self.token))
+            .header("Authorization", format!("Bearer {}", self.token))
             .json(&submit_template)
             .send()
             .await?
