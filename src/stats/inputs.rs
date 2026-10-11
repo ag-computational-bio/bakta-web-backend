@@ -78,7 +78,10 @@ pub struct LargeJob {
     pub created_at: DateTime<Utc>,
 }
 
+/// Response of `GET /api/admin/stats/inputs`. Named `InputStatistics` in the
+/// OpenAPI document, because `InputStats` is the V2 start request field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[schema(as = InputStatistics)]
 pub struct InputStats {
     pub jobs: i64,
     pub total_bp: i64,

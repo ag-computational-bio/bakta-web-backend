@@ -1,4 +1,30 @@
-use utoipa::OpenApi;
+use utoipa::{
+    Modify, OpenApi,
+    openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
+};
+
+/// Adds the Keycloak bearer token scheme used by the admin API.
+struct AdminSecurity;
+
+impl Modify for AdminSecurity {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        openapi
+            .components
+            .get_or_insert_with(Default::default)
+            .add_security_scheme(
+                "bearer_auth",
+                SecurityScheme::Http(
+                    HttpBuilder::new()
+                        .scheme(HttpAuthScheme::Bearer)
+                        .bearer_format("JWT")
+                        .description(Some(
+                            "Keycloak access token of a member of the admin group.",
+                        ))
+                        .build(),
+                ),
+            );
+    }
+}
 
 #[derive(OpenApi)]
 #[openapi(
@@ -9,8 +35,10 @@ use utoipa::OpenApi;
     ),
     tags(
         (name = "v1", description = "Stable V1 API for the original Bakta genome annotation workflow."),
-        (name = "v2", description = "V2 API for multiple workflow kinds including Bakta Proteins and Baktfold.")
+        (name = "v2", description = "V2 API for multiple workflow kinds including Bakta Proteins and Baktfold."),
+        (name = "admin", description = "Admin API: job statistics and Argo workflow operations. Needs a Keycloak access token.")
     ),
+    modifiers(&AdminSecurity),
     paths(
         crate::v1::api_paths::delete_job,
         crate::v1::api_paths::job_logs,
@@ -27,6 +55,22 @@ use utoipa::OpenApi;
         crate::v2::api_paths::job_logs,
         crate::v2::api_paths::delete_job,
         crate::v2::api_paths::version,
+        crate::admin::api_paths::me,
+        crate::admin::api_paths::stats_summary,
+        crate::admin::api_paths::stats_timeseries,
+        crate::admin::api_paths::stats_versions,
+        crate::admin::api_paths::stats_runtimes,
+        crate::admin::api_paths::stats_inputs,
+        crate::admin::api_paths::list_jobs,
+        crate::admin::api_paths::get_job,
+        crate::admin::api_paths::job_logs,
+        crate::admin::operations::retry_job,
+        crate::admin::operations::resubmit_job,
+        crate::admin::operations::stop_job,
+        crate::admin::operations::resume_job,
+        crate::admin::operations::delete_job,
+        crate::admin::operations::list_workflows,
+        crate::admin::operations::bulk_workflows,
     ),
     components(schemas(
         crate::api_structs::Job,
@@ -75,6 +119,47 @@ use utoipa::OpenApi;
         crate::v2::api_structs::StageLog,
         crate::v2::api_structs::V2LogsResponse,
         crate::v2::api_structs::V2VersionResponse,
+        crate::admin::structs::AdminErrorResponse,
+        crate::admin::structs::MeResponse,
+        crate::admin::structs::WorkflowNodeView,
+        crate::admin::structs::WorkflowView,
+        crate::admin::structs::JobDetail,
+        crate::admin::structs::WorkflowActionResponse,
+        crate::admin::structs::DeleteJobResponse,
+        crate::admin::structs::WorkflowSummary,
+        crate::admin::structs::WorkflowListResponse,
+        crate::admin::structs::BulkFilter,
+        crate::admin::structs::BulkAction,
+        crate::admin::structs::BulkRequest,
+        crate::admin::structs::BulkResult,
+        crate::admin::structs::BulkItem,
+        crate::admin::structs::BulkResponse,
+        crate::stats::queries::DurationStats,
+        crate::stats::queries::WorkflowKindStats,
+        crate::stats::queries::StatsSummary,
+        crate::stats::queries::Interval,
+        crate::stats::queries::GroupBy,
+        crate::stats::queries::TimeseriesBucket,
+        crate::stats::queries::Timeseries,
+        crate::stats::queries::VersionUsage,
+        crate::stats::queries::VersionList,
+        crate::stats::queries::JobListItem,
+        crate::stats::queries::JobList,
+        crate::stats::queries::JobRecord,
+        crate::stats::runtimes::KindRuntime,
+        crate::stats::runtimes::RuntimeBucket,
+        crate::stats::runtimes::InputSizeRuntime,
+        crate::stats::runtimes::SecondsPerMbp,
+        crate::stats::runtimes::QueueStats,
+        crate::stats::runtimes::SlowJob,
+        crate::stats::runtimes::RuntimeStats,
+        crate::stats::inputs::LengthStats,
+        crate::stats::inputs::SequenceCountStats,
+        crate::stats::inputs::SizeBucket,
+        crate::stats::inputs::SequenceBucket,
+        crate::stats::inputs::KindInputs,
+        crate::stats::inputs::LargeJob,
+        crate::stats::inputs::InputStats,
     ))
 )]
 pub struct BaktaServiceApi;
@@ -101,5 +186,35 @@ mod tests {
             schemas["V2JobStatus"]["properties"]["status"]["$ref"],
             "#/components/schemas/V2JobStatusKind"
         );
+    }
+
+    #[test]
+    fn test_admin_paths_are_documented_with_bearer_auth() {
+        let doc = serde_json::to_value(BaktaServiceApi::openapi()).unwrap();
+        assert_eq!(
+            doc["components"]["securitySchemes"]["bearer_auth"]["scheme"],
+            "bearer"
+        );
+        let paths = doc["paths"].as_object().unwrap();
+        let admin: Vec<_> = paths
+            .keys()
+            .filter(|path| path.starts_with("/api/admin"))
+            .collect();
+        assert_eq!(admin.len(), 15, "{admin:?}");
+        for (path, item) in paths
+            .iter()
+            .filter(|(path, _)| path.starts_with("/api/admin"))
+        {
+            for operation in item.as_object().unwrap().values() {
+                assert_eq!(operation["tags"], serde_json::json!(["admin"]), "{path}");
+                assert!(operation["security"][0]["bearer_auth"].is_array(), "{path}");
+            }
+        }
+        // The input statistics of the start request and the admin schemas use distinct names.
+        let schemas = &doc["components"]["schemas"];
+        assert!(schemas["InputStats"]["properties"]["total_length"].is_object());
+        assert!(schemas["InputStats"]["properties"]["size_histogram"].is_null());
+        assert!(schemas["InputStatistics"]["properties"]["size_histogram"].is_object());
+        assert!(schemas["JobRecord"]["properties"]["outcome"].is_object());
     }
 }
