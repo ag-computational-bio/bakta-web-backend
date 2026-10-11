@@ -210,7 +210,12 @@ async fn admin_stats_endpoints_return_the_contract_shapes() {
     finished_job(&db, &env, "bakta", "succeeded").await;
     finished_job(&db, &env, "bakta", "failed").await;
     finished_job(&db, &env, "baktfold", "succeeded").await;
-    let setup = admin_setup("http://127.0.0.1:1", "https://s3.example.com", Some(db)).await;
+    let setup = admin_setup(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        Some(db.clone()),
+    )
+    .await;
 
     let (status, summary) = admin_call(
         &setup,
@@ -317,7 +322,12 @@ async fn admin_job_list_filters_and_pages() {
     let first = finished_job(&db, &env, "bakta", "succeeded").await;
     finished_job(&db, &env, "bakta", "failed").await;
     finished_job(&db, &env, "baktfold", "error").await;
-    let setup = admin_setup("http://127.0.0.1:1", "https://s3.example.com", Some(db)).await;
+    let setup = admin_setup(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        Some(db.clone()),
+    )
+    .await;
 
     let (status, list) = admin_call(
         &setup,
@@ -377,7 +387,7 @@ async fn admin_job_detail_includes_the_live_workflow() {
         .respond_with(ResponseTemplate::new(404))
         .mount(&argo)
         .await;
-    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db)).await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
 
     let (status, detail) = admin_call(&setup, "GET", &format!("/api/admin/jobs/{id}"), None).await;
     assert_eq!(status, StatusCode::OK, "{detail}");
@@ -464,7 +474,12 @@ async fn admin_job_list_shows_live_workflows_from_the_poll() {
     let running = finished_job(&db, &env, "bakta", "succeeded").await;
     let failed = finished_job(&db, &env, "bakta", "failed").await;
     let without = finished_job(&db, &env, "bakta", "succeeded").await;
-    let setup = admin_setup("http://127.0.0.1:1", "https://s3.example.com", Some(db)).await;
+    let setup = admin_setup(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        Some(db.clone()),
+    )
+    .await;
     setup
         .handler
         .state_handler
@@ -547,7 +562,7 @@ async fn admin_workflows_can_list_orphans_only() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 
-    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db)).await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
     let (status, body) = admin_call(&setup, "GET", "/api/admin/workflows?orphans=true", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let names: Vec<_> = body["items"]
@@ -588,7 +603,12 @@ async fn admin_jobs_show_when_their_data_expires() {
         Some(now - Duration::days(31)),
     )
     .await;
-    let setup = admin_setup("http://127.0.0.1:1", "https://s3.example.com", Some(db)).await;
+    let setup = admin_setup(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        Some(db.clone()),
+    )
+    .await;
 
     let (status, list) = admin_call(
         &setup,
@@ -708,7 +728,7 @@ async fn admin_job_logs_of_old_jobs_need_a_live_workflow() {
         .respond_with(ResponseTemplate::new(404))
         .mount(&argo)
         .await;
-    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db)).await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
     setup
         .handler
         .state_handler

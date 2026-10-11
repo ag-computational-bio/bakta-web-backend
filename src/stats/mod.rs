@@ -331,17 +331,79 @@ impl StatsRecorder {
 #[cfg(test)]
 pub mod test_db {
     use super::StatsDb;
+    use sqlx::{AssertSqlSafe, Connection, PgConnection};
 
-    /// Returns a migrated database from `TEST_DATABASE_URL`, or `None` with a
-    /// message when the variable is unset.
-    pub async fn test_db(test_name: &str) -> Option<StatsDb> {
+    /// A migrated schema that belongs to one test. It is dropped with the guard.
+    pub struct TestDb {
+        db: StatsDb,
+        admin_url: String,
+        name: String,
+    }
+
+    impl std::ops::Deref for TestDb {
+        type Target = StatsDb;
+
+        fn deref(&self) -> &StatsDb {
+            &self.db
+        }
+    }
+
+    impl Drop for TestDb {
+        fn drop(&mut self) {
+            let admin_url = self.admin_url.clone();
+            let name = self.name.clone();
+            // A separate thread with its own runtime works inside any test runtime.
+            let _ = std::thread::spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                runtime.block_on(async {
+                    if let Ok(mut conn) = PgConnection::connect(&admin_url).await {
+                        let _ = sqlx::query(AssertSqlSafe(format!(
+                            "DROP SCHEMA IF EXISTS \"{name}\" CASCADE"
+                        )))
+                        .execute(&mut conn)
+                        .await;
+                    }
+                });
+            })
+            .join();
+        }
+    }
+
+    /// Returns `url` so that connections use `schema` as their search path.
+    fn with_schema(url: &str, schema: &str) -> String {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        format!("{url}{separator}options=-c%20search_path%3D{schema}")
+    }
+
+    /// Creates a new migrated schema for one test in the `TEST_DATABASE_URL` database.
+    /// Returns `None` with a message when the variable is unset.
+    pub async fn test_db(test_name: &str) -> Option<TestDb> {
         let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
             eprintln!("skipping {test_name}: TEST_DATABASE_URL is not set");
             return None;
         };
-        let db = StatsDb::connect_lazy(&url).expect("TEST_DATABASE_URL should be valid");
-        db.migrate().await.expect("migrations should run");
-        Some(db)
+        let name = format!("test_{}", uuid::Uuid::new_v4().simple());
+        let mut conn = PgConnection::connect(&url)
+            .await
+            .expect("TEST_DATABASE_URL should be reachable");
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA \"{name}\"")))
+            .execute(&mut conn)
+            .await
+            .expect("the test user should be allowed to create schemas");
+        let db = StatsDb::connect_lazy(&with_schema(&url, &name))
+            .expect("TEST_DATABASE_URL should be valid");
+        let guard = TestDb {
+            db,
+            admin_url: url,
+            name,
+        };
+        guard.migrate().await.expect("migrations should run");
+        Some(guard)
     }
 
     /// Unique environment name, so tests can share one database.

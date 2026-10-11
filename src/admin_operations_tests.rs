@@ -1042,7 +1042,7 @@ async fn retry_and_resubmit_use_the_job_record_for_the_retention_time() {
         .expect(0)
         .mount(&argo)
         .await;
-    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db)).await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
 
     let (status, body) = admin_call(
         &setup,

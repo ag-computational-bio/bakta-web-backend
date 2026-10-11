@@ -431,7 +431,7 @@ async fn current_workflow_comes_from_the_database_after_a_restart() {
     let handler = test_handler_with_stats(
         "http://127.0.0.1:1",
         "https://s3.example.com",
-        StatsRecorder::new(db, JobVersions::default()),
+        StatsRecorder::new(db.clone(), JobVersions::default()),
     );
     // wf-b is newer by every timestamp, but the database records wf-a.
     let old = job_workflow(id, "wf-a", "Running", now - Duration::hours(2), None);
