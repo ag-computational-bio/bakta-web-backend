@@ -294,13 +294,13 @@ pub async fn delete_job(
     Path(id): Path<Uuid>,
     Query(params): Query<DeleteJobParams>,
 ) -> Result<Json<DeleteJobResponse>, AdminError> {
-    let target = find_job(&state, id).await?;
     let handler = &state.state_handler;
-    if handler.is_starting(&id) {
-        return Err(AdminError::Conflict(
-            "Job is starting, try again later".to_string(),
-        ));
-    }
+    // Same reservation as a start: refuse while the job is starting, and keep
+    // a start from beginning until the delete is done.
+    let _reservation = handler
+        .reserve_start(id)
+        .map_err(|_| AdminError::Conflict("Job is starting, try again later".to_string()))?;
+    let target = find_job(&state, id).await?;
     let deleted_workflow = match (&target.in_memory, &target.workflow_name) {
         (Some(job), _) if job.archived => {
             handler

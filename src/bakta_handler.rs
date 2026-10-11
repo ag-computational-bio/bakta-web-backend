@@ -1122,9 +1122,10 @@ impl StateHandler {
             if state.secret != secret {
                 return Err(anyhow!("Unauthorized"));
             }
-            if self.is_starting(&job_id) {
-                return Err(anyhow!("Job is starting, try again later"));
-            }
+            // Same reservation as a start, so no start runs during the delete.
+            let _reservation = self
+                .reserve_start(job_id)
+                .map_err(|_| anyhow!("Job is starting, try again later"))?;
             self.argo_client.delete_workflow(state).await?;
         }
         if write_lock.remove(&job_id).is_some() {
@@ -1189,10 +1190,10 @@ impl StateHandler {
         (job_id, secret)
     }
 
-    /// Reserves a job for submission. The reservation is released when the
-    /// returned guard is dropped. Callers must hold the job state lock while
-    /// they check `has_workflow`, so a finished submission is always visible.
-    fn reserve_start(&self, job_id: Uuid) -> Result<StartReservation<'_>> {
+    /// Reserves a job for submission or deletion. The reservation is released
+    /// when the returned guard is dropped. Callers must hold the job state lock
+    /// while they check `has_workflow`, so a finished submission is always visible.
+    pub(crate) fn reserve_start(&self, job_id: Uuid) -> Result<StartReservation<'_>> {
         let mut starting = self
             .starting_jobs
             .lock()
@@ -1204,13 +1205,6 @@ impl StateHandler {
             starting_jobs: &self.starting_jobs,
             job_id,
         })
-    }
-
-    pub(crate) fn is_starting(&self, job_id: &Uuid) -> bool {
-        self.starting_jobs
-            .lock()
-            .expect("starting jobs lock poisoned")
-            .contains(job_id)
     }
 
     fn record_expired(&self, expired: Vec<Uuid>) {

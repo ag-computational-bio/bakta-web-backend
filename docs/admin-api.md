@@ -264,6 +264,7 @@ A workflow is suspended when it is `Running` and has `spec.suspend` set to true 
 ### `DELETE /jobs/{id}?purge_data=false`
 
 Deletes the Argo workflow (Argo removes its pods) and sets the job status to `deleted`. With `purge_data=true` the job's S3 objects are deleted too. Response: `{ "deleted_workflow": true, "purged_objects": 12 }`.
+`409` while the job is being started. While the delete runs, a start request for the job is refused with `409`.
 
 ### `GET /workflows?environment&phase&orphans`
 

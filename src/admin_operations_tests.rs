@@ -277,6 +277,63 @@ async fn delete_removes_the_workflow_and_can_purge_data() {
 }
 
 #[tokio::test]
+async fn start_is_refused_while_an_admin_delete_runs() {
+    let argo = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/bakta/submit"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "metadata": {"name": "wf", "creationTimestamp": Utc::now().to_rfc3339()}
+        })))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let s3 = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(
+                    "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
+                )
+                .set_delay(std::time::Duration::from_millis(1000)),
+        )
+        .mount(&s3)
+        .await;
+    let s3_url = format!("http://s3.test:{}", s3.address().port());
+    let setup = std::sync::Arc::new(admin_setup(&argo.uri(), &s3_url, None).await);
+    let id = v2_state(&setup.handler, WorkflowKind::Bakta, None).await;
+
+    let delete = {
+        let setup = setup.clone();
+        tokio::spawn(async move {
+            admin_call(
+                &setup,
+                "DELETE",
+                &format!("/api/admin/jobs/{id}?purge_data=true"),
+                None,
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let (status, body) = call(
+        &setup.router,
+        "POST",
+        "/api/v2/job/start",
+        Some(json!({"job": {"job_id": id, "secret": TEST_SECRET}, "workflow_kind": "bakta", "config": {}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (status, body) = delete.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // A delete is refused while a start holds the reservation.
+    let id = v2_state(&setup.handler, WorkflowKind::Bakta, None).await;
+    let _start = setup.handler.state_handler.reserve_start(id).unwrap();
+    let (status, _) = admin_call(&setup, "DELETE", &format!("/api/admin/jobs/{id}"), None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn delete_marks_database_only_jobs_as_deleted() {
     let Some(db) = test_db("delete_marks_database_only_jobs_as_deleted").await else {
         return;
