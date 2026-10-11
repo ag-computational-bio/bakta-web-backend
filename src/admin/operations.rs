@@ -51,6 +51,8 @@ async fn find_job(state: &BaktaHandler, id: Uuid) -> Result<JobTarget, AdminErro
 }
 
 const INPUT_DATA_DELETED: &str = "Input data was deleted after the retention period";
+/// A start, delete or resubmit of the job is in progress.
+const JOB_BUSY: &str = "Job is busy, try again later";
 
 /// True while the job's S3 data exists. The reference time comes from the
 /// job record, or from the in-memory state when there is no record.
@@ -248,6 +250,12 @@ pub async fn resubmit_job(
     State(state): State<Arc<BaktaHandler>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WorkflowActionResponse>, AdminError> {
+    // Same reservation as a start or delete: a delete that runs at the same
+    // time could otherwise remove the job while the new workflow runs.
+    let _reservation = state
+        .state_handler
+        .reserve_start(id)
+        .map_err(|_| AdminError::Conflict(JOB_BUSY.to_string()))?;
     let target = find_job(&state, id).await?;
     let old_name = require_workflow(&target)?;
     if !job_data_available(&state, id, target.in_memory.as_ref()).await {
@@ -790,6 +798,21 @@ pub async fn bulk_workflows(
             && !workflow_data_available(&state, &workflow).await
         {
             reason = Some("Input data deleted after the retention period".to_string());
+        }
+        // A resubmit takes the job's reservation, like a start or delete.
+        let mut _reservation = None;
+        if reason.is_none() && !dry_run && action == BulkAction::Resubmit {
+            let job_id = workflow
+                .metadata
+                .labels
+                .get("jobid")
+                .and_then(|value| value.parse::<Uuid>().ok());
+            if let Some(id) = job_id {
+                match state.state_handler.reserve_start(id) {
+                    Ok(reservation) => _reservation = Some(reservation),
+                    Err(_) => reason = Some(JOB_BUSY.to_string()),
+                }
+            }
         }
         let applicable = reason.is_none();
         let (result, error) = if dry_run {

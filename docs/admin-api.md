@@ -290,6 +290,8 @@ Argo retry of a failed or errored workflow (reruns failed steps). `409` if the w
 ### `POST /jobs/{id}/resubmit`
 
 Argo resubmit: a new workflow with the same parameters. The job record points to the new `workflow_name` and goes back to `submitted`. `409` with `{ "error": "Input data was deleted after the retention period" }` when `data_available` is false. Response: `{ "workflow_name": "...", "phase": "Pending" }`.
+`409` with `{ "error": "Job is busy, try again later" }` while the job is being started, deleted or resubmitted. While the resubmit runs, start and delete requests for the job are refused with `409`.
+A retry needs no such check: it reruns the same workflow and creates no new one, so a delete at the same time removes it.
 
 ### `POST /jobs/{id}/stop`
 
@@ -305,7 +307,7 @@ A workflow is suspended when it is `Running` and has `spec.suspend` set to true 
 
 Deletes the Argo workflow (Argo removes its pods) and sets the job status to `deleted`. With `purge_data=true` the job's S3 objects are deleted too. Response: `{ "deleted_workflow": true, "purged_objects": 12 }`.
 When `data_available` is false, the S3 listing and purge are skipped and `purged_objects` is `0`. The workflow is still deleted and the job is still marked `deleted`.
-`409` while the job is being started. While the delete runs, a start request for the job is refused with `409`.
+`409` while the job is being started or resubmitted. While the delete runs, a start request for the job is refused with `409`.
 `409` with `{ "error": "The result of an earlier start request is not known yet, try again later" }` while an earlier start request may have created a workflow that the backend has not found yet (see Unresolved start requests). The user delete endpoints (`DELETE /api/v1/job/delete`, `DELETE /api/v2/job/delete`) answer `409` in the same case.
 When the backend knows no workflow name for the job (for example a start request created a workflow, but the backend restarted before a poll found it), the delete first looks up live workflows with the job's `jobid` label in Argo and deletes them. If that lookup fails, the delete answers `503` and changes nothing: no workflow is deleted, no S3 data is purged and the job is not marked `deleted`. The user delete endpoints do the same lookup for jobs that are in memory and also answer `503` when it fails. A job that is not in memory, for example after a restart, is not looked up: the user delete answers `200` without contacting Argo.
 
@@ -350,6 +352,7 @@ Runs one action on all live workflows that match a filter.
 - `retry` and `resubmit` only apply to the job's current workflow. An older workflow of a job that was resubmitted is not applicable (`reason` names the current workflow).
 - When the job's current workflow cannot be determined (for example the job is not in memory after a restart and the statistics database fails or is not configured, or the job's workflow is not recorded yet), `retry` and `resubmit` do not apply: `applicable` is false and `reason` is `Current workflow unknown, try again later`. A workflow without a `jobid` label, or whose job has no record, counts as current. The single `retry` and `resubmit` endpoints answer `503` when the job lookup fails.
 - `retry` and `resubmit` do not apply when the input data is gone: `applicable` is false and `reason` is `Input data deleted after the retention period`. The reference time is the job's `finished_at` or `created_at` (see Data retention). For a workflow without a job record, it is the workflow's finish time or, if it has none, its creation time.
+- In a real run, `resubmit` is skipped while the job is being started, deleted or resubmitted: `applicable` is false and `reason` is `Job is busy, try again later`. A dry run does not check this.
 - Workflows are processed one by one. One failure does not stop the others. Each action is logged with the admin user name.
 
 Response:

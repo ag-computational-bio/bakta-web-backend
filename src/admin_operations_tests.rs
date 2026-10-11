@@ -1741,3 +1741,107 @@ async fn bulk_uses_the_job_record_for_the_retention_time() {
         assert_eq!(bulk_item(&body, "wf-kept")["applicable"], true, "{body}");
     }
 }
+
+/// Starts a user delete of the job whose Argo delete call is slow, and waits
+/// until the delete holds the job's reservation.
+async fn start_slow_user_delete(
+    setup: &std::sync::Arc<crate::admin_api_tests::AdminSetup>,
+    argo: &MockServer,
+    workflow_name: &str,
+    id: Uuid,
+) -> tokio::task::JoinHandle<(StatusCode, String)> {
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/v1/workflows/bakta/{workflow_name}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("{}")
+                .set_delay(std::time::Duration::from_secs(1)),
+        )
+        .expect(1)
+        .mount(argo)
+        .await;
+    let delete = tokio::spawn({
+        let router = setup.router.clone();
+        async move {
+            call(
+                &router,
+                "DELETE",
+                &format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+                None,
+            )
+            .await
+        }
+    });
+    let state = &setup.handler.state_handler;
+    while !state.starting_jobs.lock().unwrap().contains(&id) {
+        tokio::task::yield_now().await;
+    }
+    delete
+}
+
+#[tokio::test]
+async fn resubmit_is_refused_while_a_user_delete_runs() {
+    let argo = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-old/resubmit"))
+        .respond_with(workflow("wf-new", "Pending"))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let setup = std::sync::Arc::new(admin_setup(&argo.uri(), "https://s3.example.com", None).await);
+    let id = job_with_workflow(&setup.handler, "wf-old", ArgoStatus::Failed).await;
+    let delete = start_slow_user_delete(&setup, &argo, "wf-old", id).await;
+
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        &format!("/api/admin/jobs/{id}/resubmit"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "Job is busy, try again later");
+
+    let (status, body) = delete.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let states = setup.handler.state_handler.job_state.read().await;
+    assert!(!states.contains_key(&id));
+}
+
+#[tokio::test]
+async fn bulk_resubmit_skips_a_job_while_a_user_delete_runs() {
+    let argo = MockServer::start().await;
+    let setup = std::sync::Arc::new(admin_setup(&argo.uri(), "https://s3.example.com", None).await);
+    let id = job_with_workflow(&setup.handler, "wf-old", ArgoStatus::Failed).await;
+    let listed = listed_workflow("wf-old", "Failed", Some(&id.to_string()), Some(1));
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [listed]})))
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-old/resubmit"))
+        .respond_with(workflow("wf-new", "Pending"))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let delete = start_slow_user_delete(&setup, &argo, "wf-old", id).await;
+
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        "/api/admin/workflows/bulk",
+        Some(json!({"action": "resubmit", "dry_run": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let item = &body["items"][0];
+    assert_eq!(item["applicable"], false, "{body}");
+    assert_eq!(item["result"], "skipped");
+    assert_eq!(item["reason"], "Job is busy, try again later");
+
+    let (status, body) = delete.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let states = setup.handler.state_handler.job_state.read().await;
+    assert!(!states.contains_key(&id));
+}
