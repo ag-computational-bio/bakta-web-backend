@@ -13,6 +13,8 @@ use utoipa_swagger_ui::SwaggerUi;
 #[allow(clippy::upper_case_acronyms)]
 mod api_structs;
 mod argo;
+#[cfg(test)]
+mod argo_and_catalog_tests;
 mod bakta_handler;
 mod metrics;
 mod openapi;
