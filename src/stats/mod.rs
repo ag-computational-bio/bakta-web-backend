@@ -198,8 +198,10 @@ impl StatsDb {
                  WHERE jobs.status NOT IN ('deleted', 'expired')
              ), wanted AS (
                  SELECT target.*,
-                     GREATEST(0, EXTRACT(EPOCH FROM (finished_at - started_at)))::double precision
-                         AS runtime_seconds,
+                     -- GREATEST ignores NULL, so check for missing times first.
+                     CASE WHEN started_at IS NOT NULL AND finished_at IS NOT NULL
+                         THEN GREATEST(0, EXTRACT(EPOCH FROM (finished_at - started_at)))::double precision
+                     END AS runtime_seconds,
                      CASE WHEN started_at >= submitted_at
                          THEN EXTRACT(EPOCH FROM (started_at - submitted_at))::double precision
                      END AS queue_seconds
@@ -580,6 +582,52 @@ mod tests {
             finished_at,
             error_message: None,
         }])
+    }
+
+    #[tokio::test]
+    async fn test_missing_times_give_no_runtime_or_queue_time() {
+        let Some(db) = test_db("test_missing_times_give_no_runtime_or_queue_time").await else {
+            return;
+        };
+        let environment = unique_environment();
+        let t0 = Utc::now() - ChronoDuration::minutes(30);
+        let running = new_job(&environment, t0);
+        let finished = new_job(&environment, t0);
+        let waiting = new_job(&environment, t0);
+        for job in [&running, &finished, &waiting] {
+            db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
+        }
+        let started_at = Some(t0 + ChronoDuration::seconds(20));
+        db.apply(&polled(&running, "wf-r", "running", started_at, None))
+            .await
+            .unwrap();
+        db.apply(&polled(
+            &finished,
+            "wf-f",
+            "succeeded",
+            started_at,
+            Some(t0 + ChronoDuration::seconds(120)),
+        ))
+        .await
+        .unwrap();
+        db.apply(&polled(&waiting, "wf-w", "submitted", None, None))
+            .await
+            .unwrap();
+
+        let record = row(&db, running.id).await;
+        assert_eq!(record.get::<Option<f64>, _>("runtime_seconds"), None);
+        let record = row(&db, waiting.id).await;
+        assert_eq!(record.get::<Option<f64>, _>("runtime_seconds"), None);
+        assert_eq!(record.get::<Option<f64>, _>("queue_seconds"), None);
+        let summary = db
+            .summary(&queries::StatsFilter {
+                environment: Some(environment),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(summary.runtime_seconds.avg, Some(100.0));
+        assert_eq!(summary.runtime_seconds.p50, Some(100.0));
     }
 
     #[tokio::test]

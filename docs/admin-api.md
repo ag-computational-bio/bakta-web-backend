@@ -52,8 +52,8 @@ Migrations are embedded in the backend and run at startup. Table `jobs`, one row
 | `workflow_name` | text, null | Current Argo workflow name |
 | `created_at` | timestamptz | Job init |
 | `submitted_at`, `started_at`, `finished_at` | timestamptz, null | Start, retry or resubmit request of the current attempt; Argo `status.startedAt` and `status.finishedAt` of the current workflow |
-| `runtime_seconds` | double precision, null | `finished_at - started_at` |
-| `queue_seconds` | double precision, null | `started_at - submitted_at`, null when `started_at` is before `submitted_at` |
+| `runtime_seconds` | double precision, null | `finished_at - started_at`, null when one of them is null |
+| `queue_seconds` | double precision, null | `started_at - submitted_at`, null when one of them is null or `started_at` is before `submitted_at` |
 | `error_message` | text, null | Short reason for failed jobs, if known |
 | `updated_at` | timestamptz | Last change |
 
