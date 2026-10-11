@@ -706,3 +706,90 @@ async fn late_resubmit_does_not_reset_a_finished_workflow_of_a_database_only_job
     );
     assert_eq!(row.get::<Option<f64>, _>("runtime_seconds"), Some(60.0));
 }
+
+#[tokio::test]
+async fn resubmit_of_a_database_only_job_is_current_before_the_writer_catches_up() {
+    let Some(db) = test_db("resubmit_of_a_database_only_job_is_current").await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    let created = Utc::now() - Duration::hours(1);
+    db.apply(&StatsEvent::Created(crate::stats::NewJob {
+        id,
+        environment: crate::stats::test_db::unique_environment(),
+        workflow_kind: "bakta".to_string(),
+        api_version: "v2".to_string(),
+        name: None,
+        created_at: created,
+    }))
+    .await
+    .unwrap();
+    db.apply(&StatsEvent::Resubmitted {
+        id,
+        previous_workflow_name: String::new(),
+        workflow_name: "wf-a".to_string(),
+        submitted_at: created,
+    })
+    .await
+    .unwrap();
+    let now = Utc::now();
+    let argo = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-a/resubmit"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "metadata": {
+                "name": "wf-b",
+                "creationTimestamp": now.to_rfc3339(),
+                "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}
+            },
+            "status": {}
+        })))
+        .mount(&argo)
+        .await;
+    // The writer is behind: events stay in the queue, the database still names wf-a.
+    let (stats, mut events) = StatsRecorder::capturing_with_db(db.clone());
+    let setup = crate::admin_api_tests::admin_setup_with_stats(
+        &argo.uri(),
+        "https://s3.example.com",
+        stats,
+    )
+    .await;
+    let (status, body) = crate::admin_api_tests::admin_call(
+        &setup,
+        "POST",
+        &format!("/api/admin/jobs/{id}/resubmit"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let old = attempt(
+        id,
+        "wf-a",
+        "Succeeded",
+        created,
+        created,
+        Some(created + Duration::minutes(5)),
+    );
+    let new = attempt(id, "wf-b", "Pending", now, now, None);
+    setup
+        .handler
+        .state_handler
+        .apply_workflow_statuses(vec![old, new], Utc::now())
+        .await;
+
+    let states = setup.handler.state_handler.job_state.read().await;
+    assert_eq!(states[&id].workflowname.as_deref(), Some("wf-b"));
+    assert_eq!(states[&id].secret, TEST_SECRET);
+    drop(states);
+    let polled: Vec<String> = drain(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            StatsEvent::Polled(states) => Some(states),
+            _ => None,
+        })
+        .flatten()
+        .map(|state| state.workflow_name)
+        .collect();
+    assert_eq!(polled, ["wf-b"]);
+}

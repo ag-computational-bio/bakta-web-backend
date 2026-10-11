@@ -308,6 +308,42 @@ fn state_from_simple_status(simple_status: SimpleStatus) -> Option<FullJobState>
     })
 }
 
+/// Job state for the new workflow of a resubmit when the job has no job
+/// state yet, for example after a restart. The fields come from the workflow
+/// labels, which Argo copies from the old workflow. The next poll replaces it.
+pub(crate) fn resubmitted_job_state(
+    id: Uuid,
+    workflow_name: &str,
+    labels: &HashMap<String, String>,
+    created_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> FullJobState {
+    FullJobState {
+        id,
+        argo_uid: None,
+        argo_ressource_version: None,
+        status: Some(ArgoStatus::Pending),
+        started: Some(created_at),
+        updated: Some(now),
+        workflowname: Some(workflow_name.to_string()),
+        // Without the label nobody can know the secret.
+        secret: labels
+            .get("secret")
+            .cloned()
+            .unwrap_or_else(|| Alphanumeric.sample_string(&mut rand::rng(), 32)),
+        name: labels
+            .get("name")
+            .cloned()
+            .unwrap_or_else(|| "Unknown name".to_string()),
+        archived: false,
+        api_version: ApiVersion::from_label_value(labels.get("api-version").map(String::as_str)),
+        workflow_kind: workflow_kind_from_label_value(
+            labels.get("workflow-kind").map(String::as_str),
+        ),
+        result_kind: result_kind_from_label_value(labels.get("result-kind").map(String::as_str)),
+    }
+}
+
 impl From<ArgoStatus> for V2JobStatusKind {
     fn from(value: ArgoStatus) -> Self {
         match value {

@@ -383,6 +383,20 @@ impl StatsRecorder {
         (recorder, receiver)
     }
 
+    /// Recorder with a database whose events go to the returned receiver
+    /// instead of the database, like a writer that is behind. Only for tests.
+    #[cfg(test)]
+    pub fn capturing_with_db(db: StatsDb) -> (Self, mpsc::Receiver<StatsEvent>) {
+        let (recorder, receiver) = Self::capturing();
+        (
+            Self {
+                db: Some(db),
+                ..recorder
+            },
+            receiver,
+        )
+    }
+
     pub fn db(&self) -> Option<&StatsDb> {
         self.db.as_ref()
     }

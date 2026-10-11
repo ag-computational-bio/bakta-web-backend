@@ -73,6 +73,7 @@ The workflow state in a job record follows the job's current workflow in Argo:
 - From that workflow it sets `workflow_name`, `status` (`Pending` is `submitted`, `Running` is `running`, a final phase is `succeeded`, `failed` or `error`), `started_at` (null while `submitted`), `finished_at`, `runtime_seconds`, `queue_seconds`, `error_message` and, for a final phase, `outcome`.
 - A record is only written when it differs from this state. The comparison is made against the database, so a wrong or outdated record is corrected by the next poll.
 - Records with status `deleted` or `expired` are not changed by polls.
+- A resubmit records the new workflow for the job at once, also for a job that is only in the database (for example after a restart). So the next poll takes the new workflow as current, even before the database write of the resubmit is done.
 - Other writes only set what polls cannot see: the job init, the start request (input options, input statistics, versions, `submitted_at`), the request time of a retry or resubmit (`submitted_at`), user and admin deletes, and expiry. They never overwrite the workflow state of a newer poll. A resubmit only points the record to the new workflow (and resets its state to `submitted`) when no poll has seen that workflow yet.
 
 ### Input statistics in the V2 start request

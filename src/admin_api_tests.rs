@@ -32,6 +32,19 @@ pub struct AdminSetup {
 
 /// Router with the admin API enabled, a mock Keycloak and a valid admin token.
 pub async fn admin_setup(argo_url: &str, s3_url: &str, db: Option<StatsDb>) -> AdminSetup {
+    let stats = match db {
+        Some(db) => StatsRecorder::new(db, JobVersions::default()),
+        None => StatsRecorder::disabled(),
+    };
+    admin_setup_with_stats(argo_url, s3_url, stats).await
+}
+
+/// Same as `admin_setup`, with the given statistics recorder.
+pub async fn admin_setup_with_stats(
+    argo_url: &str,
+    s3_url: &str,
+    stats: StatsRecorder,
+) -> AdminSetup {
     let keycloak = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/realms/bakta/protocol/openid-connect/certs"))
@@ -44,10 +57,6 @@ pub async fn admin_setup(argo_url: &str, s3_url: &str, db: Option<StatsDb>) -> A
         client_id: test_tokens::TEST_CLIENT.to_string(),
         group: test_tokens::TEST_GROUP.to_string(),
     });
-    let stats = match db {
-        Some(db) => StatsRecorder::new(db, JobVersions::default()),
-        None => StatsRecorder::disabled(),
-    };
     let handler = test_handler_full(argo_url, s3_url, stats, Some(Arc::new(auth)));
     AdminSetup {
         router: test_router(handler.clone()),

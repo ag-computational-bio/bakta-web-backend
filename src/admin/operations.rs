@@ -1,6 +1,6 @@
 //! Admin handlers that change Argo workflows: retry, resubmit, stop, resume, delete and bulk actions.
 
-use std::sync::Arc;
+use std::{collections::hash_map::Entry, sync::Arc};
 
 use axum::{Json, extract::State};
 use chrono::{DateTime, Utc};
@@ -16,7 +16,8 @@ use crate::{
     api_structs::ArgoStatus,
     argo::structs::ArgoWorkflow,
     bakta_handler::{
-        BaktaHandler, FullJobState, SubmissionUnknown, WorkflowLookupFailed, state_reference_time,
+        BaktaHandler, FullJobState, SubmissionUnknown, WorkflowLookupFailed, resubmitted_job_state,
+        state_reference_time,
     },
     retention::{data_expires_at, is_data_available, reference_time},
     stats::StatsEvent,
@@ -132,24 +133,39 @@ async fn after_retry(
 }
 
 /// Points the job state and record to the new workflow after an Argo resubmit
-/// of `old_name`.
+/// of `old_name`. A job without job state gets one, so the next poll takes
+/// the new workflow as current even when the database still names the old one.
 async fn after_resubmit(state: &BaktaHandler, id: Uuid, old_name: &str, workflow: &ArgoWorkflow) {
     let handler = &state.state_handler;
     let now = Utc::now();
+    let created_at = workflow.metadata.creation_timestamp.unwrap_or(now);
     // Record while holding the lock, so the event is ordered with the poll.
     let mut job_state = handler.job_state.write().await;
-    if let Some(job) = job_state.get_mut(&id)
-        && job
-            .workflowname
-            .as_deref()
-            .is_none_or(|name| name == old_name)
-    {
-        job.workflowname = Some(workflow.metadata.name.clone());
-        job.status = Some(ArgoStatus::Pending);
-        job.started = Some(workflow.metadata.creation_timestamp.unwrap_or(now));
-        job.updated = Some(now);
-        job.archived = false;
-        job.argo_uid = None;
+    match job_state.entry(id) {
+        Entry::Occupied(mut entry) => {
+            let job = entry.get_mut();
+            if job
+                .workflowname
+                .as_deref()
+                .is_none_or(|name| name == old_name)
+            {
+                job.workflowname = Some(workflow.metadata.name.clone());
+                job.status = Some(ArgoStatus::Pending);
+                job.started = Some(created_at);
+                job.updated = Some(now);
+                job.archived = false;
+                job.argo_uid = None;
+            }
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(resubmitted_job_state(
+                id,
+                &workflow.metadata.name,
+                &workflow.metadata.labels,
+                created_at,
+                now,
+            ));
+        }
     }
     handler.stats.record(StatsEvent::Resubmitted {
         id,
