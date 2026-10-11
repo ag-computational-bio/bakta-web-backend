@@ -1,7 +1,7 @@
 //! Router tests for the admin workflow operations with mock Argo, Keycloak and S3 servers.
 
 use crate::{
-    admin_api_tests::{admin_call, admin_setup},
+    admin_api_tests::{admin_call, admin_setup, aged_job},
     api_structs::ArgoStatus,
     argo::structs::SimpleStatus,
     stats::{
@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path, query_param},
+    matchers::{any, method, path, query_param},
 };
 
 fn workflow(name: &str, phase: &str) -> ResponseTemplate {
@@ -928,4 +928,217 @@ async fn malformed_requests_get_json_errors() {
         .to_bytes();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body["error"].is_string());
+}
+
+const INPUT_DELETED: &str = "Input data was deleted after the retention period";
+
+/// Like `job_with_workflow`, with the last update `age` ago.
+async fn aged_state_job(
+    handler: &crate::bakta_handler::BaktaHandler,
+    name: &str,
+    status: ArgoStatus,
+    age: Duration,
+) -> Uuid {
+    let id = job_with_workflow(handler, name, status).await;
+    handler
+        .state_handler
+        .job_state
+        .write()
+        .await
+        .get_mut(&id)
+        .unwrap()
+        .updated = Some(Utc::now() - age);
+    id
+}
+
+#[tokio::test]
+async fn retry_and_resubmit_are_refused_when_the_input_data_is_gone() {
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta/wf-fresh"))
+        .respond_with(workflow("wf-fresh", "Failed"))
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-fresh/retry"))
+        .respond_with(workflow("wf-fresh", "Running"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    // No other workflow may be changed.
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    let old = aged_state_job(
+        &setup.handler,
+        "wf-old",
+        ArgoStatus::Failed,
+        Duration::days(30) + Duration::seconds(5),
+    )
+    .await;
+    let fresh = aged_state_job(
+        &setup.handler,
+        "wf-fresh",
+        ArgoStatus::Failed,
+        Duration::days(30) - Duration::minutes(5),
+    )
+    .await;
+    for action in ["retry", "resubmit"] {
+        let (status, body) = admin_call(
+            &setup,
+            "POST",
+            &format!("/api/admin/jobs/{old}/{action}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body, json!({"error": INPUT_DELETED}));
+    }
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        &format!("/api/admin/jobs/{fresh}/retry"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn retry_and_resubmit_use_the_job_record_for_the_retention_time() {
+    let Some(db) = test_db("retry_and_resubmit_use_the_job_record_for_the_retention_time").await
+    else {
+        return;
+    };
+    let env = unique_environment();
+    let now = Utc::now();
+    // Finished recently, but created long ago: the finish time counts.
+    let finished = aged_job(
+        &db,
+        &env,
+        now - Duration::days(60),
+        Some(now - Duration::days(1)),
+    )
+    .await;
+    // Never finished: the creation time counts.
+    let unfinished = aged_job(&db, &env, now - Duration::days(31), None).await;
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/workflows/bakta/wf-{finished}")))
+        .respond_with(workflow(&format!("wf-{finished}"), "Failed"))
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(format!("/api/v1/workflows/bakta/wf-{finished}/retry")))
+        .respond_with(workflow(&format!("wf-{finished}"), "Running"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db)).await;
+
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        &format!("/api/admin/jobs/{finished}/retry"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for action in ["retry", "resubmit"] {
+        let (status, body) = admin_call(
+            &setup,
+            "POST",
+            &format!("/api/admin/jobs/{unfinished}/{action}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body, json!({"error": INPUT_DELETED}));
+    }
+}
+
+#[tokio::test]
+async fn delete_skips_the_s3_purge_when_the_data_is_gone() {
+    let argo = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-old"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let s3 = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&s3)
+        .await;
+    let s3_url = format!("http://s3.test:{}", s3.address().port());
+    let setup = admin_setup(&argo.uri(), &s3_url, None).await;
+    let id = aged_state_job(
+        &setup.handler,
+        "wf-old",
+        ArgoStatus::Succeeded,
+        Duration::days(31),
+    )
+    .await;
+    let (status, body) = admin_call(
+        &setup,
+        "DELETE",
+        &format!("/api/admin/jobs/{id}?purge_data=true"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"deleted_workflow": true, "purged_objects": 0}));
+    assert!(
+        !setup
+            .handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
+}
+
+#[tokio::test]
+async fn delete_still_purges_data_just_before_the_expiry() {
+    let argo = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&argo)
+        .await;
+    let s3 = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
+        ))
+        .expect(1)
+        .mount(&s3)
+        .await;
+    let s3_url = format!("http://s3.test:{}", s3.address().port());
+    let setup = admin_setup(&argo.uri(), &s3_url, None).await;
+    let id = aged_state_job(
+        &setup.handler,
+        "wf-new",
+        ArgoStatus::Succeeded,
+        Duration::days(30) - Duration::minutes(5),
+    )
+    .await;
+    let (status, body) = admin_call(
+        &setup,
+        "DELETE",
+        &format!("/api/admin/jobs/{id}?purge_data=true"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

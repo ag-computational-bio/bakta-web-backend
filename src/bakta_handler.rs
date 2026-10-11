@@ -311,7 +311,7 @@ fn runtime_from_state(state: &FullJobState) -> Option<std::time::Duration> {
     (updated - started).to_std().ok()
 }
 
-fn state_reference_time(state: &FullJobState) -> Option<DateTime<Utc>> {
+pub(crate) fn state_reference_time(state: &FullJobState) -> Option<DateTime<Utc>> {
     state.updated.or(state.started)
 }
 

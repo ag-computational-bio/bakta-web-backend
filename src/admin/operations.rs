@@ -15,7 +15,8 @@ use super::{
 use crate::{
     api_structs::ArgoStatus,
     argo::structs::ArgoWorkflow,
-    bakta_handler::{BaktaHandler, FullJobState},
+    bakta_handler::{BaktaHandler, FullJobState, state_reference_time},
+    retention::{data_expires_at, is_data_available, reference_time},
     stats::StatsEvent,
     workflow_catalog::is_bakta_web_template,
 };
@@ -43,6 +44,35 @@ async fn find_job(state: &BaktaHandler, id: Uuid) -> Result<JobTarget, AdminErro
     Ok(JobTarget {
         in_memory: None,
         workflow_name: record.workflow_name,
+    })
+}
+
+const INPUT_DATA_DELETED: &str = "Input data was deleted after the retention period";
+
+/// True while the job's S3 data exists. The reference time comes from the
+/// job record, or from the in-memory state when there is no record.
+pub(super) async fn job_data_available(
+    state: &BaktaHandler,
+    id: Uuid,
+    in_memory: Option<&FullJobState>,
+) -> bool {
+    let record = match state.state_handler.stats.db() {
+        Some(db) => db.get_job(id).await.unwrap_or_else(|error| {
+            tracing::warn!(%error, job_id = %id, "admin_retention_lookup_failed");
+            None
+        }),
+        None => None,
+    };
+    let reference = match (&record, in_memory) {
+        (Some(record), _) => Some(reference_time(record.finished_at, record.created_at)),
+        (None, Some(job)) => state_reference_time(job),
+        (None, None) => None,
+    };
+    reference.is_none_or(|reference| {
+        is_data_available(
+            data_expires_at(reference, state.data_retention_days),
+            Utc::now(),
+        )
     })
 }
 
@@ -150,7 +180,11 @@ pub async fn retry_job(
     State(state): State<Arc<BaktaHandler>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WorkflowActionResponse>, AdminError> {
-    let workflow_name = require_workflow(&find_job(&state, id).await?)?;
+    let target = find_job(&state, id).await?;
+    let workflow_name = require_workflow(&target)?;
+    if !job_data_available(&state, id, target.in_memory.as_ref()).await {
+        return Err(AdminError::Conflict(INPUT_DATA_DELETED.to_string()));
+    }
     let phase = current_phase(&state, &workflow_name).await?;
     if !matches!(phase.as_str(), "Failed" | "Error") {
         return Err(AdminError::Conflict(format!(
@@ -194,7 +228,11 @@ pub async fn resubmit_job(
     State(state): State<Arc<BaktaHandler>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WorkflowActionResponse>, AdminError> {
-    let old_name = require_workflow(&find_job(&state, id).await?)?;
+    let target = find_job(&state, id).await?;
+    let old_name = require_workflow(&target)?;
+    if !job_data_available(&state, id, target.in_memory.as_ref()).await {
+        return Err(AdminError::Conflict(INPUT_DATA_DELETED.to_string()));
+    }
     let handler = &state.state_handler;
     let workflow = handler
         .argo_client
@@ -345,7 +383,10 @@ pub async fn delete_job(
             .map_err(AdminError::argo)?,
         (_, None) => false,
     };
-    let purged_objects = if params.purge_data.unwrap_or(false) {
+    // Without S3 data there is nothing to list or purge.
+    let purge = params.purge_data.unwrap_or(false)
+        && job_data_available(&state, id, target.in_memory.as_ref()).await;
+    let purged_objects = if purge {
         state
             .s3_handler
             .purge_job_objects(&id.to_string())
