@@ -7,7 +7,7 @@ use crate::{
     api_structs::ArgoStatus,
     bakta_handler::BaktaHandler,
     stats::{
-        JobVersions, NewJob, StatsDb, StatsEvent, StatsRecorder, StatusUpdate, SubmittedJob,
+        JobVersions, NewJob, StatsDb, StatsEvent, StatsRecorder, SubmittedJob, WorkflowState,
         test_db::{test_db, unique_environment},
     },
     test_support::*,
@@ -110,14 +110,15 @@ async fn finished_job(db: &StatsDb, environment: &str, kind: &str, status: &'sta
     })))
     .await
     .unwrap();
-    db.apply(&StatsEvent::Status(StatusUpdate {
+    db.apply(&StatsEvent::Polled(vec![WorkflowState {
         job: job.clone(),
         workflow_name: format!("wf-{id}"),
         status,
-        started_at: job.created_at + Duration::seconds(10),
+        created_at: None,
+        started_at: Some(job.created_at + Duration::seconds(10)),
         finished_at: Some(job.created_at + Duration::seconds(110)),
         error_message: None,
-    }))
+    }]))
     .await
     .unwrap();
     id
@@ -137,7 +138,7 @@ pub async fn aged_job(
     };
     let id = job.id;
     db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
-    db.apply(&StatsEvent::Status(StatusUpdate {
+    db.apply(&StatsEvent::Polled(vec![WorkflowState {
         job,
         workflow_name: format!("wf-{id}"),
         status: if finished_at.is_some() {
@@ -145,10 +146,11 @@ pub async fn aged_job(
         } else {
             "running"
         },
-        started_at: created_at,
+        created_at: None,
+        started_at: Some(created_at),
         finished_at,
         error_message: None,
-    }))
+    }]))
     .await
     .unwrap();
     id

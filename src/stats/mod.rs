@@ -60,14 +60,19 @@ pub struct SubmittedJob {
     pub submitted_at: DateTime<Utc>,
 }
 
-/// Workflow progress seen by the polling loop. `status` is `running`,
-/// `succeeded`, `failed` or `error`.
+/// State of a job's current workflow, as seen by the polling loop.
 #[derive(Debug, Clone, PartialEq)]
-pub struct StatusUpdate {
+pub struct WorkflowState {
+    /// Written only when the job has no record yet.
     pub job: NewJob,
     pub workflow_name: String,
+    /// `submitted`, `running`, `succeeded`, `failed` or `error`.
     pub status: &'static str,
-    pub started_at: DateTime<Utc>,
+    /// Workflow creation time, used as `submitted_at` when the record has none.
+    pub created_at: Option<DateTime<Utc>>,
+    /// Argo `status.startedAt`. Argo resets it on retry.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Argo `status.finishedAt` of a finished workflow.
     pub finished_at: Option<DateTime<Utc>>,
     pub error_message: Option<String>,
 }
@@ -76,7 +81,9 @@ pub struct StatusUpdate {
 pub enum StatsEvent {
     Created(NewJob),
     Submitted(Box<SubmittedJob>),
-    Status(StatusUpdate),
+    /// The current workflow state of every job in one poll. The records are
+    /// set to it, so a wrong record is repaired by the next poll.
+    Polled(Vec<WorkflowState>),
     /// Argo retry of `workflow_name`, requested at `retried_at`. Ignored
     /// unless it is the job's workflow, and when a finish after `retried_at`
     /// (of the new attempt) was already recorded.
@@ -145,6 +152,85 @@ impl StatsDb {
         Ok(())
     }
 
+    /// Sets the records to the polled workflow states. Missing records are
+    /// created. A record is only written when it differs from the polled
+    /// state, and records of deleted or expired jobs are never changed.
+    async fn apply_polled(&self, states: &[WorkflowState]) -> Result<()> {
+        if states.is_empty() {
+            return Ok(());
+        }
+        let column = |value: fn(&WorkflowState) -> Option<String>| -> Vec<Option<String>> {
+            states.iter().map(value).collect()
+        };
+        let ids: Vec<Uuid> = states.iter().map(|state| state.job.id).collect();
+        sqlx::query(
+            "INSERT INTO jobs (id, environment, workflow_kind, api_version, status, name, created_at, updated_at)
+             SELECT id, environment, workflow_kind, api_version, 'submitted', name, created_at, now()
+             FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::timestamptz[])
+                 AS polled(id, environment, workflow_kind, api_version, name, created_at)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&ids)
+        .bind(column(|state| Some(state.job.environment.clone())))
+        .bind(column(|state| Some(state.job.workflow_kind.clone())))
+        .bind(column(|state| Some(state.job.api_version.clone())))
+        .bind(column(|state| state.job.name.clone()))
+        .bind(states.iter().map(|state| state.job.created_at).collect::<Vec<_>>())
+        .execute(&self.pool)
+        .await?;
+        let times =
+            |value: fn(&WorkflowState) -> Option<DateTime<Utc>>| -> Vec<Option<DateTime<Utc>>> {
+                states.iter().map(value).collect()
+            };
+        sqlx::query(
+            "WITH polled AS (
+                 SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::timestamptz[],
+                                      $5::timestamptz[], $6::timestamptz[], $7::text[])
+                     AS polled(id, workflow_name, status, created_at, started_at, finished_at, error_message)
+             ), target AS (
+                 SELECT jobs.id, polled.workflow_name, polled.status, polled.started_at,
+                     polled.finished_at, polled.error_message,
+                     COALESCE(jobs.submitted_at, polled.created_at) AS submitted_at,
+                     CASE WHEN polled.status IN ('succeeded', 'failed', 'error')
+                         THEN polled.status ELSE jobs.outcome END AS outcome
+                 FROM jobs JOIN polled ON jobs.id = polled.id
+                 WHERE jobs.status NOT IN ('deleted', 'expired')
+             ), wanted AS (
+                 SELECT target.*,
+                     GREATEST(0, EXTRACT(EPOCH FROM (finished_at - started_at)))::double precision
+                         AS runtime_seconds,
+                     CASE WHEN started_at >= submitted_at
+                         THEN EXTRACT(EPOCH FROM (started_at - submitted_at))::double precision
+                     END AS queue_seconds
+                 FROM target
+             )
+             UPDATE jobs SET workflow_name = wanted.workflow_name, status = wanted.status,
+                 outcome = wanted.outcome, submitted_at = wanted.submitted_at,
+                 started_at = wanted.started_at, finished_at = wanted.finished_at,
+                 runtime_seconds = wanted.runtime_seconds, queue_seconds = wanted.queue_seconds,
+                 error_message = wanted.error_message, updated_at = now()
+             FROM wanted
+             WHERE jobs.id = wanted.id
+                 AND (jobs.workflow_name, jobs.status, jobs.outcome, jobs.submitted_at,
+                      jobs.started_at, jobs.finished_at, jobs.runtime_seconds,
+                      jobs.queue_seconds, jobs.error_message)
+                 IS DISTINCT FROM
+                     (wanted.workflow_name, wanted.status, wanted.outcome, wanted.submitted_at,
+                      wanted.started_at, wanted.finished_at, wanted.runtime_seconds,
+                      wanted.queue_seconds, wanted.error_message)",
+        )
+        .bind(&ids)
+        .bind(column(|state| Some(state.workflow_name.clone())))
+        .bind(column(|state| Some(state.status.to_string())))
+        .bind(times(|state| state.created_at))
+        .bind(times(|state| state.started_at))
+        .bind(times(|state| state.finished_at))
+        .bind(column(|state| state.error_message.clone()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn apply(&self, event: &StatsEvent) -> Result<()> {
         match event {
             StatsEvent::Created(job) => self.insert_job(job, "created").await?,
@@ -179,32 +265,7 @@ impl StatsDb {
                 .execute(&self.pool)
                 .await?;
             }
-            StatsEvent::Status(update) => {
-                self.insert_job(&update.job, "submitted").await?;
-                sqlx::query(
-                    "UPDATE jobs SET status = $2, workflow_name = $3,
-                         submitted_at = COALESCE(submitted_at, $4),
-                         started_at = COALESCE(started_at, $4),
-                         finished_at = $5,
-                         outcome = CASE WHEN $6 THEN $2 ELSE outcome END,
-                         error_message = $7,
-                         runtime_seconds = CASE WHEN $5 IS NULL THEN NULL
-                             ELSE GREATEST(0, EXTRACT(EPOCH FROM ($5 - COALESCE(started_at, $4))))::double precision END,
-                         queue_seconds = GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(started_at, $4) - COALESCE(submitted_at, $4))))::double precision,
-                         updated_at = now()
-                     WHERE id = $1 AND status NOT IN ('deleted', 'expired')
-                         AND (workflow_name IS NULL OR workflow_name = $3)",
-                )
-                .bind(update.job.id)
-                .bind(update.status)
-                .bind(&update.workflow_name)
-                .bind(update.started_at)
-                .bind(update.finished_at)
-                .bind(is_terminal_status(update.status))
-                .bind(&update.error_message)
-                .execute(&self.pool)
-                .await?;
-            }
+            StatsEvent::Polled(states) => self.apply_polled(states).await?,
             StatsEvent::Retried {
                 id,
                 workflow_name,
@@ -437,6 +498,25 @@ mod tests {
             .unwrap()
     }
 
+    /// A poll that sees `workflow_name` of `job` with the given state.
+    fn polled(
+        job: &NewJob,
+        workflow_name: &str,
+        status: &'static str,
+        started_at: Option<DateTime<Utc>>,
+        finished_at: Option<DateTime<Utc>>,
+    ) -> StatsEvent {
+        StatsEvent::Polled(vec![WorkflowState {
+            job: job.clone(),
+            workflow_name: workflow_name.to_string(),
+            status,
+            created_at: None,
+            started_at,
+            finished_at,
+            error_message: None,
+        }])
+    }
+
     #[tokio::test]
     async fn test_job_lifecycle_is_recorded() {
         let Some(db) = test_db("test_job_lifecycle_is_recorded").await else {
@@ -468,26 +548,23 @@ mod tests {
         .await
         .unwrap();
 
-        let running = StatusUpdate {
-            job: job.clone(),
-            workflow_name: "wf-1".to_string(),
-            status: "running",
-            started_at: t0 + ChronoDuration::seconds(20),
-            finished_at: None,
-            error_message: None,
-        };
-        db.apply(&StatsEvent::Status(running.clone()))
+        let started_at = Some(t0 + ChronoDuration::seconds(20));
+        db.apply(&polled(&job, "wf-1", "running", started_at, None))
             .await
             .unwrap();
-        db.apply(&StatsEvent::Status(StatusUpdate {
-            status: "succeeded",
-            // The first observed running time wins over a later start time.
-            started_at: t0 + ChronoDuration::seconds(25),
-            finished_at: Some(t0 + ChronoDuration::seconds(120)),
-            ..running
-        }))
-        .await
-        .unwrap();
+        // Polling the same state again changes nothing.
+        let updated_at = row(&db, id).await.get::<DateTime<Utc>, _>("updated_at");
+        db.apply(&polled(&job, "wf-1", "running", started_at, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            row(&db, id).await.get::<DateTime<Utc>, _>("updated_at"),
+            updated_at
+        );
+        let finished_at = Some(t0 + ChronoDuration::seconds(120));
+        db.apply(&polled(&job, "wf-1", "succeeded", started_at, finished_at))
+            .await
+            .unwrap();
 
         let record = row(&db, id).await;
         assert_eq!(record.get::<String, _>("status"), "succeeded");
@@ -512,16 +589,9 @@ mod tests {
         })
         .await
         .unwrap();
-        db.apply(&StatsEvent::Status(StatusUpdate {
-            job: job.clone(),
-            workflow_name: "wf-1".to_string(),
-            status: "failed",
-            started_at: t0,
-            finished_at: Some(t0),
-            error_message: None,
-        }))
-        .await
-        .unwrap();
+        db.apply(&polled(&job, "wf-1", "failed", Some(t0), Some(t0)))
+            .await
+            .unwrap();
         let record = row(&db, id).await;
         assert_eq!(record.get::<String, _>("status"), "expired");
         assert_eq!(
@@ -548,14 +618,15 @@ mod tests {
         let t0 = Utc::now();
         let job = new_job(&environment, t0);
         let id = job.id;
-        db.apply(&StatsEvent::Status(StatusUpdate {
+        db.apply(&StatsEvent::Polled(vec![WorkflowState {
             job,
             workflow_name: "wf-a".to_string(),
             status: "failed",
-            started_at: t0,
+            created_at: Some(t0),
+            started_at: Some(t0),
             finished_at: Some(t0 + ChronoDuration::seconds(5)),
             error_message: Some("OOMKilled".to_string()),
-        }))
+        }]))
         .await
         .unwrap();
         let record = row(&db, id).await;
@@ -630,14 +701,7 @@ mod tests {
         let job = new_job(&unique_environment(), t0);
         let id = job.id;
         let status = |status, started_at, finished_at| {
-            StatsEvent::Status(StatusUpdate {
-                job: job.clone(),
-                workflow_name: "wf-a".to_string(),
-                status,
-                started_at,
-                finished_at,
-                error_message: None,
-            })
+            polled(&job, "wf-a", status, Some(started_at), finished_at)
         };
         db.apply(&status("running", t0 + ChronoDuration::seconds(10), None))
             .await
@@ -698,16 +762,8 @@ mod tests {
         let t0 = Utc::now() - ChronoDuration::minutes(10);
         let job = new_job(&unique_environment(), t0);
         let id = job.id;
-        let status = |status, finished_at| {
-            StatsEvent::Status(StatusUpdate {
-                job: job.clone(),
-                workflow_name: "wf-a".to_string(),
-                status,
-                started_at: t0,
-                finished_at: Some(finished_at),
-                error_message: None,
-            })
-        };
+        let status =
+            |status, finished_at| polled(&job, "wf-a", status, Some(t0), Some(finished_at));
         db.apply(&status("failed", t0 + ChronoDuration::seconds(30)))
             .await
             .unwrap();
@@ -732,8 +788,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_updates_of_a_superseded_workflow_are_ignored() {
-        let Some(db) = test_db("test_updates_of_a_superseded_workflow_are_ignored").await else {
+    async fn test_expiry_of_a_superseded_workflow_is_ignored() {
+        let Some(db) = test_db("test_expiry_of_a_superseded_workflow_is_ignored").await else {
             return;
         };
         let t0 = Utc::now();
@@ -746,16 +802,6 @@ mod tests {
             workflow_name: "wf-b".to_string(),
             submitted_at: t0,
         })
-        .await
-        .unwrap();
-        db.apply(&StatsEvent::Status(StatusUpdate {
-            job,
-            workflow_name: "wf-a".to_string(),
-            status: "failed",
-            started_at: t0,
-            finished_at: Some(t0),
-            error_message: None,
-        }))
         .await
         .unwrap();
         db.apply(&StatsEvent::Expired {

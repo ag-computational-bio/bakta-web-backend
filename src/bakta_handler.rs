@@ -14,7 +14,7 @@ use crate::{
     metrics::AppMetrics,
     s3_handler::S3Handler,
     stats,
-    stats::{JobVersions, NewJob, StatsEvent, StatsRecorder, StatusUpdate, SubmittedJob},
+    stats::{JobVersions, NewJob, StatsEvent, StatsRecorder, SubmittedJob, WorkflowState},
     v2::api_structs::{
         FailedJobStatus as V2FailedJobStatus, FailedJobStatusKind, JobReference,
         JobStatus as V2JobStatusKind, ResultKind, StageLog, StageStatus, V2JobStatus,
@@ -442,11 +442,49 @@ fn stats_new_job(state: &FullJobState, environment: &str, created_at: DateTime<U
     }
 }
 
-fn stats_status_label(status: &ArgoStatus) -> Option<&'static str> {
+fn stats_status_label(status: &ArgoStatus) -> &'static str {
     match status {
-        ArgoStatus::Running => Some("running"),
-        status => completion_status_label(status),
+        ArgoStatus::Pending | ArgoStatus::Init => "submitted",
+        ArgoStatus::Running => "running",
+        ArgoStatus::Succeeded => "succeeded",
+        ArgoStatus::Failed => "failed",
+        ArgoStatus::Error => "error",
     }
+}
+
+/// Statistics state of a job from its current workflow. Times come from the
+/// workflow, so they describe the current attempt (Argo resets `startedAt`
+/// and clears `finishedAt` on retry).
+fn polled_workflow_state(
+    state: &FullJobState,
+    environment: &str,
+    item: &SimpleStatus,
+) -> Option<WorkflowState> {
+    let status = stats_status_label(state.status.as_ref()?);
+    let started = status != "submitted";
+    let terminal = stats::is_terminal_status(status);
+    let created_at = item.metadata.creation_timestamp;
+    Some(WorkflowState {
+        job: stats_new_job(
+            state,
+            environment,
+            created_at.unwrap_or(item.status.started_at),
+        ),
+        workflow_name: item.metadata.name.clone(),
+        status,
+        created_at,
+        started_at: started.then_some(item.status.started_at),
+        finished_at: item.status.finished_at.filter(|_| terminal),
+        error_message: item
+            .status
+            .message
+            .clone()
+            .filter(|_| terminal && status != "succeeded")
+            .map(|mut message| {
+                message.truncate(message.floor_char_boundary(MAX_ERROR_MESSAGE_LENGTH));
+                message
+            }),
+    })
 }
 
 fn versions_for_kind(kind: WorkflowKind, all: &JobVersions) -> JobVersions {
@@ -941,16 +979,14 @@ impl StateHandler {
             .expect("live workflows lock poisoned") = live;
 
         let mut expired = Vec::new();
+        let mut polled = Vec::new();
         for item in items {
             // Superseded workflows of a job (after a resubmit) never change
             // or expire the job.
             if !is_current(&item) {
                 continue;
             }
-            let environment = item.metadata.labels.get("bakta-environment").cloned();
-            let finished_at = item.status.finished_at;
-            let message = item.status.message.clone();
-            let Some(state) = state_from_simple_status(item) else {
+            let Some(state) = state_from_simple_status(item.clone()) else {
                 continue;
             };
             if is_state_expired(&state, now) {
@@ -959,29 +995,13 @@ impl StateHandler {
                 }
                 continue;
             }
-            let previous_status = write_lock
-                .get(&state.id)
-                .and_then(|previous| previous.status.clone());
-            if previous_status != state.status
-                && let Some(status) = state.status.as_ref().and_then(stats_status_label)
-            {
-                let environment = environment.as_deref().unwrap_or(&self.environment);
-                let started = state.started.unwrap_or(now);
-                let terminal = stats::is_terminal_status(status);
-                self.stats.record(StatsEvent::Status(StatusUpdate {
-                    job: stats_new_job(&state, environment, started),
-                    workflow_name: state.workflowname.clone().unwrap_or_default(),
-                    status,
-                    started_at: if terminal { started } else { now },
-                    finished_at: terminal.then(|| finished_at.unwrap_or(now)),
-                    error_message: message.filter(|_| terminal && status != "succeeded").map(
-                        |mut message| {
-                            message.truncate(message.floor_char_boundary(MAX_ERROR_MESSAGE_LENGTH));
-                            message
-                        },
-                    ),
-                }));
-            }
+            let environment = item
+                .metadata
+                .labels
+                .get("bakta-environment")
+                .map(String::as_str)
+                .unwrap_or(&self.environment);
+            polled.extend(polled_workflow_state(&state, environment, &item));
             if let Some(previous) = write_lock.get(&state.id)
                 && !is_terminal_status(previous.status.as_ref())
                 && is_terminal_status(state.status.as_ref())
@@ -996,6 +1016,11 @@ impl StateHandler {
             write_lock.insert(state.id, state);
         }
         expired.extend(purge_expired_states(&mut write_lock, now));
+        // Recorded while the lock is held, so it is ordered with the events
+        // of retries and resubmits.
+        if !polled.is_empty() {
+            self.stats.record(StatsEvent::Polled(polled));
+        }
         drop(write_lock);
         self.record_expired(expired);
     }
