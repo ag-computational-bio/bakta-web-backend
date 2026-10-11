@@ -147,6 +147,7 @@ impl Modify for AdminSecurity {
         crate::stats::queries::JobList,
         crate::stats::queries::JobRecord,
         crate::stats::runtimes::KindRuntime,
+        crate::stats::runtimes::OverallRuntime,
         crate::stats::runtimes::RuntimeBucket,
         crate::stats::runtimes::InputSizeRuntime,
         crate::stats::runtimes::SecondsPerMbp,

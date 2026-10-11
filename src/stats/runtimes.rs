@@ -65,6 +65,35 @@ pub struct KindRuntime {
     pub stddev: Option<f64>,
 }
 
+/// Runtime statistics over all selected workflow kinds together.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, FromRow)]
+pub struct OverallRuntime {
+    pub jobs: i64,
+    pub min: Option<f64>,
+    pub p10: Option<f64>,
+    pub p25: Option<f64>,
+    pub p50: Option<f64>,
+    pub p75: Option<f64>,
+    pub p90: Option<f64>,
+    pub p95: Option<f64>,
+    pub p99: Option<f64>,
+    pub max: Option<f64>,
+    pub avg: Option<f64>,
+    pub stddev: Option<f64>,
+}
+
+/// Runtime columns of `KindRuntime` and `OverallRuntime`.
+const RUNTIME_COLUMNS: &str = "count(*) AS jobs, min(runtime_seconds) AS min,
+    percentile_cont(0.1) WITHIN GROUP (ORDER BY runtime_seconds) AS p10,
+    percentile_cont(0.25) WITHIN GROUP (ORDER BY runtime_seconds) AS p25,
+    percentile_cont(0.5) WITHIN GROUP (ORDER BY runtime_seconds) AS p50,
+    percentile_cont(0.75) WITHIN GROUP (ORDER BY runtime_seconds) AS p75,
+    percentile_cont(0.9) WITHIN GROUP (ORDER BY runtime_seconds) AS p90,
+    percentile_cont(0.95) WITHIN GROUP (ORDER BY runtime_seconds) AS p95,
+    percentile_cont(0.99) WITHIN GROUP (ORDER BY runtime_seconds) AS p99,
+    max(runtime_seconds) AS max, avg(runtime_seconds) AS avg,
+    stddev_samp(runtime_seconds) AS stddev";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct RuntimeBucket {
     pub min_seconds: i64,
@@ -112,6 +141,7 @@ pub struct SlowJob {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct RuntimeStats {
     pub jobs: i64,
+    pub overall: OverallRuntime,
     pub by_workflow_kind: Vec<KindRuntime>,
     pub histogram: Vec<RuntimeBucket>,
     pub by_input_size: Vec<InputSizeRuntime>,
@@ -141,25 +171,19 @@ impl StatsDb {
         filter: &StatsFilter,
         workflow_kinds: &[String],
     ) -> Result<RuntimeStats> {
-        let mut builder = QueryBuilder::new(
-            "SELECT workflow_kind, count(*) AS jobs, min(runtime_seconds) AS min,
-                percentile_cont(0.1) WITHIN GROUP (ORDER BY runtime_seconds) AS p10,
-                percentile_cont(0.25) WITHIN GROUP (ORDER BY runtime_seconds) AS p25,
-                percentile_cont(0.5) WITHIN GROUP (ORDER BY runtime_seconds) AS p50,
-                percentile_cont(0.75) WITHIN GROUP (ORDER BY runtime_seconds) AS p75,
-                percentile_cont(0.9) WITHIN GROUP (ORDER BY runtime_seconds) AS p90,
-                percentile_cont(0.95) WITHIN GROUP (ORDER BY runtime_seconds) AS p95,
-                percentile_cont(0.99) WITHIN GROUP (ORDER BY runtime_seconds) AS p99,
-                max(runtime_seconds) AS max, avg(runtime_seconds) AS avg,
-                stddev_samp(runtime_seconds) AS stddev
-             FROM jobs",
-        );
+        let mut builder =
+            QueryBuilder::new(format!("SELECT workflow_kind, {RUNTIME_COLUMNS} FROM jobs"));
         push_kind_filter(&mut builder, filter, workflow_kinds);
         builder
             .push(SUCCEEDED)
             .push(" GROUP BY workflow_kind ORDER BY workflow_kind");
         let by_workflow_kind: Vec<KindRuntime> =
             builder.build_query_as().fetch_all(self.pool()).await?;
+
+        let mut builder = QueryBuilder::new(format!("SELECT {RUNTIME_COLUMNS} FROM jobs"));
+        push_kind_filter(&mut builder, filter, workflow_kinds);
+        builder.push(SUCCEEDED);
+        let overall: OverallRuntime = builder.build_query_as().fetch_one(self.pool()).await?;
 
         let mut builder = QueryBuilder::new(format!(
             "SELECT width_bucket(runtime_seconds, {}) AS bucket, count(*) AS jobs FROM jobs",
@@ -244,7 +268,8 @@ impl StatsDb {
         let slowest = builder.build_query_as().fetch_all(self.pool()).await?;
 
         Ok(RuntimeStats {
-            jobs: by_workflow_kind.iter().map(|kind| kind.jobs).sum(),
+            jobs: overall.jobs,
+            overall,
             by_workflow_kind,
             histogram,
             by_input_size,

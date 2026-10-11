@@ -395,6 +395,10 @@ async fn runtimes_use_succeeded_jobs_and_fixed_buckets() {
         (Some(100.0), Some(5000.0), Some(250.0))
     );
     assert!(bakta.stddev.is_some());
+    assert_eq!(stats.overall.jobs, 5);
+    assert_eq!(stats.overall.max, Some(5000.0));
+    assert!(stats.overall.min.unwrap() <= 100.0);
+    assert!(stats.overall.p50.is_some() && stats.overall.stddev.is_some());
     let histogram: Vec<_> = stats.histogram.iter().map(|bucket| bucket.jobs).collect();
     assert_eq!(histogram, [1, 1, 1, 1, 0, 0, 1, 0, 0]);
     assert_eq!(stats.histogram[8].max_seconds, None);
@@ -424,6 +428,15 @@ async fn runtimes_use_succeeded_jobs_and_fixed_buckets() {
         .await
         .unwrap();
     assert_eq!(fold_only.jobs, 1);
+    let fold = &fold_only.by_workflow_kind[0];
+    assert_eq!(
+        (
+            fold_only.overall.jobs,
+            fold_only.overall.p50,
+            fold_only.overall.avg
+        ),
+        (fold.jobs, fold.p50, fold.avg)
+    );
     assert_eq!(fold_only.queue_seconds.max, Some(600.0));
 
     let empty = db
@@ -432,6 +445,11 @@ async fn runtimes_use_succeeded_jobs_and_fixed_buckets() {
         .unwrap();
     assert_eq!(empty.jobs, 0);
     assert!(empty.by_workflow_kind.is_empty());
+    assert_eq!(empty.overall.jobs, 0);
+    assert_eq!(
+        (empty.overall.min, empty.overall.p50, empty.overall.stddev),
+        (None, None, None)
+    );
     assert_eq!(empty.histogram.len(), 9);
     assert_eq!(empty.by_input_size.len(), 7);
     assert_eq!(empty.seconds_per_mbp.p50, None);
