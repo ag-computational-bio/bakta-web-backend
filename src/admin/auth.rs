@@ -307,9 +307,14 @@ pub mod test_tokens {
     }
 
     pub fn token_with_kid(claims: &Value, kid: &str) -> String {
+        token_signed_with(claims, kid, TEST_RSA_PRIVATE_KEY)
+    }
+
+    /// Token signed with the RSA private key `pem`.
+    pub fn token_signed_with(claims: &Value, kid: &str, pem: &str) -> String {
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(kid.to_string());
-        let key = EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY.as_bytes()).unwrap();
+        let key = EncodingKey::from_rsa_pem(pem.as_bytes()).unwrap();
         encode(&header, claims, &key).unwrap()
     }
 
@@ -450,10 +455,11 @@ mod tests {
             .up_to_n_times(1)
             .mount(&keycloak)
             .await;
-        // After the rotation Keycloak publishes the new key next to the old one.
+        // After the rotation Keycloak publishes a new key next to the old one.
         let mut rotated = jwks();
         let mut new_key = rotated["keys"][1].clone();
         new_key["kid"] = "rotated-key".into();
+        new_key["n"] = super::super::test_keys::TEST_ROTATED_RSA_MODULUS.into();
         rotated["keys"].as_array_mut().unwrap().push(new_key);
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(rotated))
@@ -468,13 +474,24 @@ mod tests {
         .with_min_refresh_interval(Duration::ZERO);
         check(&auth, &claims(&issuer)).await.unwrap();
 
-        let rotated_token = token_with_kid(&claims(&issuer), "rotated-key");
+        let rotated_token = token_signed_with(
+            &claims(&issuer),
+            "rotated-key",
+            super::super::test_keys::TEST_ROTATED_RSA_PRIVATE_KEY,
+        );
         let user = auth
             .authenticate(Some(&format!("Bearer {rotated_token}")))
             .await
             .unwrap();
         assert_eq!(user.username, "jdoe");
         assert_eq!(keycloak.received_requests().await.unwrap().len(), 2);
+        // The new key ID only accepts tokens signed with the new key.
+        let old_key_token = token_with_kid(&claims(&issuer), "rotated-key");
+        assert!(
+            auth.authenticate(Some(&format!("Bearer {old_key_token}")))
+                .await
+                .is_err()
+        );
         // The old key still works.
         check(&auth, &claims(&issuer)).await.unwrap();
     }
