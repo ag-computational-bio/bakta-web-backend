@@ -17,6 +17,8 @@ mod bakta_handler;
 mod metrics;
 mod openapi;
 mod s3_handler;
+#[cfg(test)]
+mod test_support;
 mod v1;
 mod v2;
 mod workflow_catalog;
