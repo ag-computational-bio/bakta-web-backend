@@ -19,7 +19,7 @@ mod bakta_handler;
 mod metrics;
 mod openapi;
 mod s3_handler;
-// Wired into the job lifecycle and the admin API in later steps.
+// Parts are used by the admin API, added in a later step.
 #[allow(dead_code)]
 mod stats;
 #[cfg(test)]
@@ -62,6 +62,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             v2::api_structs::BaktaApiV2::openapi(),
         );
 
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("bakta_web_backend=info"));
+
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    let environment = dotenvy::var("ENVIRONMENT").unwrap_or_else(|_| "production".to_string());
+    if !regex::Regex::new(r"^[A-Za-z0-9._-]{1,63}$")?.is_match(&environment) {
+        return Err(format!("Invalid ENVIRONMENT value: {environment}").into());
+    }
+    let stats = match dotenvy::var("STATS_DATABASE_URL") {
+        Ok(url) if !url.is_empty() => {
+            let db = stats::StatsDb::connect_lazy(&url)?;
+            let migration_db = db.clone();
+            tokio::spawn(async move {
+                while let Err(error) = migration_db.migrate().await {
+                    tracing::warn!(%error, "stats_migration_failed, retrying in 30 seconds");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+                tracing::info!("Statistics database is ready");
+            });
+            let optional = |name: &str| dotenvy::var(name).ok().filter(|value| !value.is_empty());
+            stats::StatsRecorder::new(
+                db,
+                stats::JobVersions {
+                    bakta_version: optional("BAKTA_VERSION"),
+                    bakta_db_version: optional("DATABASE_VERSION"),
+                    baktfold_version: optional("BAKTFOLD_VERSION"),
+                    baktfold_db_version: optional("BAKTFOLD_DATABASE_VERSION"),
+                },
+            )
+        }
+        _ => {
+            tracing::info!("STATS_DATABASE_URL is not set, job statistics are disabled");
+            stats::StatsRecorder::disabled()
+        }
+    };
+
     let bakta_handler = Arc::new(
         BaktaHandler::new(
             dotenvy::var("ARGO_TOKEN")?,
@@ -76,14 +113,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dotenvy::var("BAKTFOLD_VERSION").unwrap_or_default(),
             dotenvy::var("BAKTFOLD_DATABASE_VERSION").unwrap_or_default(),
             dotenvy::var("BACKEND_VERSION")?,
+            environment,
+            stats,
         )
         .await,
     );
-
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("bakta_web_backend=info"));
-
-    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     tracing::info!(?socket_address, "Starting bakta web backend");
     tracing::info!(?metrics_socket_address, "Starting private metrics endpoint");

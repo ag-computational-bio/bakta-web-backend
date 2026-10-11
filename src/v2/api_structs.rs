@@ -46,6 +46,7 @@ use crate::v2::api_paths::*;
         EmptyConfig,
         BaktaV2Config,
         V2StartRequest,
+        InputStats,
         WorkflowStartConfig,
         V2ListRequest,
         V2JobStatus,
@@ -430,6 +431,18 @@ pub struct V2StartRequest {
     pub job: JobReference,
     #[serde(flatten)]
     pub workflow: WorkflowStartConfig,
+    /// Optional statistics about the uploaded input, used for job statistics only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_stats: Option<InputStats>,
+}
+
+/// Statistics about the uploaded input, filled by the web UI from the parsed FASTA input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct InputStats {
+    /// Number of input sequences.
+    pub sequence_count: u64,
+    /// Total input length in bp.
+    pub total_length: u64,
 }
 
 /// Workflow-specific configuration payload accepted by the V2 start endpoint.

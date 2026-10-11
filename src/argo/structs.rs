@@ -141,6 +141,8 @@ pub struct SimpleStatusStatus {
     pub started_at: chrono::DateTime<Utc>,
     #[serde(rename = "finishedAt")]
     pub finished_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

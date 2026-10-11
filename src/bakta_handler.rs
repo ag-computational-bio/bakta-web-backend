@@ -11,11 +11,13 @@ use crate::{
     argo::client::ArgoClient,
     metrics::AppMetrics,
     s3_handler::S3Handler,
+    stats,
+    stats::{JobVersions, NewJob, StatsEvent, StatsRecorder, StatusUpdate, SubmittedJob},
     v2::api_structs::{
         FailedJobStatus as V2FailedJobStatus, FailedJobStatusKind, JobReference,
         JobStatus as V2JobStatusKind, ResultKind, StageLog, StageStatus, V2JobStatus,
         V2ListResponse, V2LogsResponse, V2ResultResponse, V2StartRequest, V2VersionResponse,
-        WorkflowKind,
+        WorkflowKind, WorkflowStartConfig,
     },
     workflow_catalog::{workflow_descriptor, workflow_template_name},
 };
@@ -43,6 +45,9 @@ pub struct StateHandler {
     pub baktfold_version: String,
     /// Jobs with a workflow submission in progress.
     pub starting_jobs: std::sync::Mutex<HashSet<Uuid>>,
+    /// Environment name for job records and the `bakta-environment` workflow label.
+    pub environment: String,
+    pub stats: StatsRecorder,
 }
 
 /// Releases a start reservation when dropped.
@@ -272,8 +277,110 @@ fn is_state_expired(state: &FullJobState, now: DateTime<Utc>) -> bool {
         .unwrap_or(false)
 }
 
-fn purge_expired_states(job_state: &mut HashMap<Uuid, FullJobState>, now: DateTime<Utc>) {
-    job_state.retain(|_, state| !is_state_expired(state, now));
+/// Removes expired jobs and returns their IDs.
+fn purge_expired_states(
+    job_state: &mut HashMap<Uuid, FullJobState>,
+    now: DateTime<Utc>,
+) -> Vec<Uuid> {
+    let mut expired = Vec::new();
+    job_state.retain(|id, state| {
+        let keep = !is_state_expired(state, now);
+        if !keep {
+            expired.push(*id);
+        }
+        keep
+    });
+    expired
+}
+
+const MAX_ERROR_MESSAGE_LENGTH: usize = 500;
+
+fn stats_new_job(state: &FullJobState, environment: &str, created_at: DateTime<Utc>) -> NewJob {
+    NewJob {
+        id: state.id,
+        environment: environment.to_string(),
+        workflow_kind: workflow_kind_label_value(state.workflow_kind).to_string(),
+        api_version: state.api_version.as_label_value().to_string(),
+        name: Some(state.name.clone()),
+        created_at,
+    }
+}
+
+fn stats_status_label(status: &ArgoStatus) -> Option<&'static str> {
+    match status {
+        ArgoStatus::Running => Some("running"),
+        status => completion_status_label(status),
+    }
+}
+
+fn versions_for_kind(kind: WorkflowKind, all: &JobVersions) -> JobVersions {
+    let uses_bakta = kind != WorkflowKind::Baktfold;
+    let uses_baktfold = matches!(kind, WorkflowKind::BaktaBaktfold | WorkflowKind::Baktfold);
+    JobVersions {
+        bakta_version: all.bakta_version.clone().filter(|_| uses_bakta),
+        bakta_db_version: all.bakta_db_version.clone().filter(|_| uses_bakta),
+        baktfold_version: all.baktfold_version.clone().filter(|_| uses_baktfold),
+        baktfold_db_version: all.baktfold_db_version.clone().filter(|_| uses_baktfold),
+    }
+}
+
+fn non_empty(value: &Option<String>) -> Option<String> {
+    value.clone().filter(|value| !value.trim().is_empty())
+}
+
+/// Input details of a start request that go into the job statistics.
+#[derive(Default)]
+struct SubmissionDetails {
+    genus: Option<String>,
+    species: Option<String>,
+    strain: Option<String>,
+    sequence_count: Option<i32>,
+    total_length: Option<i64>,
+    config: Option<serde_json::Value>,
+}
+
+impl SubmissionDetails {
+    fn from_v1(config: &crate::api_structs::JobConfig) -> Self {
+        let mut value = serde_json::to_value(config).ok();
+        // Only record whether a training file was given, not its value.
+        if let Some(object) = value.as_mut().and_then(|value| value.as_object_mut())
+            && let Some(prodigal) = object.remove("prodigalTrainingFile")
+        {
+            object.insert(
+                "hasProdigalTrainingFile".to_string(),
+                serde_json::Value::Bool(!prodigal.is_null()),
+            );
+        }
+        Self {
+            genus: non_empty(&config.genus),
+            species: non_empty(&config.species),
+            strain: non_empty(&config.strain),
+            config: value,
+            ..Default::default()
+        }
+    }
+
+    fn from_v2(request: &V2StartRequest) -> Self {
+        let mut details = match &request.workflow {
+            WorkflowStartConfig::Bakta(config) | WorkflowStartConfig::BaktaBaktfold(config) => {
+                Self {
+                    genus: non_empty(&config.genus),
+                    species: non_empty(&config.species),
+                    strain: non_empty(&config.strain),
+                    ..Default::default()
+                }
+            }
+            _ => Self::default(),
+        };
+        details.config = serde_json::to_value(&request.workflow)
+            .ok()
+            .and_then(|value| value.get("config").cloned());
+        if let Some(input_stats) = request.input_stats {
+            details.sequence_count = i32::try_from(input_stats.sequence_count).ok();
+            details.total_length = i64::try_from(input_stats.total_length).ok();
+        }
+        details
+    }
 }
 
 fn normalize_stage_identifier(value: &str) -> String {
@@ -581,6 +688,8 @@ impl BaktaHandler {
         baktfold_version: String,
         baktfold_database_version: String,
         backend_version: String,
+        environment: String,
+        stats: StatsRecorder,
     ) -> Self {
         let argo_client = Arc::new(ArgoClient::new(argo_token, argo_url, argo_namespace));
         let metrics = Arc::new(AppMetrics::new());
@@ -593,6 +702,8 @@ impl BaktaHandler {
             bakta_version: bakta_version.clone(),
             baktfold_version: baktfold_version.clone(),
             starting_jobs: Default::default(),
+            environment,
+            stats,
         });
 
         let state_handler_clone = state_handler.clone();
@@ -632,42 +743,83 @@ impl StateHandler {
                     Ok(status) => status,
                     Err(e) => {
                         self.metrics.record_poll_error();
-                        purge_expired_states(&mut *self.job_state.write().await, now);
+                        let expired = purge_expired_states(&mut *self.job_state.write().await, now);
+                        self.record_expired(expired);
                         tracing::error!(?e, "Failed to query workflow_status");
                         tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
                         continue;
                     }
                 };
 
-                let mut write_lock = self.job_state.write().await;
-                for item in initial.items {
-                    if let Some(state) = state_from_simple_status(item) {
-                        if is_state_expired(&state, now) {
-                            write_lock.remove(&state.id);
-                            continue;
-                        }
-                        if let Some(previous) = write_lock.get(&state.id)
-                            && !is_terminal_status(previous.status.as_ref())
-                            && is_terminal_status(state.status.as_ref())
-                            && let Some(status) =
-                                state.status.as_ref().and_then(completion_status_label)
-                        {
-                            self.metrics.record_job_completed(
-                                workflow_kind_label_value(state.workflow_kind),
-                                status,
-                                runtime_from_state(&state),
-                            );
-                        }
-                        write_lock.insert(state.id, state);
-                    }
-                }
-                purge_expired_states(&mut write_lock, now);
-                drop(write_lock);
+                self.apply_workflow_statuses(initial.items, now).await;
                 tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
             }
             #[allow(unreachable_code)]
             Ok::<(), anyhow::Error>(())
         });
+    }
+
+    /// Merges the workflow list from Argo into the job state, records
+    /// metrics and statistics for status changes and drops expired jobs.
+    pub(crate) async fn apply_workflow_statuses(
+        &self,
+        items: Vec<SimpleStatus>,
+        now: DateTime<Utc>,
+    ) {
+        let mut write_lock = self.job_state.write().await;
+        let mut expired = Vec::new();
+        for item in items {
+            let environment = item.metadata.labels.get("bakta-environment").cloned();
+            let finished_at = item.status.finished_at;
+            let message = item.status.message.clone();
+            let Some(state) = state_from_simple_status(item) else {
+                continue;
+            };
+            if is_state_expired(&state, now) {
+                if write_lock.remove(&state.id).is_some() {
+                    expired.push(state.id);
+                }
+                continue;
+            }
+            let previous_status = write_lock
+                .get(&state.id)
+                .and_then(|previous| previous.status.clone());
+            if previous_status != state.status
+                && let Some(status) = state.status.as_ref().and_then(stats_status_label)
+            {
+                let environment = environment.as_deref().unwrap_or(&self.environment);
+                let started = state.started.unwrap_or(now);
+                let terminal = stats::is_terminal_status(status);
+                self.stats.record(StatsEvent::Status(StatusUpdate {
+                    job: stats_new_job(&state, environment, started),
+                    workflow_name: state.workflowname.clone().unwrap_or_default(),
+                    status,
+                    started_at: if terminal { started } else { now },
+                    finished_at: terminal.then(|| finished_at.unwrap_or(now)),
+                    error_message: message.filter(|_| terminal && status != "succeeded").map(
+                        |mut message| {
+                            message.truncate(message.floor_char_boundary(MAX_ERROR_MESSAGE_LENGTH));
+                            message
+                        },
+                    ),
+                }));
+            }
+            if let Some(previous) = write_lock.get(&state.id)
+                && !is_terminal_status(previous.status.as_ref())
+                && is_terminal_status(state.status.as_ref())
+                && let Some(status) = state.status.as_ref().and_then(completion_status_label)
+            {
+                self.metrics.record_job_completed(
+                    workflow_kind_label_value(state.workflow_kind),
+                    status,
+                    runtime_from_state(&state),
+                );
+            }
+            write_lock.insert(state.id, state);
+        }
+        expired.extend(purge_expired_states(&mut write_lock, now));
+        drop(write_lock);
+        self.record_expired(expired);
     }
 
     pub async fn get_job_states(&self, request_jobs: Vec<Job>) -> ListResponse {
@@ -903,7 +1055,9 @@ impl StateHandler {
             }
             self.argo_client.delete_workflow(state).await?;
         }
-        write_lock.remove(&job_id);
+        if write_lock.remove(&job_id).is_some() {
+            self.stats.record(StatsEvent::Deleted { id: job_id });
+        }
         Ok(())
     }
 
@@ -933,6 +1087,15 @@ impl StateHandler {
 
         let job_id = Uuid::new_v4();
         let secret = Alphanumeric.sample_string(&mut rand::rng(), 32);
+        let now = Utc::now();
+        self.stats.record(StatsEvent::Created(NewJob {
+            id: job_id,
+            environment: self.environment.clone(),
+            workflow_kind: workflow_kind_label_value(workflow_kind).to_string(),
+            api_version: api_version.as_label_value().to_string(),
+            name: Some(stripped.clone()),
+            created_at: now,
+        }));
         self.job_state.write().await.insert(
             job_id,
             FullJobState {
@@ -941,7 +1104,7 @@ impl StateHandler {
                 argo_ressource_version: None,
                 status: None,
                 started: None,
-                updated: Some(Utc::now()),
+                updated: Some(now),
                 workflowname: None,
                 secret: secret.clone(),
                 name: stripped,
@@ -978,8 +1141,41 @@ impl StateHandler {
             .contains(job_id)
     }
 
-    fn submit_labels(state: &FullJobState, origin: Option<String>) -> HashMap<String, String> {
+    fn record_expired(&self, expired: Vec<Uuid>) {
+        for id in expired {
+            self.stats.record(StatsEvent::Expired { id });
+        }
+    }
+
+    fn record_submitted(
+        &self,
+        state: &FullJobState,
+        details: SubmissionDetails,
+        workflow_name: &str,
+    ) {
+        let now = Utc::now();
+        self.stats
+            .record(StatsEvent::Submitted(Box::new(SubmittedJob {
+                job: stats_new_job(state, &self.environment, now),
+                genus: details.genus,
+                species: details.species,
+                strain: details.strain,
+                sequence_count: details.sequence_count,
+                total_length: details.total_length,
+                config: details.config,
+                versions: versions_for_kind(state.workflow_kind, &self.stats.versions),
+                workflow_name: workflow_name.to_string(),
+                submitted_at: now,
+            })));
+    }
+
+    fn submit_labels(
+        &self,
+        state: &FullJobState,
+        origin: Option<String>,
+    ) -> HashMap<String, String> {
         HashMap::from([
+            ("bakta-environment".to_string(), self.environment.clone()),
             ("jobid".to_string(), state.id.to_string()),
             ("name".to_string(), state.name.clone()),
             ("secret".to_string(), state.secret.clone()),
@@ -1011,6 +1207,7 @@ impl StateHandler {
         let Job { id, secret } = &start_settings.job;
         let id = *id;
 
+        let details = SubmissionDetails::from_v1(&start_settings.config);
         let parameters = start_settings.config.into_parameters();
         let template_name = format!("bakta-job-{}", bakta_version);
 
@@ -1033,7 +1230,7 @@ impl StateHandler {
             }
             let reservation = self.reserve_start(id)?;
             (
-                Self::submit_labels(state, origin),
+                self.submit_labels(state, origin),
                 state.api_version,
                 state.workflow_kind,
                 reservation,
@@ -1087,6 +1284,7 @@ impl StateHandler {
             state.api_version.as_label_value(),
             workflow_kind_label_value(state.workflow_kind),
         );
+        self.record_submitted(state, details, &workflow_name);
         tracing::info!(
             job_id = %id,
             api_version = state.api_version.as_label_value(),
@@ -1104,6 +1302,7 @@ impl StateHandler {
         origin: Option<String>,
     ) -> Result<()> {
         let workflow_kind = start_settings.workflow.workflow_kind();
+        let details = SubmissionDetails::from_v2(&start_settings);
         let parameters = start_settings.workflow.into_parameters()?;
         let JobReference { job_id, secret } = start_settings.job;
         let descriptor = workflow_descriptor(workflow_kind);
@@ -1134,7 +1333,7 @@ impl StateHandler {
 
             let reservation = self.reserve_start(job_id)?;
             (
-                Self::submit_labels(state, origin),
+                self.submit_labels(state, origin),
                 state.api_version,
                 reservation,
             )
@@ -1185,6 +1384,7 @@ impl StateHandler {
             state.api_version.as_label_value(),
             workflow_kind_label_value(state.workflow_kind),
         );
+        self.record_submitted(state, details, &workflow_name);
         tracing::info!(
             job_id = %job_id,
             api_version = state.api_version.as_label_value(),
@@ -1617,7 +1817,9 @@ mod tests {
             ),
         ]);
 
-        purge_expired_states(&mut job_state, now);
+        let expired = purge_expired_states(&mut job_state, now);
+
+        assert_eq!(expired, vec![expired_id]);
 
         assert!(!job_state.contains_key(&expired_id));
         assert!(job_state.contains_key(&fresh_id));
@@ -1663,6 +1865,8 @@ mod tests {
             bakta_version: "1.0.0".to_string(),
             baktfold_version: "1.0.0".to_string(),
             starting_jobs: Default::default(),
+            environment: "production".to_string(),
+            stats: StatsRecorder::disabled(),
         };
 
         let rendered = state_handler

@@ -27,6 +27,14 @@ use uuid::Uuid;
 pub const TEST_SECRET: &str = "s3cret";
 
 pub fn test_handler(argo_url: &str, s3_url: &str) -> Arc<BaktaHandler> {
+    test_handler_with_stats(argo_url, s3_url, crate::stats::StatsRecorder::disabled())
+}
+
+pub fn test_handler_with_stats(
+    argo_url: &str,
+    s3_url: &str,
+    stats: crate::stats::StatsRecorder,
+) -> Arc<BaktaHandler> {
     let state_handler = Arc::new(StateHandler {
         job_state: RwLock::new(HashMap::new()),
         argo_client: Arc::new(ArgoClient::new(
@@ -38,6 +46,8 @@ pub fn test_handler(argo_url: &str, s3_url: &str) -> Arc<BaktaHandler> {
         bakta_version: "1.9.0".to_string(),
         baktfold_version: "0.7.0".to_string(),
         starting_jobs: Default::default(),
+        environment: "production".to_string(),
+        stats,
     });
     Arc::new(BaktaHandler {
         s3_handler: S3Handler::new(

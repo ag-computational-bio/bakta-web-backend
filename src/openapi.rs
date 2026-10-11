@@ -62,6 +62,7 @@ use utoipa::OpenApi;
         crate::v2::api_structs::EmptyConfig,
         crate::v2::api_structs::BaktaV2Config,
         crate::v2::api_structs::V2StartRequest,
+        crate::v2::api_structs::InputStats,
         crate::v2::api_structs::WorkflowStartConfig,
         crate::v2::api_structs::V2ListRequest,
         crate::v2::api_structs::V2JobStatus,
