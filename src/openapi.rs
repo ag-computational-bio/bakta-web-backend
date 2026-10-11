@@ -77,3 +77,28 @@ use utoipa::OpenApi;
     ))
 )]
 pub struct BaktaServiceApi;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_v1_and_v2_schemas_do_not_share_names() {
+        let doc = serde_json::to_value(BaktaServiceApi::openapi()).unwrap();
+        let schemas = &doc["components"]["schemas"];
+        assert!(schemas["JobStatus"]["properties"]["jobID"].is_object());
+        assert!(schemas["FailedJobStatus"]["properties"]["jobID"].is_object());
+        assert!(schemas["DermType"].to_string().contains("MONODERM"));
+        assert!(
+            schemas["V2JobStatusKind"]
+                .to_string()
+                .contains("successful")
+        );
+        assert!(schemas["V2FailedJobStatus"]["properties"]["job_id"].is_object());
+        assert!(schemas["V2DermType"].to_string().contains("monoderm"));
+        assert_eq!(
+            schemas["V2JobStatus"]["properties"]["status"]["$ref"],
+            "#/components/schemas/V2JobStatusKind"
+        );
+    }
+}

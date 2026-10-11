@@ -97,6 +97,7 @@ pub enum UploadKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
+#[schema(as = V2DermType)]
 pub enum DermType {
     Unknown,
     Monoderm,
@@ -116,6 +117,7 @@ pub enum StageStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
+#[schema(as = V2JobStatusKind)]
 pub enum JobStatus {
     Init,
     Running,
@@ -142,6 +144,7 @@ pub struct JobReference {
 
 /// Failure details for requested jobs that could not be listed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[schema(as = V2FailedJobStatus)]
 pub struct FailedJobStatus {
     pub job_id: Uuid,
     pub status: FailedJobStatusKind,
