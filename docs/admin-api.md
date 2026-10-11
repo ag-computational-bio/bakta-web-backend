@@ -136,7 +136,7 @@ The duration values (`avg`, `p50`, `p90`, `p99`) are null when no matching job h
 ```
 
 With `group_by=none`, `group` is `null`. Buckets without jobs are left out; the UI fills gaps.
-`runtime_p50`, `runtime_p90` and `runtime_avg` are null when the bucket has no succeeded jobs with a runtime.
+`runtime_p50`, `runtime_p90` and `runtime_avg` use succeeded jobs only (by `outcome`) and are null when the bucket has no succeeded jobs with a runtime.
 
 ### `GET /stats/versions?environment&from&to`
 
@@ -146,7 +146,7 @@ With `group_by=none`, `group` is `null`. Buckets without jobs are left out; the 
 
 ### `GET /stats/runtimes?environment&from&to&workflow_kind`
 
-`workflow_kind` is optional, comma separated. Runtime statistics only use jobs with status `succeeded` and a non-null `runtime_seconds`.
+`workflow_kind` is optional, comma separated. Runtime statistics only use succeeded jobs (by `outcome`, so jobs that were later deleted or expired still count) with a non-null `runtime_seconds`.
 
 ```json
 {
