@@ -351,6 +351,133 @@ impl S3Handler {
     }
 }
 
+// Used by the admin API once its routes are added.
+#[allow(dead_code)]
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Upper limit of list pages for one purge, so a broken listing cannot loop forever.
+// Used by the admin API once its routes are added.
+#[allow(dead_code)]
+const MAX_LIST_PAGES: usize = 100;
+
+// Used by the admin API once its routes are added.
+#[allow(dead_code)]
+impl S3Handler {
+    fn bucket_url(&self) -> String {
+        let protocol = if self.is_ssl { "https://" } else { "http://" };
+        let endpoint = self
+            .endpoint
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        format!("{protocol}{}.{endpoint}/", self.bucket)
+    }
+
+    /// Deletes all objects of a job (inputs and results) and returns how many were deleted.
+    pub async fn purge_job_objects(&self, job_id: &str) -> Result<u64> {
+        lazy_static::lazy_static! {
+            static ref KEY: regex::Regex = regex::Regex::new("<Key>([^<]*)</Key>").unwrap();
+            static ref TOKEN: regex::Regex =
+                regex::Regex::new("<NextContinuationToken>([^<]*)</NextContinuationToken>").unwrap();
+        }
+        let prefix = format!("jobs/{job_id}/");
+        let mut keys = Vec::new();
+        let mut continuation: Option<String> = None;
+        for _ in 0..MAX_LIST_PAGES {
+            let mut url = Url::parse(&self.bucket_url())?;
+            url.query_pairs_mut()
+                .append_pair("list-type", "2")
+                .append_pair("prefix", &prefix);
+            if let Some(token) = &continuation {
+                url.query_pairs_mut()
+                    .append_pair("continuation-token", token);
+            }
+            let signed = presign(
+                &self.access_key,
+                &self.secret_key,
+                Method::GET,
+                url.as_str(),
+            )
+            .await?;
+            let body = self
+                .client
+                .get(signed)
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await?;
+            keys.extend(
+                KEY.captures_iter(&body)
+                    .map(|capture| xml_unescape(&capture[1]))
+                    .filter(|key| key.starts_with(&prefix)),
+            );
+            continuation = TOKEN
+                .captures(&body)
+                .map(|capture| xml_unescape(&capture[1]));
+            if continuation.is_none() || !body.contains("<IsTruncated>true</IsTruncated>") {
+                break;
+            }
+        }
+
+        let mut deleted = 0;
+        for key in keys {
+            let mut url = Url::parse(&self.bucket_url())?;
+            url.set_path(&key);
+            let signed = presign(
+                &self.access_key,
+                &self.secret_key,
+                Method::DELETE,
+                url.as_str(),
+            )
+            .await?;
+            self.client
+                .delete(signed)
+                .send()
+                .await?
+                .error_for_status()?;
+            deleted += 1;
+        }
+        Ok(deleted)
+    }
+
+    /// Sends all requests for the bucket host to `address`. Only for tests
+    /// with a local mock server.
+    #[cfg(test)]
+    pub fn with_bucket_host_address(mut self, address: std::net::SocketAddr) -> Self {
+        let host = Url::parse(&self.bucket_url())
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_string();
+        self.client = Client::builder().resolve(&host, address).build().unwrap();
+        self
+    }
+}
+
+// Used by the admin API once its routes are added.
+#[allow(dead_code)]
+async fn presign(access_key: &str, secret_key: &str, method: Method, url: &str) -> Result<String> {
+    let signer = aws::default_signer("s3", "RegionOne")
+        .with_credential_provider(StaticCredentialProvider::new(access_key, secret_key));
+    let mut parts = http::Request::builder()
+        .method(method)
+        .uri(url)
+        .body(())?
+        .into_parts()
+        .0;
+    signer
+        .sign(&mut parts, Some(std::time::Duration::from_secs(300)))
+        .await?;
+    Ok(parts.uri.to_string())
+}
+
 /// Creates a fully customized presigned S3 url.
 ///
 /// ## Arguments:
@@ -502,6 +629,84 @@ mod tests {
                 "response-content-disposition=attachment%3B%20filename%3D%22sample.json%22"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn test_purge_job_objects_lists_and_deletes_all_pages() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path, query_param, query_param_is_missing},
+        };
+        let server = MockServer::start().await;
+        let page = |keys: &[&str], next: Option<&str>| {
+            let contents: String = keys
+                .iter()
+                .map(|key| format!("<Contents><Key>{key}</Key></Contents>"))
+                .collect();
+            let next = next
+                .map(|token| {
+                    format!("<IsTruncated>true</IsTruncated><NextContinuationToken>{token}</NextContinuationToken>")
+                })
+                .unwrap_or_else(|| "<IsTruncated>false</IsTruncated>".to_string());
+            ResponseTemplate::new(200).set_body_string(format!(
+                "<ListBucketResult>{contents}{next}</ListBucketResult>"
+            ))
+        };
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .and(query_param("prefix", "jobs/job-1/"))
+            .and(query_param_is_missing("continuation-token"))
+            .respond_with(page(
+                &[
+                    "jobs/job-1/inputs/fastadata.fasta",
+                    "jobs/job-1/results/result.json",
+                ],
+                Some("a&amp;b"),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .and(query_param("continuation-token", "a&b"))
+            .respond_with(page(&["jobs/job-1/results/result.tsv"], None))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let handler = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            format!("http://s3.test:{}", server.address().port()),
+        )
+        .with_bucket_host_address(*server.address());
+        assert_eq!(handler.purge_job_objects("job-1").await.unwrap(), 3);
+
+        let requests = server.received_requests().await.unwrap();
+        let deleted: Vec<_> = requests
+            .iter()
+            .filter(|request| request.method.as_str() == "DELETE")
+            .map(|request| request.url.path().to_string())
+            .collect();
+        assert_eq!(
+            deleted,
+            [
+                "/jobs/job-1/inputs/fastadata.fasta",
+                "/jobs/job-1/results/result.json",
+                "/jobs/job-1/results/result.tsv"
+            ]
+        );
+        assert!(requests.iter().all(|request| {
+            request
+                .url
+                .query()
+                .unwrap_or_default()
+                .contains("X-Amz-Signature")
+        }));
     }
 
     #[test]
