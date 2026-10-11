@@ -56,6 +56,7 @@ pub fn test_handler_full(
         baktfold_version: "0.7.0".to_string(),
         starting_jobs: Default::default(),
         unknown_submissions: Default::default(),
+        deleted_jobs: Default::default(),
         live_workflows: Default::default(),
         environment: "production".to_string(),
         stats,

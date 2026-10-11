@@ -50,6 +50,12 @@ pub struct StateHandler {
     /// Jobs whose submission may have created a workflow that could not be
     /// found yet. The polling loop resolves them.
     pub unknown_submissions: std::sync::Mutex<HashMap<Uuid, UnknownSubmission>>,
+    /// Deleted and expired jobs with the time they were removed. A poll never
+    /// adds them back, even when its workflow list was fetched before the
+    /// removal or Argo still lists the workflow for a while. Entries are kept
+    /// for `JOB_RETENTION_DAYS`: after that, a poll treats a finished workflow
+    /// of the job as expired anyway. Job IDs are random and never reused.
+    pub deleted_jobs: std::sync::Mutex<HashMap<Uuid, DateTime<Utc>>>,
     /// Live workflow per job from the last successful poll.
     pub live_workflows: std::sync::RwLock<HashMap<Uuid, LiveWorkflow>>,
     /// Environment name for job records and the `bakta-environment` workflow label.
@@ -937,6 +943,7 @@ impl BaktaHandler {
             baktfold_version: baktfold_version.clone(),
             starting_jobs: Default::default(),
             unknown_submissions: Default::default(),
+            deleted_jobs: Default::default(),
             live_workflows: Default::default(),
             environment,
             stats,
@@ -1025,6 +1032,14 @@ impl StateHandler {
             .retain(|id, marker| {
                 reserved.contains(id) || current.contains_key(id) || marker.still_unknown(now)
             });
+        let deleted = {
+            let mut deleted = self
+                .deleted_jobs
+                .lock()
+                .expect("deleted jobs lock poisoned");
+            deleted.retain(|_, removed_at| *removed_at > now - Duration::days(JOB_RETENTION_DAYS));
+            deleted.clone()
+        };
         let is_current = |item: &SimpleStatus| {
             job_id_label(item)
                 .and_then(|id| current.get(&id))
@@ -1053,7 +1068,11 @@ impl StateHandler {
         for item in items {
             // Superseded workflows of a job (after a resubmit) never change
             // or expire the job.
-            if !is_current(&item) || job_id_label(&item).is_some_and(|id| reserved.contains(&id)) {
+            // Deleted jobs are never added back.
+            if !is_current(&item)
+                || job_id_label(&item)
+                    .is_some_and(|id| reserved.contains(&id) || deleted.contains_key(&id))
+            {
                 continue;
             }
             let Some(state) = state_from_simple_status(item.clone()) else {
@@ -1410,7 +1429,9 @@ impl StateHandler {
         } else {
             self.delete_job_workflows(job_id).await?;
         }
-        if self.job_state.write().await.remove(&job_id).is_some() {
+        let mut job_state = self.job_state.write().await;
+        self.record_deleted(job_id);
+        if job_state.remove(&job_id).is_some() {
             self.stats.record(StatsEvent::Deleted { id: job_id });
         }
         Ok(())
@@ -1575,8 +1596,19 @@ impl StateHandler {
             .insert(job_id, UnknownSubmission::new(Utc::now()));
     }
 
+    /// Keeps polls from adding the job back. Deletes call it while holding
+    /// the job state lock, in the same step that removes the job. Expired
+    /// jobs are recorded by the polling loop itself before its next poll.
+    pub(crate) fn record_deleted(&self, job_id: Uuid) {
+        self.deleted_jobs
+            .lock()
+            .expect("deleted jobs lock poisoned")
+            .insert(job_id, Utc::now());
+    }
+
     fn record_expired(&self, expired: Vec<(Uuid, Option<String>)>) {
         for (id, workflow_name) in expired {
+            self.record_deleted(id);
             self.stats.record(StatsEvent::Expired { id, workflow_name });
         }
     }
@@ -2340,6 +2372,7 @@ mod tests {
             baktfold_version: "1.0.0".to_string(),
             starting_jobs: Default::default(),
             unknown_submissions: Default::default(),
+            deleted_jobs: Default::default(),
             live_workflows: Default::default(),
             environment: "production".to_string(),
             stats: StatsRecorder::disabled(),

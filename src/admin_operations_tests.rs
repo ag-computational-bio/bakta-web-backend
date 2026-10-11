@@ -1845,3 +1845,95 @@ async fn bulk_resubmit_skips_a_job_while_a_user_delete_runs() {
     let states = setup.handler.state_handler.job_state.read().await;
     assert!(!states.contains_key(&id));
 }
+
+#[tokio::test]
+async fn a_poll_fetched_before_a_delete_does_not_add_the_job_back() {
+    let argo = MockServer::start().await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    let state = &setup.handler.state_handler;
+    let by_user = job_with_workflow(&setup.handler, "wf-user", ArgoStatus::Succeeded).await;
+    let by_admin = job_with_workflow(&setup.handler, "wf-admin", ArgoStatus::Succeeded).await;
+    let now = Utc::now();
+    let listed = |id: Uuid, name: &str| {
+        json!({
+            "metadata": {"name": name, "uid": Uuid::new_v4(),
+                         "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}},
+            "status": {"phase": "Succeeded", "startedAt": now.to_rfc3339(), "finishedAt": now.to_rfc3339()}
+        })
+    };
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+            listed(by_user, "wf-user"),
+            listed(by_admin, "wf-admin"),
+        ]})))
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(2)
+        .mount(&argo)
+        .await;
+
+    // The poll fetches the workflow list before the deletes.
+    let fetched = state.argo_client.get_workflow_status().await.unwrap();
+    let (status, body) = call(
+        &setup.router,
+        "DELETE",
+        &format!("/api/v2/job/delete?job_id={by_user}&secret={TEST_SECRET}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = admin_call(
+        &setup,
+        "DELETE",
+        &format!("/api/admin/jobs/{by_admin}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // It is applied after the deletes. The jobs stay gone.
+    state
+        .apply_workflow_statuses(fetched.items, Utc::now())
+        .await;
+    let states = state.job_state.read().await;
+    assert!(!states.contains_key(&by_user));
+    assert!(!states.contains_key(&by_admin));
+    drop(states);
+    for id in [by_user, by_admin] {
+        let (status, body) = call(
+            &setup.router,
+            "POST",
+            "/api/v2/job/list",
+            Some(json!({"jobs": [{"job_id": id, "secret": TEST_SECRET}]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["jobs"], json!([]), "{body}");
+        assert_eq!(body["failed_jobs"][0]["status"], "not_found", "{body}");
+        let (status, body) = call(
+            &setup.router,
+            "POST",
+            "/api/v2/job/result",
+            Some(json!({"job_id": id, "secret": TEST_SECRET})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("Job not found"), "{body}");
+    }
+}
+
+#[tokio::test]
+async fn expired_jobs_are_recorded_like_deleted_jobs() {
+    let setup = admin_setup("http://127.0.0.1:1", "https://s3.example.com", None).await;
+    let state = &setup.handler.state_handler;
+    let id = job_with_workflow(&setup.handler, "wf-old", ArgoStatus::Succeeded).await;
+    state.job_state.write().await.get_mut(&id).unwrap().updated =
+        Some(Utc::now() - Duration::days(40));
+    state.apply_workflow_statuses(vec![], Utc::now()).await;
+    assert!(!state.job_state.read().await.contains_key(&id));
+    assert!(state.deleted_jobs.lock().unwrap().contains_key(&id));
+}

@@ -435,8 +435,11 @@ pub async fn delete_job(
     } else {
         0
     };
-    handler.job_state.write().await.remove(&id);
+    let mut job_state = handler.job_state.write().await;
+    handler.record_deleted(id);
+    job_state.remove(&id);
     handler.stats.record(StatsEvent::Deleted { id });
+    drop(job_state);
     tracing::info!(
         user = %user.username, job_id = %id,
         workflow_name = target.workflow_name.as_deref().unwrap_or(""),
