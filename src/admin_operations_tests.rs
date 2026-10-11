@@ -741,10 +741,30 @@ async fn bulk_retry_and_resubmit_update_the_job_state() {
         .mount(&argo)
         .await;
     Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/new-failed/retry"))
+        .respond_with(workflow("new-failed", "Running"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
         .and(path("/api/v1/workflows/bakta/new-failed/resubmit"))
         .respond_with(workflow("new-failed-2", "Pending"))
         .mount(&argo)
         .await;
+
+    let (_, body) = admin_call(
+        &setup,
+        "POST",
+        "/api/admin/workflows/bulk",
+        Some(json!({"action": "retry", "dry_run": false})),
+    )
+    .await;
+    assert_eq!(body["items"][0]["result"], "done", "{body}");
+    let states = setup.handler.state_handler.job_state.read().await;
+    assert_eq!(states[&id].workflowname.as_deref(), Some("new-failed"));
+    assert!(matches!(states[&id].status, Some(ArgoStatus::Running)));
+    drop(states);
+
     let (_, body) = admin_call(
         &setup,
         "POST",
