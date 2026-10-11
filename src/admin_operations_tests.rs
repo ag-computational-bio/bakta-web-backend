@@ -599,6 +599,132 @@ async fn delete_is_refused_when_the_workflow_lookup_fails() {
     );
 }
 
+/// Argo mock that lists `wf-a` and `wf-b` for the job and answers the
+/// delete of `wf-b` with `wf_b_status`.
+async fn two_workflow_argo(id: Uuid, wf_b_status: u16) -> MockServer {
+    let argo = MockServer::start().await;
+    let job = id.to_string();
+    let items = json!({"items": [
+        listed_workflow("wf-a", "Running", Some(&job), None),
+        listed_workflow("wf-b", "Pending", Some(&job), None),
+    ]});
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .and(query_param(
+            "listOptions.labelSelector",
+            format!("jobid={id}"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(items))
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-a"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-b"))
+        .respond_with(ResponseTemplate::new(wf_b_status).set_body_json(json!({})))
+        .mount(&argo)
+        .await;
+    argo
+}
+
+fn deleted_workflows(requests: Vec<wiremock::Request>) -> Vec<String> {
+    let mut names: Vec<String> = requests
+        .iter()
+        .filter(|request| request.method.as_str() == "DELETE")
+        .map(|request| request.url.path().rsplit('/').next().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn delete_removes_all_workflows_of_the_job() {
+    for user in [false, true] {
+        let id = Uuid::new_v4();
+        let argo = two_workflow_argo(id, 200).await;
+        let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+        let job = job_state(
+            crate::bakta_handler::ApiVersion::V2,
+            WorkflowKind::Bakta,
+            crate::v2::api_structs::ResultKind::Bakta,
+            None,
+        );
+        insert_state(
+            &setup.handler,
+            crate::bakta_handler::FullJobState { id, ..job },
+        )
+        .await;
+
+        let (status, body) = if user {
+            let uri = format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}");
+            call(&setup.router, "DELETE", &uri, None).await
+        } else {
+            let (status, body) =
+                admin_call(&setup, "DELETE", &format!("/api/admin/jobs/{id}"), None).await;
+            assert_eq!(body, json!({"deleted_workflow": true, "purged_objects": 0}));
+            (status, body.to_string())
+        };
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            deleted_workflows(argo.received_requests().await.unwrap()),
+            ["wf-a", "wf-b"]
+        );
+        let states = setup.handler.state_handler.job_state.read().await;
+        assert!(!states.contains_key(&id));
+    }
+}
+
+#[tokio::test]
+async fn a_partly_failed_delete_keeps_the_job() {
+    for user in [false, true] {
+        let id = Uuid::new_v4();
+        let argo = two_workflow_argo(id, 500).await;
+        let s3 = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&s3)
+            .await;
+        let s3_url = format!("http://s3.test:{}", s3.address().port());
+        let setup = admin_setup(&argo.uri(), &s3_url, None).await;
+        let job = job_state(
+            crate::bakta_handler::ApiVersion::V2,
+            WorkflowKind::Bakta,
+            crate::v2::api_structs::ResultKind::Bakta,
+            None,
+        );
+        insert_state(
+            &setup.handler,
+            crate::bakta_handler::FullJobState { id, ..job },
+        )
+        .await;
+
+        let (status, body) = if user {
+            let uri = format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}");
+            call(&setup.router, "DELETE", &uri, None).await
+        } else {
+            let uri = format!("/api/admin/jobs/{id}?purge_data=true");
+            let (status, body) = admin_call(&setup, "DELETE", &uri, None).await;
+            (status, body.to_string())
+        };
+        let expected = if user {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        assert_eq!(status, expected, "{body}");
+        assert!(
+            deleted_workflows(argo.received_requests().await.unwrap())
+                .contains(&"wf-b".to_string())
+        );
+        let states = setup.handler.state_handler.job_state.read().await;
+        assert!(states.contains_key(&id));
+    }
+}
+
 fn listed_workflow(
     name: &str,
     phase: &str,
