@@ -77,11 +77,16 @@ pub enum StatsEvent {
     Created(NewJob),
     Submitted(Box<SubmittedJob>),
     Status(StatusUpdate),
+    /// Argo retry of `workflow_name`. Ignored unless it is the job's workflow.
     Retried {
         id: Uuid,
+        workflow_name: String,
     },
+    /// Argo resubmit of `previous_workflow_name` as `workflow_name`. Ignored
+    /// unless the previous workflow is the job's workflow.
     Resubmitted {
         id: Uuid,
+        previous_workflow_name: String,
         workflow_name: String,
         submitted_at: DateTime<Utc>,
     },
@@ -197,18 +202,20 @@ impl StatsDb {
                 .execute(&self.pool)
                 .await?;
             }
-            StatsEvent::Retried { id } => {
+            StatsEvent::Retried { id, workflow_name } => {
                 sqlx::query(
                     "UPDATE jobs SET status = 'running', outcome = NULL, finished_at = NULL,
                          runtime_seconds = NULL, error_message = NULL, updated_at = now()
-                     WHERE id = $1",
+                     WHERE id = $1 AND (workflow_name IS NULL OR workflow_name = $2)",
                 )
                 .bind(id)
+                .bind(workflow_name)
                 .execute(&self.pool)
                 .await?;
             }
             StatsEvent::Resubmitted {
                 id,
+                previous_workflow_name,
                 workflow_name,
                 submitted_at,
             } => {
@@ -217,11 +224,12 @@ impl StatsDb {
                          submitted_at = $3, started_at = NULL, finished_at = NULL,
                          runtime_seconds = NULL, queue_seconds = NULL, error_message = NULL,
                          updated_at = now()
-                     WHERE id = $1",
+                     WHERE id = $1 AND (workflow_name IS NULL OR workflow_name = $4)",
                 )
                 .bind(id)
                 .bind(workflow_name)
                 .bind(submitted_at)
+                .bind(previous_workflow_name)
                 .execute(&self.pool)
                 .await?;
             }
@@ -487,6 +495,7 @@ mod tests {
 
         db.apply(&StatsEvent::Resubmitted {
             id,
+            previous_workflow_name: "wf-a".to_string(),
             workflow_name: "wf-b".to_string(),
             submitted_at: t0 + ChronoDuration::seconds(60),
         })
@@ -501,8 +510,37 @@ mod tests {
         );
         assert_eq!(record.get::<Option<f64>, _>("runtime_seconds"), None);
 
-        db.apply(&StatsEvent::Retried { id }).await.unwrap();
+        // A retry of the superseded workflow changes nothing.
+        db.apply(&StatsEvent::Retried {
+            id,
+            workflow_name: "wf-a".to_string(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(row(&db, id).await.get::<String, _>("status"), "submitted");
+        db.apply(&StatsEvent::Retried {
+            id,
+            workflow_name: "wf-b".to_string(),
+        })
+        .await
+        .unwrap();
         assert_eq!(row(&db, id).await.get::<String, _>("status"), "running");
+        // Neither does a resubmit of it.
+        db.apply(&StatsEvent::Resubmitted {
+            id,
+            previous_workflow_name: "wf-a".to_string(),
+            workflow_name: "wf-c".to_string(),
+            submitted_at: t0,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            row(&db, id)
+                .await
+                .get::<Option<String>, _>("workflow_name")
+                .as_deref(),
+            Some("wf-b")
+        );
     }
 
     #[tokio::test]
@@ -516,6 +554,7 @@ mod tests {
         db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
         db.apply(&StatsEvent::Resubmitted {
             id,
+            previous_workflow_name: String::new(),
             workflow_name: "wf-b".to_string(),
             submitted_at: t0,
         })

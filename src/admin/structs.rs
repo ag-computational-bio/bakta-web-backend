@@ -224,6 +224,8 @@ pub struct BulkItem {
     /// Null in a dry run.
     pub result: Option<BulkResult>,
     pub error: Option<String>,
+    /// Why the action does not apply, null when it applies.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

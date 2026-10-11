@@ -303,6 +303,7 @@ Runs one action on all live workflows that match a filter.
 - `dry_run` defaults to `true`: return the matching workflows and, per workflow, whether the action applies, without changing anything.
 - `workflow_names`: when given (a real run after a dry run), only workflows in this list that still match the filter are processed.
 - Applicability: `stop` for `Pending` and `Running`, `retry` for `Failed` and `Error`, `resume` only for suspended workflows, `resubmit` for any finished workflow (`Succeeded`, `Failed`, `Error`), `delete` for any.
+- `retry` and `resubmit` only apply to the job's current workflow. An older workflow of a job that was resubmitted is not applicable (`reason` names the current workflow).
 - Workflows are processed one by one. One failure does not stop the others. Each action is logged with the admin user name.
 
 Response:
@@ -312,12 +313,12 @@ Response:
   "dry_run": true,
   "action": "delete",
   "items": [
-    { "name": "...", "job_id": "...", "workflow_kind": "bakta", "phase": "Failed", "finished_at": "...", "applicable": true, "result": null, "error": null }
+    { "name": "...", "job_id": "...", "workflow_kind": "bakta", "phase": "Failed", "finished_at": "...", "applicable": true, "result": null, "error": null, "reason": null }
   ]
 }
 ```
 
-In a dry run `result` is null. In a real run `result` is `done`, `skipped` (not applicable) or `failed` with `error` set.
+In a dry run `result` is null. In a real run `result` is `done`, `skipped` (not applicable) or `failed` with `error` set. `reason` tells why the action does not apply, and is null when it applies.
 
 ## Workflow labels
 

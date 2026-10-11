@@ -422,6 +422,7 @@ async fn current_workflow_comes_from_the_database_after_a_restart() {
     .unwrap();
     db.apply(&StatsEvent::Resubmitted {
         id,
+        previous_workflow_name: String::new(),
         workflow_name: "wf-a".to_string(),
         submitted_at: now,
     })

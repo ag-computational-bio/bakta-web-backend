@@ -708,6 +708,52 @@ async fn bulk_retry_and_resubmit_update_the_job_state() {
 }
 
 #[tokio::test]
+async fn bulk_retry_and_resubmit_skip_superseded_workflows() {
+    let argo = MockServer::start().await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    let id = job_with_workflow(&setup.handler, "wf-b", ArgoStatus::Running).await;
+    let items = json!({"items": [
+        listed_workflow("wf-a", "Failed", Some(&id.to_string()), Some(48)),
+        listed_workflow("wf-b", "Running", Some(&id.to_string()), None),
+    ]});
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(items))
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(workflow("any", "Running"))
+        .mount(&argo)
+        .await;
+
+    for action in ["retry", "resubmit"] {
+        let (status, body) = admin_call(
+            &setup,
+            "POST",
+            "/api/admin/workflows/bulk",
+            Some(json!({"action": action, "dry_run": false})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let item = &body["items"][0];
+        assert_eq!(item["name"], "wf-a");
+        assert_eq!(item["applicable"], false, "{body}");
+        assert_eq!(item["result"], "skipped");
+        assert!(
+            item["reason"]
+                .as_str()
+                .unwrap()
+                .contains("superseded by wf-b"),
+            "{body}"
+        );
+    }
+    assert!(argo_changes(argo.received_requests().await.unwrap()).is_empty());
+    let states = setup.handler.state_handler.job_state.read().await;
+    assert_eq!(states[&id].workflowname.as_deref(), Some("wf-b"));
+    assert!(matches!(states[&id].status, Some(ArgoStatus::Running)));
+}
+
+#[tokio::test]
 async fn resume_only_accepts_suspended_workflows() {
     let argo = MockServer::start().await;
     let mut paused = suspended_workflow();

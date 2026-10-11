@@ -79,14 +79,23 @@ async fn after_retry(state: &BaktaHandler, id: Uuid, workflow_name: &str) {
         job.status = Some(ArgoStatus::Running);
         job.updated = Some(Utc::now());
     }
-    handler.stats.record(StatsEvent::Retried { id });
+    handler.stats.record(StatsEvent::Retried {
+        id,
+        workflow_name: workflow_name.to_string(),
+    });
 }
 
-/// Points the job state and record to the new workflow after an Argo resubmit.
-async fn after_resubmit(state: &BaktaHandler, id: Uuid, workflow: &ArgoWorkflow) {
+/// Points the job state and record to the new workflow after an Argo resubmit
+/// of `old_name`.
+async fn after_resubmit(state: &BaktaHandler, id: Uuid, old_name: &str, workflow: &ArgoWorkflow) {
     let handler = &state.state_handler;
     let now = Utc::now();
-    if let Some(job) = handler.job_state.write().await.get_mut(&id) {
+    if let Some(job) = handler.job_state.write().await.get_mut(&id)
+        && job
+            .workflowname
+            .as_deref()
+            .is_none_or(|name| name == old_name)
+    {
         job.workflowname = Some(workflow.metadata.name.clone());
         job.status = Some(ArgoStatus::Pending);
         job.started = Some(workflow.metadata.creation_timestamp.unwrap_or(now));
@@ -96,6 +105,7 @@ async fn after_resubmit(state: &BaktaHandler, id: Uuid, workflow: &ArgoWorkflow)
     }
     handler.stats.record(StatsEvent::Resubmitted {
         id,
+        previous_workflow_name: old_name.to_string(),
         workflow_name: workflow.metadata.name.clone(),
         submitted_at: now,
     });
@@ -178,7 +188,7 @@ pub async fn resubmit_job(
         user = %user.username, job_id = %id, workflow_name = %old_name,
         new_workflow_name = %new_name, "admin_resubmit"
     );
-    after_resubmit(&state, id, &workflow).await;
+    after_resubmit(&state, id, &old_name, &workflow).await;
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Pending"),
         workflow_name: new_name,
@@ -493,6 +503,19 @@ fn bulk_matches(
     q_matches && phase_matches && kind_matches && age_matches
 }
 
+/// The job's current workflow when `workflow` belongs to a job that has
+/// another current workflow (after a resubmit).
+async fn superseded_by(state: &BaktaHandler, workflow: &ArgoWorkflow) -> Option<String> {
+    let id = workflow
+        .metadata
+        .labels
+        .get("jobid")?
+        .parse::<Uuid>()
+        .ok()?;
+    let current = find_job(state, id).await.ok()?.workflow_name?;
+    (current != workflow.metadata.name).then_some(current)
+}
+
 /// Runs one bulk action on one workflow.
 async fn run_bulk_action(
     state: &BaktaHandler,
@@ -525,7 +548,7 @@ async fn run_bulk_action(
         BulkAction::Resubmit => {
             let new_workflow = argo.resubmit_workflow(name).await?;
             if let Some(id) = job_id {
-                after_resubmit(state, id, &new_workflow).await;
+                after_resubmit(state, id, name, &new_workflow).await;
             }
         }
     }
@@ -579,7 +602,20 @@ pub async fn bulk_workflows(
 
     let mut items = Vec::with_capacity(workflows.len());
     for workflow in workflows {
-        let applicable = bulk_applicable(action, &workflow);
+        let mut reason = (!bulk_applicable(action, &workflow)).then(|| {
+            format!(
+                "Action does not apply to a {} workflow",
+                workflow.status.phase
+            )
+        });
+        // Retry and resubmit only act on the job's current workflow.
+        if reason.is_none()
+            && matches!(action, BulkAction::Retry | BulkAction::Resubmit)
+            && let Some(current) = superseded_by(&state, &workflow).await
+        {
+            reason = Some(format!("Workflow was superseded by {current}"));
+        }
+        let applicable = reason.is_none();
         let (result, error) = if dry_run {
             (None, None)
         } else if !applicable {
@@ -613,6 +649,7 @@ pub async fn bulk_workflows(
             applicable,
             result,
             error,
+            reason,
         });
     }
     Ok(Json(BulkResponse {
