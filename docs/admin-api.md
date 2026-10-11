@@ -87,7 +87,7 @@ The web UI fills it from the parsed FASTA input. The backend stores it in `seque
 
 ## Endpoints
 
-All paths start with `/api/admin`. All responses are JSON. Errors use `{ "error": "message" }`.
+All paths start with `/api/admin`. All responses are JSON. Errors use `{ "error": "message" }`. This includes malformed requests (bad path or query values, malformed JSON, unknown enum values), which answer `400` or `422`.
 
 ### `GET /me`
 

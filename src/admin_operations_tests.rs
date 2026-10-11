@@ -852,3 +852,60 @@ async fn resume_only_accepts_suspended_workflows() {
         }
     }
 }
+
+#[tokio::test]
+async fn malformed_requests_get_json_errors() {
+    let setup = admin_setup("http://127.0.0.1:1", "https://s3.example.com", None).await;
+    let bearer = format!("Bearer {}", setup.token);
+    let auth = [("authorization", bearer.as_str())];
+    let cases = [
+        (
+            "POST",
+            "/api/admin/workflows/bulk",
+            Some(json!({"action": "explode"})),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "GET",
+            "/api/admin/stats/summary?from=yesterday",
+            None,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "GET",
+            "/api/admin/jobs/not-a-uuid",
+            None,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "DELETE",
+            &format!("/api/admin/jobs/{}?purge_data=maybe", Uuid::new_v4()),
+            None,
+            StatusCode::BAD_REQUEST,
+        ),
+    ];
+    for (method, uri, body, expected) in cases {
+        let (status, text) = call_with_headers(&setup.router, method, uri, body, &auth).await;
+        assert_eq!(status, expected, "{uri}: {text}");
+        let body: Value = serde_json::from_str(&text).unwrap_or_else(|_| panic!("{uri}: {text}"));
+        assert!(body["error"].is_string(), "{uri}: {text}");
+    }
+    // Malformed JSON.
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/admin/workflows/bulk")
+        .header("authorization", bearer.as_str())
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from("{not json"))
+        .unwrap();
+    let response = tower::ServiceExt::oneshot(setup.router.clone(), request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body["error"].is_string());
+}

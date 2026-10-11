@@ -2,14 +2,16 @@
 
 use std::sync::Arc;
 
-use axum::{
-    Json,
-    extract::{Path, Query, State},
-};
+use axum::{Json, extract::State};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::{Admin, AdminError, parse_environment, stats_db, structs::*};
+use super::{
+    Admin, AdminError,
+    extract::{self, Path, Query},
+    parse_environment, stats_db,
+    structs::*,
+};
 use crate::{
     api_structs::ArgoStatus,
     argo::structs::ArgoWorkflow,
@@ -591,7 +593,7 @@ async fn run_bulk_action(
 pub async fn bulk_workflows(
     Admin(user): Admin,
     State(state): State<Arc<BaktaHandler>>,
-    Json(request): Json<BulkRequest>,
+    extract::Json(request): extract::Json<BulkRequest>,
 ) -> Result<Json<BulkResponse>, AdminError> {
     let cutoff = match request.filter.finished_before_hours {
         Some(hours) if !hours.is_finite() || hours < 0.0 => {

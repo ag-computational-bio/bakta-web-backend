@@ -2,6 +2,7 @@
 
 pub mod api_paths;
 pub mod auth;
+pub mod extract;
 pub mod operations;
 pub mod structs;
 #[cfg(test)]
@@ -53,6 +54,8 @@ pub enum AdminError {
     Conflict(String),
     Unavailable(String),
     BadGateway(String),
+    /// A request that could not be parsed, with the status of the rejection.
+    Rejected(StatusCode, String),
 }
 
 impl From<AuthError> for AdminError {
@@ -105,6 +108,7 @@ impl IntoResponse for AdminError {
             AdminError::Conflict(message) => (StatusCode::CONFLICT, message),
             AdminError::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
             AdminError::BadGateway(message) => (StatusCode::BAD_GATEWAY, message),
+            AdminError::Rejected(status, message) => (status, message),
         };
         (status, Json(AdminErrorResponse { error })).into_response()
     }

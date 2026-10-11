@@ -2,13 +2,15 @@
 
 use std::sync::Arc;
 
-use axum::{
-    Json,
-    extract::{Path, Query, State},
-};
+use axum::{Json, extract::State};
 use uuid::Uuid;
 
-use super::{Admin, AdminError, parse_environment, stats_db, structs::*};
+use super::{
+    Admin, AdminError,
+    extract::{Path, Query},
+    parse_environment, stats_db,
+    structs::*,
+};
 use crate::{
     argo::structs::ArgoWorkflow,
     bakta_handler::{BaktaHandler, argo_v2_pod_name, workflow_kind_from_label_value},
