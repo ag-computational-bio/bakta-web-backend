@@ -9,7 +9,7 @@ use axum::{
 use reqwest::StatusCode;
 
 use crate::{
-    bakta_handler::{BaktaHandler, REGEX},
+    bakta_handler::{BaktaHandler, JobAlreadyStarted, REGEX},
     v2::api_structs::{
         JobReference, UploadLink, V2InitRequest, V2InitResponse, V2ListRequest, V2ListResponse,
         V2LogsResponse, V2ResultResponse, V2StartRequest, V2VersionResponse,
@@ -176,7 +176,8 @@ pub async fn query_result(
     request_body = V2StartRequest,
     responses(
         (status = 200, body = ()),
-        (status = 400, body = String)
+        (status = 400, body = String),
+        (status = 409, body = String, description = "Job already started.")
     ),
     tag = "v2",
 )]
@@ -199,6 +200,9 @@ pub async fn start_job(
         .await
     {
         Ok(_) => (StatusCode::OK, Json(())).into_response(),
+        Err(e) if e.is::<JobAlreadyStarted>() => {
+            (StatusCode::CONFLICT, Json(e.to_string())).into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, Json(e.to_string())).into_response(),
     }
 }

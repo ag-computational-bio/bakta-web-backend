@@ -329,3 +329,25 @@ async fn delete_checks_secret_and_removes_state() {
     assert_eq!(status, StatusCode::OK);
     assert!(handler.state_handler.job_state.read().await.is_empty());
 }
+
+#[tokio::test]
+async fn start_twice_is_rejected_with_conflict() {
+    let argo = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/bakta/submit"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "metadata": {"name": "bakta-job-x", "creationTimestamp": "2026-01-01T00:00:00Z"}
+        })))
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let id = insert_state(&handler, v1_state(None)).await;
+    let router = test_router(handler);
+    let body = v1_start_body(id, TEST_SECRET);
+    let (status, _) = call(&router, "POST", "/api/v1/job/start", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, text) = call(&router, "POST", "/api/v1/job/start", Some(body)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{text}");
+    assert!(text.contains("already started"), "{text}");
+    assert_eq!(argo.received_requests().await.unwrap().len(), 1);
+}

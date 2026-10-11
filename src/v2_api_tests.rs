@@ -381,3 +381,22 @@ async fn start_returns_bad_request_and_keeps_state_when_argo_fails() {
     assert!(state.status.is_none());
     assert!(state.workflowname.is_none());
 }
+
+#[tokio::test]
+async fn start_twice_is_rejected_with_conflict() {
+    let argo = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(submit_response("wf"))
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let id = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    let router = test_router(handler);
+    let body = start_body(id, TEST_SECRET, "bakta", json!({}));
+    let (status, _) = call(&router, "POST", "/api/v2/job/start", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, text) = call(&router, "POST", "/api/v2/job/start", Some(body)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{text}");
+    assert!(text.contains("already started"), "{text}");
+    assert_eq!(argo.received_requests().await.unwrap().len(), 1);
+}

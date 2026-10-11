@@ -83,6 +83,22 @@ pub struct BaktaHandler {
 
 const JOB_RETENTION_DAYS: i64 = 35;
 
+/// Returned when a start request targets a job that already has a workflow.
+#[derive(Debug)]
+pub struct JobAlreadyStarted;
+
+impl std::fmt::Display for JobAlreadyStarted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Job already started")
+    }
+}
+
+impl std::error::Error for JobAlreadyStarted {}
+
+fn has_workflow(state: &FullJobState) -> bool {
+    state.status.is_some() || state.workflowname.is_some()
+}
+
 impl ApiVersion {
     pub fn as_label_value(self) -> &'static str {
         match self {
@@ -897,6 +913,10 @@ impl StateHandler {
                 return Err(anyhow!("Unauthorized"));
             }
 
+            if has_workflow(state) {
+                return Err(JobAlreadyStarted.into());
+            }
+
             let result = self
                 .argo_client
                 .submit_from_template(
@@ -999,6 +1019,10 @@ impl StateHandler {
 
         if state.workflow_kind != workflow_kind {
             return Err(anyhow!("Workflow kind mismatch"));
+        }
+
+        if has_workflow(state) {
+            return Err(JobAlreadyStarted.into());
         }
 
         let result = self
