@@ -131,6 +131,8 @@ pub struct StatusMetadata {
     pub uid: Uuid,
     #[serde(rename = "resourceVersion")]
     pub resource_version: Option<String>,
+    #[serde(rename = "creationTimestamp", default)]
+    pub creation_timestamp: Option<DateTime<Utc>>,
     pub labels: HashMap<String, String>,
 }
 

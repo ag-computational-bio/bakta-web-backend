@@ -489,6 +489,20 @@ impl StatsDb {
         Ok(found.into_iter().collect())
     }
 
+    /// Recorded workflow names of the jobs in `ids`.
+    pub async fn workflow_names(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, String>> {
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT id, workflow_name FROM jobs WHERE id = ANY($1) AND workflow_name IS NOT NULL",
+        )
+        .bind(ids.to_vec())
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
+
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobRecord>> {
         Ok(sqlx::query_as("SELECT * FROM jobs WHERE id = $1")
             .bind(id)

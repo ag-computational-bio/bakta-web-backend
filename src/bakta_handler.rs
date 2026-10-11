@@ -57,7 +57,6 @@ pub struct StateHandler {
 pub struct LiveWorkflow {
     pub name: String,
     pub phase: String,
-    started_at: DateTime<Utc>,
 }
 
 /// Releases a start reservation when dropped.
@@ -312,13 +311,7 @@ fn job_id_label(item: &SimpleStatus) -> Option<Uuid> {
         .and_then(|value| Uuid::from_str(value).ok())
 }
 
-/// The current workflow of each job in a workflow list. After a resubmit,
-/// several workflows carry the same job ID. The workflow recorded in the job
-/// state is the current one. Without a recorded workflow, the newest one is.
-fn current_workflows(
-    job_state: &HashMap<Uuid, FullJobState>,
-    items: &[SimpleStatus],
-) -> HashMap<Uuid, String> {
+fn workflows_by_job(items: &[SimpleStatus]) -> HashMap<Uuid, Vec<&SimpleStatus>> {
     let mut by_job = HashMap::<Uuid, Vec<&SimpleStatus>>::new();
     for item in items {
         if let Some(id) = job_id_label(item) {
@@ -326,19 +319,33 @@ fn current_workflows(
         }
     }
     by_job
+}
+
+/// The current workflow of each job in a workflow list. After a resubmit,
+/// several workflows carry the same job ID. The workflow recorded in the job
+/// state, or else in the database, is the current one. Without a recorded
+/// workflow, the newest by creation time is, and then the last by name.
+/// `startedAt` is not used, because an Argo retry resets it.
+fn current_workflows(
+    job_state: &HashMap<Uuid, FullJobState>,
+    recorded_in_db: &HashMap<Uuid, String>,
+    items: &[SimpleStatus],
+) -> HashMap<Uuid, String> {
+    workflows_by_job(items)
         .into_iter()
         .filter_map(|(id, workflows)| {
-            let name = match job_state
-                .get(&id)
-                .and_then(|state| state.workflowname.clone())
-            {
+            let recorded = match job_state.get(&id) {
+                Some(state) => state.workflowname.clone(),
+                None => recorded_in_db.get(&id).cloned(),
+            };
+            let name = match recorded {
                 Some(recorded) => workflows
                     .iter()
                     .any(|item| item.metadata.name == recorded)
                     .then_some(recorded)?,
                 None => workflows
                     .iter()
-                    .max_by_key(|item| item.status.started_at)?
+                    .max_by_key(|item| (item.metadata.creation_timestamp, &item.metadata.name))?
                     .metadata
                     .name
                     .clone(),
@@ -823,8 +830,9 @@ impl StateHandler {
         items: Vec<SimpleStatus>,
         now: DateTime<Utc>,
     ) {
+        let recorded_in_db = self.recorded_workflow_names(&items).await;
         let mut write_lock = self.job_state.write().await;
-        let current = current_workflows(&write_lock, &items);
+        let current = current_workflows(&write_lock, &recorded_in_db, &items);
         let is_current = |item: &SimpleStatus| {
             job_id_label(item)
                 .and_then(|id| current.get(&id))
@@ -839,7 +847,6 @@ impl StateHandler {
                     LiveWorkflow {
                         name: item.metadata.name.clone(),
                         phase: item.status.phase.clone(),
-                        started_at: item.status.started_at,
                     },
                 ))
             })
@@ -907,6 +914,38 @@ impl StateHandler {
         expired.extend(purge_expired_states(&mut write_lock, now));
         drop(write_lock);
         self.record_expired(expired);
+    }
+
+    /// Workflow names from the database for jobs with several workflows and
+    /// no job state, for example after a restart. Empty when the database is
+    /// not configured or fails.
+    async fn recorded_workflow_names(&self, items: &[SimpleStatus]) -> HashMap<Uuid, String> {
+        let Some(db) = self.stats.db() else {
+            return HashMap::new();
+        };
+        let ids: Vec<Uuid> = {
+            let job_state = self.job_state.read().await;
+            workflows_by_job(items)
+                .into_iter()
+                .filter(|(id, workflows)| workflows.len() > 1 && !job_state.contains_key(id))
+                .map(|(id, _)| id)
+                .collect()
+        };
+        if ids.is_empty() {
+            return HashMap::new();
+        }
+        match tokio::time::timeout(std::time::Duration::from_secs(5), db.workflow_names(&ids)).await
+        {
+            Ok(Ok(names)) => names,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "recorded_workflow_names_failed");
+                HashMap::new()
+            }
+            Err(_) => {
+                tracing::warn!("recorded_workflow_names_timed_out");
+                HashMap::new()
+            }
+        }
     }
 
     pub async fn get_job_states(&self, request_jobs: Vec<Job>) -> ListResponse {

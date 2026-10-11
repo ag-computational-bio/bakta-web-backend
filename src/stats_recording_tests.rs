@@ -372,3 +372,73 @@ async fn expired_old_workflow_does_not_expire_its_resubmission() {
     assert_eq!(states[&id].workflowname.as_deref(), Some("wf-b"));
     assert!(matches!(states[&id].status, Some(ArgoStatus::Running)));
 }
+
+#[tokio::test]
+async fn current_workflow_does_not_depend_on_started_at_or_list_order() {
+    let now = Utc::now();
+    // wf-a was retried, so its startedAt is newer than that of the resubmission wf-b.
+    let id = Uuid::new_v4();
+    let mut old = job_workflow(id, "wf-a", "Running", now, None);
+    old.metadata.creation_timestamp = Some(now - Duration::hours(2));
+    let new = job_workflow(id, "wf-b", "Running", now - Duration::hours(1), None);
+    // Same creation time: the order is by name.
+    let tied_id = Uuid::new_v4();
+    let tied_a = job_workflow(tied_id, "wf-a", "Running", now, None);
+    let tied_b = job_workflow(tied_id, "wf-b", "Running", now, None);
+
+    for items in [
+        vec![old.clone(), new.clone(), tied_a.clone(), tied_b.clone()],
+        vec![new.clone(), old.clone(), tied_b.clone(), tied_a.clone()],
+    ] {
+        let handler = test_handler("http://127.0.0.1:1", "https://s3.example.com");
+        handler
+            .state_handler
+            .apply_workflow_statuses(items, now)
+            .await;
+        let states = handler.state_handler.job_state.read().await;
+        assert_eq!(states[&id].workflowname.as_deref(), Some("wf-b"));
+        assert_eq!(states[&tied_id].workflowname.as_deref(), Some("wf-b"));
+        let live = handler.state_handler.live_workflows.read().unwrap();
+        assert_eq!(live[&id].name, "wf-b");
+    }
+}
+
+#[tokio::test]
+async fn current_workflow_comes_from_the_database_after_a_restart() {
+    let Some(db) = test_db("current_workflow_comes_from_the_database_after_a_restart").await else {
+        return;
+    };
+    let now = Utc::now();
+    let id = Uuid::new_v4();
+    db.apply(&StatsEvent::Created(crate::stats::NewJob {
+        id,
+        environment: crate::stats::test_db::unique_environment(),
+        workflow_kind: "bakta".to_string(),
+        api_version: "v2".to_string(),
+        name: None,
+        created_at: now,
+    }))
+    .await
+    .unwrap();
+    db.apply(&StatsEvent::Resubmitted {
+        id,
+        workflow_name: "wf-a".to_string(),
+        submitted_at: now,
+    })
+    .await
+    .unwrap();
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new(db, JobVersions::default()),
+    );
+    // wf-b is newer by every timestamp, but the database records wf-a.
+    let old = job_workflow(id, "wf-a", "Running", now - Duration::hours(2), None);
+    let new = job_workflow(id, "wf-b", "Failed", now, Some(now));
+    handler
+        .state_handler
+        .apply_workflow_statuses(vec![new, old], now)
+        .await;
+    let states = handler.state_handler.job_state.read().await;
+    assert_eq!(states[&id].workflowname.as_deref(), Some("wf-a"));
+}
