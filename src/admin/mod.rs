@@ -28,6 +28,8 @@ pub fn router() -> Router<Arc<BaktaHandler>> {
         .route("/stats/timeseries", get(api_paths::stats_timeseries))
         .route("/stats/versions", get(api_paths::stats_versions))
         .route("/jobs", get(api_paths::list_jobs))
+        .route("/jobs/{id}", get(api_paths::get_job))
+        .route("/jobs/{id}/logs", get(api_paths::job_logs))
 }
 
 #[derive(Debug)]
@@ -35,8 +37,6 @@ pub enum AdminError {
     BadRequest(String),
     Unauthorized(String),
     Forbidden,
-    // Used by the job endpoints, added in the next step.
-    #[allow(dead_code)]
     NotFound(String),
     // Used by the workflow operations, added in the next step.
     #[allow(dead_code)]

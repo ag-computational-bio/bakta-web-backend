@@ -142,7 +142,7 @@ impl ApiVersion {
     }
 }
 
-fn workflow_kind_label_value(kind: WorkflowKind) -> &'static str {
+pub(crate) fn workflow_kind_label_value(kind: WorkflowKind) -> &'static str {
     match kind {
         WorkflowKind::Bakta => "bakta",
         WorkflowKind::BaktaProteins => "bakta_proteins",
@@ -151,7 +151,7 @@ fn workflow_kind_label_value(kind: WorkflowKind) -> &'static str {
     }
 }
 
-fn workflow_kind_from_label_value(value: Option<&str>) -> WorkflowKind {
+pub(crate) fn workflow_kind_from_label_value(value: Option<&str>) -> WorkflowKind {
     match value {
         Some("bakta_proteins") => WorkflowKind::BaktaProteins,
         Some("bakta_baktfold") => WorkflowKind::BaktaBaktfold,
@@ -474,7 +474,7 @@ fn stage_status_from_nodes(
 /// Pod name that Argo builds with `POD_NAMES=v2` (see Argo `workflow/util/pod_name.go`):
 /// `<workflow>-<template>-<fnv32a(node name)>`, with the prefix cut to fit the
 /// Kubernetes name length.
-fn argo_v2_pod_name(workflow_name: &str, node: &WorkflowNodeStatus) -> Option<String> {
+pub(crate) fn argo_v2_pod_name(workflow_name: &str, node: &WorkflowNodeStatus) -> Option<String> {
     const MAX_PREFIX_LENGTH: usize = 253 - 1 - 10;
     if node.name.is_empty() || node.name == workflow_name {
         return None;
@@ -965,6 +965,27 @@ impl StateHandler {
             )
         };
 
+        self.stage_logs(
+            job_id,
+            workflow_kind,
+            workflow_name,
+            overall_status,
+            archived,
+            argo_uid,
+        )
+        .await
+    }
+
+    /// Structured logs of a workflow, grouped by stage. Does not check the job secret.
+    pub(crate) async fn stage_logs(
+        &self,
+        job_id: Uuid,
+        workflow_kind: WorkflowKind,
+        workflow_name: Option<String>,
+        overall_status: Option<ArgoStatus>,
+        archived: bool,
+        argo_uid: Option<Uuid>,
+    ) -> Result<V2LogsResponse> {
         let descriptor = workflow_descriptor(workflow_kind);
 
         let Some(workflow_name) = workflow_name else {
@@ -1137,7 +1158,7 @@ impl StateHandler {
         })
     }
 
-    fn is_starting(&self, job_id: &Uuid) -> bool {
+    pub(crate) fn is_starting(&self, job_id: &Uuid) -> bool {
         self.starting_jobs
             .lock()
             .expect("starting jobs lock poisoned")

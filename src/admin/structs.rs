@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::stats::queries::{GroupBy, Interval};
+use crate::stats::queries::{GroupBy, Interval, JobRecord};
 
 /// Error body of all admin endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -66,4 +66,37 @@ pub struct JobListParams {
     /// `created_at` (default, newest first), `-created_at`, `runtime_seconds`,
     /// `-runtime_seconds`, `total_length` or `-total_length`.
     pub sort: Option<String>,
+}
+
+/// One node of a live Argo workflow.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorkflowNodeView {
+    pub name: String,
+    pub display_name: String,
+    #[serde(rename = "type")]
+    pub node_type: String,
+    pub phase: String,
+    pub pod_name: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub message: Option<String>,
+}
+
+/// Live state of an Argo workflow.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorkflowView {
+    pub name: String,
+    pub phase: String,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub message: Option<String>,
+    pub nodes: Vec<WorkflowNodeView>,
+}
+
+/// Database record of a job plus the live Argo state.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct JobDetail {
+    pub job: JobRecord,
+    /// Null when the workflow no longer exists.
+    pub workflow: Option<WorkflowView>,
 }

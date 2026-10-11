@@ -4,15 +4,18 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
 };
+use uuid::Uuid;
 
 use super::{Admin, AdminError, parse_environment, stats_db, structs::*};
 use crate::{
-    bakta_handler::BaktaHandler,
+    argo::structs::ArgoWorkflow,
+    bakta_handler::{BaktaHandler, argo_v2_pod_name, workflow_kind_from_label_value},
     stats::queries::{
         JobList, JobListQuery, JobSort, StatsFilter, StatsSummary, Timeseries, VersionList,
     },
+    v2::api_structs::V2LogsResponse,
 };
 
 const DEFAULT_ENVIRONMENT: &str = "production";
@@ -194,4 +197,147 @@ pub async fn list_jobs(
     Ok(Json(
         db.list_jobs(&query).await.map_err(AdminError::database)?,
     ))
+}
+
+pub(crate) fn workflow_view(workflow: ArgoWorkflow) -> WorkflowView {
+    let name = workflow.metadata.name;
+    let mut nodes: Vec<_> = workflow
+        .status
+        .nodes
+        .into_values()
+        .map(|node| WorkflowNodeView {
+            pod_name: (node.node_type == "Pod")
+                .then(|| argo_v2_pod_name(&name, &node))
+                .flatten(),
+            name: node.name,
+            display_name: node.display_name,
+            node_type: node.node_type,
+            phase: node.phase,
+            started_at: node.started_at,
+            finished_at: node.finished_at,
+            message: node.message,
+        })
+        .collect();
+    nodes.sort_by(|left, right| {
+        left.started_at
+            .cmp(&right.started_at)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    WorkflowView {
+        name,
+        phase: workflow.status.phase,
+        started_at: workflow.status.started_at,
+        finished_at: workflow.status.finished_at,
+        message: workflow.status.message,
+        nodes,
+    }
+}
+
+/// Workflow name of a job: the in-memory state first, then the database record.
+async fn current_workflow_name(
+    state: &BaktaHandler,
+    id: Uuid,
+    fallback: Option<String>,
+) -> Option<String> {
+    state
+        .state_handler
+        .job_state
+        .read()
+        .await
+        .get(&id)
+        .and_then(|job| job.workflowname.clone())
+        .or(fallback)
+}
+
+/// Full job record plus the live Argo workflow.
+#[utoipa::path(
+    get,
+    path = "/api/admin/jobs/{id}",
+    operation_id = "getAdminJob",
+    params(("id" = Uuid, Path, description = "Job ID")),
+    responses(
+        (status = 200, body = JobDetail),
+        (status = 401, body = AdminErrorResponse),
+        (status = 403, body = AdminErrorResponse),
+        (status = 404, body = AdminErrorResponse),
+        (status = 503, body = AdminErrorResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "admin",
+)]
+pub async fn get_job(
+    _admin: Admin,
+    State(state): State<Arc<BaktaHandler>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<JobDetail>, AdminError> {
+    let db = stats_db(&state)?;
+    let job = db
+        .get_job(id)
+        .await
+        .map_err(AdminError::database)?
+        .ok_or_else(|| AdminError::NotFound("Job not found".to_string()))?;
+    let workflow = match current_workflow_name(&state, id, job.workflow_name.clone()).await {
+        Some(name) => match state.state_handler.argo_client.get_workflow(&name).await {
+            Ok(workflow) => Some(workflow_view(workflow)),
+            Err(error) => {
+                tracing::debug!(%error, workflow_name = %name, "admin_workflow_not_available");
+                None
+            }
+        },
+        None => None,
+    };
+    Ok(Json(JobDetail { job, workflow }))
+}
+
+/// Structured logs of a job, like the V2 logs endpoint but without the job secret.
+#[utoipa::path(
+    get,
+    path = "/api/admin/jobs/{id}/logs",
+    operation_id = "getAdminJobLogs",
+    params(("id" = Uuid, Path, description = "Job ID")),
+    responses(
+        (status = 200, body = V2LogsResponse),
+        (status = 401, body = AdminErrorResponse),
+        (status = 403, body = AdminErrorResponse),
+        (status = 404, body = AdminErrorResponse),
+        (status = 502, body = AdminErrorResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "admin",
+)]
+pub async fn job_logs(
+    _admin: Admin,
+    State(state): State<Arc<BaktaHandler>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<V2LogsResponse>, AdminError> {
+    let handler = &state.state_handler;
+    let in_memory = handler.job_state.read().await.get(&id).cloned();
+    let (kind, workflow_name, status, archived, argo_uid) = match in_memory {
+        Some(job) => (
+            job.workflow_kind,
+            job.workflowname,
+            job.status,
+            job.archived,
+            job.argo_uid,
+        ),
+        None => {
+            let record = match handler.stats.db() {
+                Some(db) => db.get_job(id).await.map_err(AdminError::database)?,
+                None => None,
+            }
+            .ok_or_else(|| AdminError::NotFound("Job not found".to_string()))?;
+            (
+                workflow_kind_from_label_value(Some(&record.workflow_kind)),
+                record.workflow_name,
+                None,
+                false,
+                None,
+            )
+        }
+    };
+    handler
+        .stage_logs(id, kind, workflow_name, status, archived, argo_uid)
+        .await
+        .map(Json)
+        .map_err(|e| AdminError::BadGateway(e.to_string()))
 }
