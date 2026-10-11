@@ -69,6 +69,8 @@ pub struct JobListParams {
     pub status: Option<String>,
     /// Comma separated list of workflow kinds.
     pub workflow_kind: Option<String>,
+    /// Comma separated list of live Argo phases.
+    pub workflow_phase: Option<String>,
     /// Matches the job ID prefix, organism or name, case insensitive.
     pub q: Option<String>,
     /// Default 50, max 500.
@@ -140,6 +142,8 @@ pub struct WorkflowListParams {
     pub environment: Option<String>,
     /// Comma separated phases: `Pending`, `Running`, `Succeeded`, `Failed`, `Error`.
     pub phase: Option<String>,
+    /// Only workflows without a matching job record.
+    pub orphans: Option<bool>,
 }
 
 /// A live Argo workflow of this backend.

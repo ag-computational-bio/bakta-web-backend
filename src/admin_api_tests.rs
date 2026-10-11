@@ -407,3 +407,124 @@ async fn admin_job_logs_do_not_need_the_secret() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+fn polled(
+    id: Uuid,
+    name: &str,
+    phase: &str,
+    started_minutes_ago: i64,
+) -> crate::argo::structs::SimpleStatus {
+    serde_json::from_value(json!({
+        "metadata": {"name": name, "uid": Uuid::new_v4(),
+                     "labels": {"jobid": id.to_string(), "secret": "x", "api-version": "v2"}},
+        "status": {"phase": phase,
+                   "startedAt": (Utc::now() - Duration::minutes(started_minutes_ago)).to_rfc3339()}
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn admin_job_list_shows_live_workflows_from_the_poll() {
+    let Some(db) = test_db("admin_job_list_shows_live_workflows").await else {
+        return;
+    };
+    let env = unique_environment();
+    let running = finished_job(&db, &env, "bakta", "succeeded").await;
+    let failed = finished_job(&db, &env, "bakta", "failed").await;
+    let without = finished_job(&db, &env, "bakta", "succeeded").await;
+    let setup = admin_setup("http://127.0.0.1:1", "https://s3.example.com", Some(db)).await;
+    setup
+        .handler
+        .state_handler
+        .apply_workflow_statuses(
+            vec![
+                polled(running, "wf-old", "Failed", 60),
+                polled(running, "wf-new", "Running", 5),
+                polled(failed, "wf-f", "Failed", 30),
+            ],
+            Utc::now(),
+        )
+        .await;
+
+    let (status, list) = admin_call(
+        &setup,
+        "GET",
+        &format!("/api/admin/jobs?environment={env}&limit=10"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let by_id = |id: Uuid| {
+        list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == id.to_string())
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_id(running)["workflow_name"], "wf-new");
+    assert_eq!(by_id(running)["workflow_phase"], "Running");
+    assert_eq!(by_id(failed)["workflow_phase"], "Failed");
+    assert_eq!(by_id(without)["workflow_name"], Value::Null);
+    assert_eq!(by_id(without)["workflow_phase"], Value::Null);
+
+    let (_, list) = admin_call(
+        &setup,
+        "GET",
+        &format!("/api/admin/jobs?environment={env}&workflow_phase=Running,Pending"),
+        None,
+    )
+    .await;
+    assert_eq!(list["total"], 1);
+    assert_eq!(list["items"][0]["id"], running.to_string());
+}
+
+#[tokio::test]
+async fn admin_workflows_can_list_orphans_only() {
+    let argo = MockServer::start().await;
+    let setup_without_db = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    let Some(db) = test_db("admin_workflows_can_list_orphans_only").await else {
+        return;
+    };
+    let known = finished_job(&db, &unique_environment(), "bakta", "succeeded").await;
+    let unknown = Uuid::new_v4();
+    let item = |name: &str, job: Option<String>| {
+        let mut labels = json!({"bakta-environment": "production"});
+        if let Some(job) = job {
+            labels["jobid"] = job.into();
+        }
+        json!({"metadata": {"name": name, "labels": labels}, "status": {"phase": "Running"}})
+    };
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+            item("known", Some(known.to_string())),
+            item("unknown", Some(unknown.to_string())),
+            item("no-label", None),
+            item("bad-label", Some("not-a-uuid".to_string())),
+        ]})))
+        .mount(&argo)
+        .await;
+    let (status, _) = admin_call(
+        &setup_without_db,
+        "GET",
+        "/api/admin/workflows?orphans=true",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db)).await;
+    let (status, body) = admin_call(&setup, "GET", "/api/admin/workflows?orphans=true", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<_> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["unknown", "no-label", "bad-label"]);
+    let (_, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 4);
+}

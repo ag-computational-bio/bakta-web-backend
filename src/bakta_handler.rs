@@ -45,9 +45,19 @@ pub struct StateHandler {
     pub baktfold_version: String,
     /// Jobs with a workflow submission in progress.
     pub starting_jobs: std::sync::Mutex<HashSet<Uuid>>,
+    /// Live workflow per job from the last successful poll.
+    pub live_workflows: std::sync::RwLock<HashMap<Uuid, LiveWorkflow>>,
     /// Environment name for job records and the `bakta-environment` workflow label.
     pub environment: String,
     pub stats: StatsRecorder,
+}
+
+/// Name and phase of a live Argo workflow, as seen by the polling loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveWorkflow {
+    pub name: String,
+    pub phase: String,
+    started_at: DateTime<Utc>,
 }
 
 /// Releases a start reservation when dropped.
@@ -704,6 +714,7 @@ impl BaktaHandler {
             bakta_version: bakta_version.clone(),
             baktfold_version: baktfold_version.clone(),
             starting_jobs: Default::default(),
+            live_workflows: Default::default(),
             environment,
             stats,
         });
@@ -769,6 +780,34 @@ impl StateHandler {
         items: Vec<SimpleStatus>,
         now: DateTime<Utc>,
     ) {
+        let mut live = HashMap::<Uuid, LiveWorkflow>::new();
+        for item in &items {
+            let Some(id) = item
+                .metadata
+                .labels
+                .get("jobid")
+                .and_then(|value| Uuid::from_str(value).ok())
+            else {
+                continue;
+            };
+            let workflow = LiveWorkflow {
+                name: item.metadata.name.clone(),
+                phase: item.status.phase.clone(),
+                started_at: item.status.started_at,
+            };
+            // With two workflows for one job (after a resubmit), keep the newer one.
+            if live
+                .get(&id)
+                .is_none_or(|known| known.started_at < workflow.started_at)
+            {
+                live.insert(id, workflow);
+            }
+        }
+        *self
+            .live_workflows
+            .write()
+            .expect("live workflows lock poisoned") = live;
+
         let mut write_lock = self.job_state.write().await;
         let mut expired = Vec::new();
         for item in items {
@@ -1898,6 +1937,7 @@ mod tests {
             bakta_version: "1.0.0".to_string(),
             baktfold_version: "1.0.0".to_string(),
             starting_jobs: Default::default(),
+            live_workflows: Default::default(),
             environment: "production".to_string(),
             stats: StatsRecorder::disabled(),
         };

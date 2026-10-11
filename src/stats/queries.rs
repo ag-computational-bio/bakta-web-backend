@@ -234,6 +234,8 @@ pub struct JobListQuery {
     pub limit: i64,
     pub offset: i64,
     pub sort: JobSort,
+    /// When set, only these job IDs match.
+    pub ids: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, FromRow)]
@@ -249,6 +251,12 @@ pub struct JobListItem {
     pub created_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub runtime_seconds: Option<f64>,
+    /// Live Argo workflow name, null without a live workflow.
+    #[sqlx(skip)]
+    pub workflow_name: Option<String>,
+    /// Live Argo phase, null without a live workflow.
+    #[sqlx(skip)]
+    pub workflow_phase: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -308,6 +316,12 @@ fn push_job_list_filter(builder: &mut QueryBuilder<Postgres>, query: &JobListQue
         builder
             .push(" AND workflow_kind = ANY(")
             .push_bind(query.workflow_kinds.clone())
+            .push(")");
+    }
+    if let Some(ids) = &query.ids {
+        builder
+            .push(" AND id = ANY(")
+            .push_bind(ids.clone())
             .push(")");
     }
     if let Some(q) = query.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
@@ -464,6 +478,15 @@ impl StatsDb {
             .push_bind(query.offset);
         let items = builder.build_query_as().fetch_all(self.pool()).await?;
         Ok(JobList { total, items })
+    }
+
+    /// Returns the IDs from `ids` that have a job record.
+    pub async fn existing_job_ids(&self, ids: &[Uuid]) -> Result<std::collections::HashSet<Uuid>> {
+        let found: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM jobs WHERE id = ANY($1)")
+            .bind(ids.to_vec())
+            .fetch_all(self.pool())
+            .await?;
+        Ok(found.into_iter().collect())
     }
 
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobRecord>> {

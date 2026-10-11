@@ -9,7 +9,7 @@ use axum::{
 use chrono::Utc;
 use uuid::Uuid;
 
-use super::{Admin, AdminError, parse_environment, structs::*};
+use super::{Admin, AdminError, parse_environment, stats_db, structs::*};
 use crate::{
     api_structs::ArgoStatus,
     argo::structs::ArgoWorkflow,
@@ -326,10 +326,28 @@ pub async fn list_workflows(
         .filter(|phase| !phase.is_empty())
         .map(str::to_string)
         .collect();
-    let items = environment_workflows(&state, params.environment.as_deref())
+    let mut workflows: Vec<_> = environment_workflows(&state, params.environment.as_deref())
         .await?
         .into_iter()
         .filter(|workflow| phases.is_empty() || phases.contains(&workflow.status.phase))
+        .collect();
+    if params.orphans.unwrap_or(false) {
+        let job_id = |workflow: &ArgoWorkflow| {
+            workflow
+                .metadata
+                .labels
+                .get("jobid")
+                .and_then(|value| value.parse::<Uuid>().ok())
+        };
+        let ids: Vec<Uuid> = workflows.iter().filter_map(job_id).collect();
+        let known = stats_db(&state)?
+            .existing_job_ids(&ids)
+            .await
+            .map_err(AdminError::database)?;
+        workflows.retain(|workflow| job_id(workflow).is_none_or(|id| !known.contains(&id)));
+    }
+    let items = workflows
+        .into_iter()
         .map(|workflow| {
             let labels = &workflow.metadata.labels;
             WorkflowSummary {

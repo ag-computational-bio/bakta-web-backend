@@ -248,7 +248,7 @@ pub async fn list_jobs(
             .map_err(|e| AdminError::BadRequest(e.to_string()))?,
         None => JobSort::default(),
     };
-    let query = JobListQuery {
+    let mut query = JobListQuery {
         filter: stats_filter(params.environment.as_deref(), params.from, params.to)?,
         statuses: comma_list(params.status.as_deref()),
         workflow_kinds: comma_list(params.workflow_kind.as_deref()),
@@ -256,11 +256,32 @@ pub async fn list_jobs(
         limit: params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
         offset: params.offset.unwrap_or(0).max(0),
         sort,
+        ids: None,
     };
     let db = stats_db(&state)?;
-    Ok(Json(
-        db.list_jobs(&query).await.map_err(AdminError::database)?,
-    ))
+    let live = state
+        .state_handler
+        .live_workflows
+        .read()
+        .expect("live workflows lock poisoned")
+        .clone();
+    let phases = comma_list(params.workflow_phase.as_deref());
+    if !phases.is_empty() {
+        query.ids = Some(
+            live.iter()
+                .filter(|(_, workflow)| phases.contains(&workflow.phase))
+                .map(|(id, _)| *id)
+                .collect(),
+        );
+    }
+    let mut list = db.list_jobs(&query).await.map_err(AdminError::database)?;
+    for item in &mut list.items {
+        if let Some(workflow) = live.get(&item.id) {
+            item.workflow_name = Some(workflow.name.clone());
+            item.workflow_phase = Some(workflow.phase.clone());
+        }
+    }
+    Ok(Json(list))
 }
 
 pub(crate) fn workflow_view(workflow: ArgoWorkflow) -> WorkflowView {
