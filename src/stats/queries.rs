@@ -58,7 +58,10 @@ pub struct DurationStats {
 pub struct WorkflowKindStats {
     pub workflow_kind: String,
     pub jobs_total: i64,
+    pub jobs_finished: i64,
     pub jobs_succeeded: i64,
+    pub jobs_failed: i64,
+    pub jobs_error: i64,
     pub runtime_seconds: DurationStats,
 }
 
@@ -100,7 +103,10 @@ struct SummaryRow {
 struct KindRow {
     workflow_kind: String,
     jobs_total: i64,
+    jobs_finished: i64,
     jobs_succeeded: i64,
+    jobs_failed: i64,
+    jobs_error: i64,
     runtime_avg: Option<f64>,
     runtime_p50: Option<f64>,
     runtime_p90: Option<f64>,
@@ -388,7 +394,10 @@ impl StatsDb {
                 .map(|kind| WorkflowKindStats {
                     workflow_kind: kind.workflow_kind,
                     jobs_total: kind.jobs_total,
+                    jobs_finished: kind.jobs_finished,
                     jobs_succeeded: kind.jobs_succeeded,
+                    jobs_failed: kind.jobs_failed,
+                    jobs_error: kind.jobs_error,
                     runtime_seconds: DurationStats {
                         avg: kind.runtime_avg,
                         p50: kind.runtime_p50,

@@ -132,6 +132,11 @@ async fn summary_counts_by_outcome_and_computes_percentiles() {
     assert_eq!(summary.by_workflow_kind[0].workflow_kind, "bakta");
     assert_eq!(summary.by_workflow_kind[0].jobs_total, 6);
     assert_eq!(summary.by_workflow_kind[0].jobs_succeeded, 4);
+    assert_eq!(summary.by_workflow_kind[0].jobs_finished, 5);
+    assert_eq!(summary.by_workflow_kind[0].jobs_failed, 1);
+    assert_eq!(summary.by_workflow_kind[0].jobs_error, 0);
+    assert_eq!(summary.by_workflow_kind[1].jobs_finished, 1);
+    assert_eq!(summary.by_workflow_kind[1].jobs_error, 1);
     assert_eq!(summary.by_workflow_kind[1].runtime_seconds.avg, None);
 
     let ranged = db
