@@ -321,3 +321,4 @@ In a dry run `result` is null. In a real run `result` is `done`, `skipped` (not 
 ## Workflow labels
 
 Every submitted workflow gets the label `bakta-environment=<ENVIRONMENT>` in addition to the existing labels (`jobid`, `origin`, ...). The workflow list and bulk actions only act on workflows of the backend's own environment unless `environment=all` is given.
+They only ever act on Bakta Web workflows: workflows with a `bakta-environment` label, or, for workflows created before that label existed, workflows with a `jobid` label that were created from a Bakta Web workflow template (`bakta-job-*`, `bakta-proteins-job-*`, `bakta-baktfold-job-*`, `baktfold-job-*`). `environment=all` only widens the environment, never this rule. Other workflows in the shared Argo namespace are never listed or changed.

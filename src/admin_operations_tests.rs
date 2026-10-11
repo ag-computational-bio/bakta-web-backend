@@ -425,6 +425,60 @@ async fn workflows_lists_live_workflows_of_the_environment() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn workflows_and_bulk_actions_only_touch_bakta_web_workflows() {
+    let argo = MockServer::start().await;
+    let mut legacy = listed_workflow("legacy", "Failed", Some("job-1"), Some(48));
+    legacy["metadata"]["labels"]
+        .as_object_mut()
+        .unwrap()
+        .remove("bakta-environment");
+    let mut foreign_job = legacy.clone();
+    foreign_job["metadata"]["name"] = "foreign-job".into();
+    foreign_job["spec"]["workflowTemplateRef"]["name"] = "other-pipeline".into();
+    let foreign = json!({
+        "metadata": {"name": "foreign", "labels": {"app": "other"}},
+        "spec": {"workflowTemplateRef": {"name": "bakta-job-1.9.0"}},
+        "status": {"phase": "Failed", "finishedAt": (Utc::now() - Duration::hours(48)).to_rfc3339()}
+    });
+    let items = json!({"items": [
+        listed_workflow("owned", "Failed", Some("job-2"), Some(48)),
+        legacy, foreign_job, foreign,
+    ]});
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(items))
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+
+    let (status, body) =
+        admin_call(&setup, "GET", "/api/admin/workflows?environment=all", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), ["owned", "legacy"]);
+
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        "/api/admin/workflows/bulk",
+        Some(json!({"action": "delete", "dry_run": false, "filter": {"environment": "all"}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), ["owned", "legacy"]);
+    assert_eq!(
+        argo_changes(argo.received_requests().await.unwrap()),
+        [
+            "DELETE /api/v1/workflows/bakta/owned",
+            "DELETE /api/v1/workflows/bakta/legacy"
+        ]
+    );
+}
+
 fn names(body: &Value) -> Vec<String> {
     body["items"]
         .as_array()

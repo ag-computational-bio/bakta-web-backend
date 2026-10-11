@@ -15,6 +15,7 @@ use crate::{
     argo::structs::ArgoWorkflow,
     bakta_handler::{BaktaHandler, FullJobState},
     stats::StatsEvent,
+    workflow_catalog::is_bakta_web_template,
 };
 
 /// What the backend knows about a job: the in-memory state and/or the workflow
@@ -338,18 +339,36 @@ pub async fn delete_job(
     }))
 }
 
+/// True for workflows created by Bakta Web: they have a `bakta-environment`
+/// label, or (created before that label existed) a `jobid` label and a
+/// Bakta Web workflow template.
+fn is_bakta_web_workflow(workflow: &ArgoWorkflow) -> bool {
+    let labels = &workflow.metadata.labels;
+    labels.contains_key("bakta-environment")
+        || (labels.contains_key("jobid")
+            && workflow
+                .spec
+                .workflow_template_ref
+                .as_ref()
+                .is_some_and(|template| is_bakta_web_template(&template.name)))
+}
+
+/// Live Bakta Web workflows of one environment, or of all with `all`.
+/// Other workflows in the shared namespace are never returned.
 async fn environment_workflows(
     state: &BaktaHandler,
     environment: Option<&str>,
 ) -> Result<Vec<ArgoWorkflow>, AdminError> {
     let environment = parse_environment(environment, &state.state_handler.environment)?;
     let selector = environment.map(|environment| format!("bakta-environment={environment}"));
-    state
+    let mut workflows = state
         .state_handler
         .argo_client
         .list_workflows(selector.as_deref())
         .await
-        .map_err(AdminError::argo)
+        .map_err(AdminError::argo)?;
+    workflows.retain(is_bakta_web_workflow);
+    Ok(workflows)
 }
 
 /// Live Argo workflows of this backend.

@@ -143,6 +143,21 @@ pub fn workflow_template_name(
     }
 }
 
+/// True for the names of all Bakta Web workflow templates, of any version.
+pub fn is_bakta_web_template(name: &str) -> bool {
+    [
+        "bakta-job-",
+        "bakta-proteins-job-",
+        "bakta-baktfold-job-",
+        "baktfold-job-",
+    ]
+    .iter()
+    .any(|prefix| {
+        name.strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
