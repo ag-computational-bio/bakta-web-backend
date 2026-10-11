@@ -464,3 +464,84 @@ async fn result_rejects_jobs_that_were_never_started() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("Job not finished"), "{body}");
 }
+
+async fn submit_lost_argo(id: Uuid, lookup: ResponseTemplate) -> MockServer {
+    let argo = MockServer::start().await;
+    // Argo creates the workflow, but the response is broken.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/bakta/submit"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .mount(&argo)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .and(wiremock::matchers::query_param(
+            "listOptions.labelSelector",
+            format!("jobid={id}"),
+        ))
+        .respond_with(lookup)
+        .mount(&argo)
+        .await;
+    argo
+}
+
+fn submit_count(requests: &[wiremock::Request]) -> usize {
+    requests
+        .iter()
+        .filter(|request| request.method.as_str() == "POST")
+        .count()
+}
+
+#[tokio::test]
+async fn start_records_a_workflow_created_despite_a_broken_response() {
+    let id = Uuid::new_v4();
+    let argo = submit_lost_argo(
+        id,
+        ResponseTemplate::new(200).set_body_json(json!({"items": [{
+            "metadata": {"name": "wf-found", "creationTimestamp": "2026-01-01T00:00:00Z",
+                         "labels": {"jobid": id.to_string()}}
+        }]})),
+    )
+    .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let state = job_state(ApiVersion::V2, WorkflowKind::Bakta, ResultKind::Bakta, None);
+    let id = insert_state(&handler, crate::bakta_handler::FullJobState { id, ..state }).await;
+    let router = test_router(handler.clone());
+    let body = start_body(id, TEST_SECRET, "bakta", json!({}));
+
+    let (status, text) = call(&router, "POST", "/api/v2/job/start", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let states = handler.state_handler.job_state.read().await;
+    assert_eq!(states[&id].workflowname.as_deref(), Some("wf-found"));
+    drop(states);
+    let (status, _) = call(&router, "POST", "/api/v2/job/start", Some(body)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(submit_count(&argo.received_requests().await.unwrap()), 1);
+}
+
+#[tokio::test]
+async fn start_is_refused_while_the_result_of_a_submit_is_unknown() {
+    let id = Uuid::new_v4();
+    let argo = submit_lost_argo(id, ResponseTemplate::new(500)).await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let state = job_state(ApiVersion::V2, WorkflowKind::Bakta, ResultKind::Bakta, None);
+    insert_state(&handler, crate::bakta_handler::FullJobState { id, ..state }).await;
+    let router = test_router(handler.clone());
+    let body = start_body(id, TEST_SECRET, "bakta", json!({}));
+
+    for _ in 0..2 {
+        let (status, text) = call(&router, "POST", "/api/v2/job/start", Some(body.clone())).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{text}");
+        assert!(text.contains("not known"), "{text}");
+    }
+    assert_eq!(submit_count(&argo.received_requests().await.unwrap()), 1);
+
+    // A later poll without a workflow for the job resolves it.
+    handler
+        .state_handler
+        .apply_workflow_statuses(vec![], chrono::Utc::now() + chrono::Duration::seconds(1))
+        .await;
+    let (status, _) = call(&router, "POST", "/api/v2/job/start", Some(body)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(submit_count(&argo.received_requests().await.unwrap()), 2);
+}

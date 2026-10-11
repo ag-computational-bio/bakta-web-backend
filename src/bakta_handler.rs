@@ -5,7 +5,9 @@ use crate::api_structs::Job;
 use crate::api_structs::ListResponse;
 use crate::api_structs::ResultResponse;
 use crate::api_structs::StartRequest;
-use crate::argo::structs::{Content, SimpleStatus, WorkflowNodeStatus};
+use crate::argo::structs::{
+    Content, SimpleStatus, SubmitResult, SubmitResultMetadata, WorkflowNodeStatus,
+};
 use crate::{
     api_structs::{JobStatus, VersionResponse},
     argo::client::ArgoClient,
@@ -45,6 +47,9 @@ pub struct StateHandler {
     pub baktfold_version: String,
     /// Jobs with a workflow submission in progress.
     pub starting_jobs: std::sync::Mutex<HashSet<Uuid>>,
+    /// Jobs whose submission may have created a workflow that could not be
+    /// found yet, with the time they were marked. The polling loop resolves them.
+    pub unknown_submissions: std::sync::Mutex<HashMap<Uuid, DateTime<Utc>>>,
     /// Live workflow per job from the last successful poll.
     pub live_workflows: std::sync::RwLock<HashMap<Uuid, LiveWorkflow>>,
     /// Environment name for job records and the `bakta-environment` workflow label.
@@ -130,6 +135,32 @@ impl std::fmt::Display for JobAlreadyStarted {
 }
 
 impl std::error::Error for JobAlreadyStarted {}
+
+/// Returned when an earlier submission may have created a workflow that
+/// could not be found yet.
+#[derive(Debug)]
+pub struct SubmissionUnknown;
+
+impl std::fmt::Display for SubmissionUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The result of an earlier start request is not known yet, try again later")
+    }
+}
+
+impl std::error::Error for SubmissionUnknown {}
+
+/// True when a failed submit may still have created a workflow: timeouts,
+/// errors after the request was sent, gateway errors and unreadable
+/// responses. Connection failures and error answers from Argo created nothing.
+fn is_indeterminate_submit_error(error: &anyhow::Error) -> bool {
+    match error.downcast_ref::<reqwest::Error>() {
+        Some(error) => match error.status() {
+            Some(status) => matches!(status.as_u16(), 502 | 504),
+            None => !(error.is_connect() || error.is_builder()),
+        },
+        None => true,
+    }
+}
 
 fn has_workflow(state: &FullJobState) -> bool {
     state.status.is_some() || state.workflowname.is_some()
@@ -767,6 +798,7 @@ impl BaktaHandler {
             bakta_version: bakta_version.clone(),
             baktfold_version: baktfold_version.clone(),
             starting_jobs: Default::default(),
+            unknown_submissions: Default::default(),
             live_workflows: Default::default(),
             environment,
             stats,
@@ -836,6 +868,12 @@ impl StateHandler {
         let recorded_in_db = self.recorded_workflow_names(&items).await;
         let mut write_lock = self.job_state.write().await;
         let current = current_workflows(&write_lock, &recorded_in_db, &items);
+        // A marked submission is resolved by a list fetched after the mark:
+        // a found workflow is recorded below, otherwise none was created.
+        self.unknown_submissions
+            .lock()
+            .expect("unknown submissions lock poisoned")
+            .retain(|id, marked_at| !current.contains_key(id) && *marked_at >= now);
         let is_current = |item: &SimpleStatus| {
             job_id_label(item)
                 .and_then(|id| current.get(&id))
@@ -1285,6 +1323,60 @@ impl StateHandler {
         })
     }
 
+    fn is_submission_unknown(&self, job_id: &Uuid) -> bool {
+        self.unknown_submissions
+            .lock()
+            .expect("unknown submissions lock poisoned")
+            .contains_key(job_id)
+    }
+
+    /// Handles a failed submit. When the submit may still have created a
+    /// workflow, looks it up by its `jobid` label and returns it. When the
+    /// lookup fails too, marks the job, so starts are refused until the
+    /// polling loop knows whether a workflow exists.
+    async fn recover_failed_submit(
+        &self,
+        job_id: Uuid,
+        error: anyhow::Error,
+    ) -> Result<SubmitResult> {
+        if !is_indeterminate_submit_error(&error) {
+            return Err(error);
+        }
+        let selector = format!("jobid={job_id}");
+        match self.argo_client.list_workflows(Some(&selector)).await {
+            Ok(workflows) => {
+                let Some(workflow) = workflows.into_iter().max_by(|a, b| {
+                    (a.metadata.creation_timestamp, &a.metadata.name)
+                        .cmp(&(b.metadata.creation_timestamp, &b.metadata.name))
+                }) else {
+                    return Err(error);
+                };
+                tracing::info!(
+                    job_id = %job_id,
+                    workflow_name = %workflow.metadata.name,
+                    "workflow_submit_recovered"
+                );
+                Ok(SubmitResult {
+                    metadata: SubmitResultMetadata {
+                        name: workflow.metadata.name,
+                        creation_timestamp: workflow
+                            .metadata
+                            .creation_timestamp
+                            .unwrap_or_else(Utc::now),
+                    },
+                })
+            }
+            Err(lookup_error) => {
+                tracing::warn!(job_id = %job_id, error = %lookup_error, "workflow_submit_lookup_failed");
+                self.unknown_submissions
+                    .lock()
+                    .expect("unknown submissions lock poisoned")
+                    .insert(job_id, Utc::now());
+                Err(SubmissionUnknown.into())
+            }
+        }
+    }
+
     fn record_expired(&self, expired: Vec<(Uuid, Option<String>)>) {
         for (id, workflow_name) in expired {
             self.stats.record(StatsEvent::Expired { id, workflow_name });
@@ -1372,6 +1464,9 @@ impl StateHandler {
             if has_workflow(state) {
                 return Err(JobAlreadyStarted.into());
             }
+            if self.is_submission_unknown(&id) {
+                return Err(SubmissionUnknown.into());
+            }
             let reservation = self.reserve_start(id)?;
             (
                 self.submit_labels(state, origin),
@@ -1406,9 +1501,14 @@ impl StateHandler {
                     error = %e,
                     "workflow_submit_failed"
                 );
-                self.metrics
-                    .record_submit_error(workflow_kind_label_value(workflow_kind));
-                return Err(e);
+                match self.recover_failed_submit(id, e).await {
+                    Ok(found) => found,
+                    Err(e) => {
+                        self.metrics
+                            .record_submit_error(workflow_kind_label_value(workflow_kind));
+                        return Err(e);
+                    }
+                }
             }
         };
 
@@ -1475,6 +1575,10 @@ impl StateHandler {
                 return Err(JobAlreadyStarted.into());
             }
 
+            if self.is_submission_unknown(&job_id) {
+                return Err(SubmissionUnknown.into());
+            }
+
             let reservation = self.reserve_start(job_id)?;
             (
                 self.submit_labels(state, origin),
@@ -1508,9 +1612,14 @@ impl StateHandler {
                     error = %e,
                     "workflow_submit_failed"
                 );
-                self.metrics
-                    .record_submit_error(workflow_kind_label_value(workflow_kind));
-                return Err(e);
+                match self.recover_failed_submit(job_id, e).await {
+                    Ok(found) => found,
+                    Err(e) => {
+                        self.metrics
+                            .record_submit_error(workflow_kind_label_value(workflow_kind));
+                        return Err(e);
+                    }
+                }
             }
         };
 
@@ -2009,6 +2118,7 @@ mod tests {
             bakta_version: "1.0.0".to_string(),
             baktfold_version: "1.0.0".to_string(),
             starting_jobs: Default::default(),
+            unknown_submissions: Default::default(),
             live_workflows: Default::default(),
             environment: "production".to_string(),
             stats: StatsRecorder::disabled(),

@@ -398,3 +398,36 @@ async fn result_rejects_jobs_that_were_never_started() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("Job not finished"), "{body}");
 }
+
+#[tokio::test]
+async fn start_records_a_workflow_created_despite_a_broken_response() {
+    let argo = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/bakta/submit"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let id = insert_state(&handler, v1_state(None)).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .and(wiremock::matchers::query_param(
+            "listOptions.labelSelector",
+            format!("jobid={id}"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [{
+            "metadata": {"name": "bakta-job-found", "labels": {"jobid": id.to_string()}}
+        }]})))
+        .mount(&argo)
+        .await;
+    let router = test_router(handler.clone());
+    let body = v1_start_body(id, TEST_SECRET);
+    let (status, text) = call(&router, "POST", "/api/v1/job/start", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let states = handler.state_handler.job_state.read().await;
+    assert_eq!(states[&id].workflowname.as_deref(), Some("bakta-job-found"));
+    drop(states);
+    let (status, _) = call(&router, "POST", "/api/v1/job/start", Some(body)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}

@@ -13,7 +13,7 @@ use crate::{
         InitRequest, InitResponse, Job, ListRequest, ListResponse, ResultResponse, StartRequest,
         VersionResponse,
     },
-    bakta_handler::{BaktaHandler, JobAlreadyStarted, REGEX},
+    bakta_handler::{BaktaHandler, JobAlreadyStarted, REGEX, SubmissionUnknown},
 };
 
 /// Delete an existing V1 Bakta job.
@@ -178,7 +178,7 @@ pub async fn query_result(
     responses(
         (status = 200, description = "Workflow submitted successfully."),
         (status = 400, body = String, description = "Job not found, unauthorized, or workflow submission failed."),
-        (status = 409, body = String, description = "Job already started.")
+        (status = 409, body = String, description = "Job already started, or the result of an earlier start request is not known yet.")
     ),
     tag = "v1",
 )]
@@ -203,7 +203,7 @@ pub async fn start_job(
         .await
     {
         Ok(_) => (StatusCode::OK, Json(())).into_response(),
-        Err(e) if e.is::<JobAlreadyStarted>() => {
+        Err(e) if e.is::<JobAlreadyStarted>() || e.is::<SubmissionUnknown>() => {
             (StatusCode::CONFLICT, Json(e.to_string())).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(e.to_string())).into_response(),
