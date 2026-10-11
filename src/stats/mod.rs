@@ -1,6 +1,8 @@
 //! Job statistics database: schema migrations, job lifecycle recording and
 //! the queries used by the admin API.
 
+pub mod queries;
+
 use std::time::Duration;
 
 use anyhow::Result;
