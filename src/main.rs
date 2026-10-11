@@ -11,6 +11,8 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 mod admin;
+#[cfg(test)]
+mod admin_api_tests;
 #[allow(clippy::upper_case_acronyms)]
 mod api_structs;
 mod argo;
