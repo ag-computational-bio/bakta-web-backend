@@ -7,7 +7,7 @@ Both sides implement exactly what is described here. Changes to the contract are
 
 - The backend records every job in a separate Postgres database (the statistics database).
 - Admins log in through Keycloak. The admin UI sends the Keycloak access token to the backend.
-- The admin API offers statistics, a job list with details, and Argo operations (retry, resubmit, stop, delete, cleanup), so the Argo UI is no longer needed for daily work.
+- The admin API offers statistics, a job list with details, and Argo operations (retry, resubmit, stop, resume, delete, bulk actions), so the Argo UI is no longer needed for daily work.
 - Both features are optional. If their configuration is missing, the backend works as before and the admin API answers `503 Service Unavailable` with a short message.
 
 ## Configuration (backend environment variables)
@@ -231,7 +231,7 @@ The full database record plus the live Argo state (null if the workflow no longe
            "workflow_name": "bakta-job-1.12.2-...", "created_at": "...", "submitted_at": "...", "started_at": "...", "finished_at": "...",
            "runtime_seconds": 401.2, "queue_seconds": 9.1, "error_message": null, "updated_at": "..." },
   "workflow": {
-    "name": "bakta-job-1.12.2-...", "phase": "Succeeded", "started_at": "...", "finished_at": "...", "message": null,
+    "name": "bakta-job-1.12.2-...", "phase": "Succeeded", "started_at": "...", "finished_at": "...", "message": null, "suspended": false,
     "nodes": [ { "name": "...", "display_name": "bakta", "type": "Pod", "phase": "Succeeded", "pod_name": "...", "started_at": "...", "finished_at": "...", "message": null } ]
   }
 }
@@ -255,36 +255,69 @@ Argo resubmit: a new workflow with the same parameters. The job record points to
 
 Argo terminate of a running workflow. `409` if the workflow is not running. Response: `{ "workflow_name": "...", "phase": "Failed" }`.
 
+### `POST /jobs/{id}/resume`
+
+Argo resume of a suspended workflow. `409` if the workflow is not suspended. Response: `{ "workflow_name": "...", "phase": "Running" }`.
+
+A workflow is suspended when it is `Running` and has `spec.suspend` set to true or a node of type `Suspend` that is still running. The `suspended` field in `GET /workflows` items and in the `workflow` object of `GET /jobs/{id}` tells the UI when resume applies.
+
 ### `DELETE /jobs/{id}?purge_data=false`
 
 Deletes the Argo workflow (Argo removes its pods) and sets the job status to `deleted`. With `purge_data=true` the job's S3 objects are deleted too. Response: `{ "deleted_workflow": true, "purged_objects": 12 }`.
 
 ### `GET /workflows?environment&phase&orphans`
 
-For this endpoint and for `POST /cleanup`, `environment` defaults to the backend's own `ENVIRONMENT`.
+For this endpoint and for `POST /workflows/bulk`, `environment` defaults to the backend's own `ENVIRONMENT`.
 
 Live Argo workflows of this backend, including ones without a job record. `phase`: comma separated (`Pending`, `Running`, `Succeeded`, `Failed`, `Error`).
 
 ```json
-{ "items": [ { "name": "...", "job_id": "...", "workflow_kind": "bakta", "phase": "Failed", "template": "bakta-job-1.12.2", "environment": "production", "started_at": "...", "finished_at": "...", "message": "..." } ] }
+{ "items": [ { "name": "...", "job_id": "...", "workflow_kind": "bakta", "phase": "Failed", "template": "bakta-job-1.12.2", "environment": "production", "started_at": "...", "finished_at": "...", "message": "...", "suspended": false } ] }
 ```
 
 `job_id` is null when the workflow has no `jobid` label. `workflow_kind` is null when the workflow has no `workflow-kind` label.
 With `orphans=true`, only workflows without a matching job record are returned: no `jobid` label, or a job ID that is not in the statistics database. This needs the statistics database (`503` without it).
 
-### `POST /cleanup`
+### `POST /workflows/bulk`
+
+Runs one action on all live workflows that match a filter.
 
 ```json
-{ "phases": ["Failed", "Error"], "older_than_hours": 24, "environment": "production", "dry_run": true, "workflow_names": ["..."] }
+{
+  "filter": {
+    "q": "bakta-job-1.12",
+    "phases": ["Failed", "Error"],
+    "workflow_kinds": ["bakta"],
+    "finished_before_hours": 24,
+    "environment": "production"
+  },
+  "action": "delete",
+  "dry_run": true,
+  "workflow_names": ["..."]
+}
 ```
 
-Deletes matching workflows (and with them their pods). `dry_run` defaults to `true` and only lists what would be deleted.
-`workflow_names` is optional. When it is given (a real run after a dry run), only workflows in that list that still match the phase and age filters are deleted, so the admin deletes exactly what they saw. Response:
+- `filter` fields are all optional and combine with AND. `q` matches the workflow name or job ID, case insensitive substring. `finished_before_hours` keeps only workflows that finished more than that many hours ago. `environment` defaults to the backend's own environment, `all` is allowed.
+- `action`: `delete`, `stop` (Argo terminate), `retry` (Argo retry), `resume` (Argo resume of suspended workflows), `resubmit` (Argo resubmit; the job record then points to the new workflow).
+- `dry_run` defaults to `true`: return the matching workflows and, per workflow, whether the action applies, without changing anything.
+- `workflow_names`: when given (a real run after a dry run), only workflows in this list that still match the filter are processed.
+- Applicability: `stop` for `Pending` and `Running`, `retry` for `Failed` and `Error`, `resume` only for suspended workflows, `resubmit` for any finished workflow (`Succeeded`, `Failed`, `Error`), `delete` for any.
+- Workflows are processed one by one. One failure does not stop the others. Each action is logged with the admin user name.
+
+Response:
 
 ```json
-{ "dry_run": true, "workflows": [ { "name": "...", "job_id": "...", "phase": "Failed", "finished_at": "..." } ] }
+{
+  "dry_run": true,
+  "action": "delete",
+  "items": [
+    { "name": "...", "job_id": "...", "workflow_kind": "bakta", "phase": "Failed", "finished_at": "...", "applicable": true, "result": null, "error": null }
+  ]
+}
 ```
+
+In a dry run `result` is null. In a real run `result` is `done`, `skipped` (not applicable) or `failed` with `error` set.
 
 ## Workflow labels
 
-Every submitted workflow gets the label `bakta-environment=<ENVIRONMENT>` in addition to the existing labels (`jobid`, `origin`, ...). The workflow list and cleanup only act on workflows of the backend's own environment unless `environment=all` is given.
+Every submitted workflow gets the label `bakta-environment=<ENVIRONMENT>` in addition to the existing labels (`jobid`, `origin`, ...). The workflow list and bulk actions only act on workflows of the backend's own environment unless `environment=all` is given.
