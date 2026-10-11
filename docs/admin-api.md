@@ -62,6 +62,7 @@ Rules:
 - Writes never block or fail a user request. If the database is unreachable, the backend logs a warning and continues.
 - Records are kept forever. Expired or deleted jobs keep their row with status `expired` or `deleted`.
 - Statistics count finished, succeeded, failed and error jobs by `outcome`, so a job still counts after it was deleted or has expired.
+- Runtime and queue time measure the current attempt: a retry or resubmit sets `submitted_at` to its own time and clears `started_at`, `finished_at`, `runtime_seconds` and `queue_seconds`, and the earlier `outcome` is kept until the new attempt finishes.
 
 ### Input statistics in the V2 start request
 

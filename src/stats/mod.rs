@@ -211,8 +211,9 @@ impl StatsDb {
                 retried_at,
             } => {
                 sqlx::query(
-                    "UPDATE jobs SET status = 'running', outcome = NULL, finished_at = NULL,
-                         runtime_seconds = NULL, error_message = NULL, updated_at = now()
+                    "UPDATE jobs SET status = 'running', submitted_at = $3, started_at = NULL,
+                         finished_at = NULL, runtime_seconds = NULL, queue_seconds = NULL,
+                         error_message = NULL, updated_at = now()
                      WHERE id = $1 AND (workflow_name IS NULL OR workflow_name = $2)
                          AND (finished_at IS NULL OR finished_at < $3)",
                 )
@@ -229,7 +230,7 @@ impl StatsDb {
                 submitted_at,
             } => {
                 sqlx::query(
-                    "UPDATE jobs SET status = 'submitted', outcome = NULL, workflow_name = $2,
+                    "UPDATE jobs SET status = 'submitted', workflow_name = $2,
                          submitted_at = $3, started_at = NULL, finished_at = NULL,
                          runtime_seconds = NULL, queue_seconds = NULL, error_message = NULL,
                          updated_at = now()
@@ -512,7 +513,11 @@ mod tests {
         .unwrap();
         let record = row(&db, id).await;
         assert_eq!(record.get::<String, _>("status"), "submitted");
-        assert_eq!(record.get::<Option<String>, _>("outcome"), None);
+        // The earlier outcome stays until the new attempt finishes.
+        assert_eq!(
+            record.get::<Option<String>, _>("outcome").as_deref(),
+            Some("failed")
+        );
         assert_eq!(
             record.get::<Option<String>, _>("workflow_name").unwrap(),
             "wf-b"
@@ -552,6 +557,75 @@ mod tests {
                 .as_deref(),
             Some("wf-b")
         );
+    }
+
+    #[tokio::test]
+    async fn test_retry_times_measure_the_new_attempt() {
+        let Some(db) = test_db("test_retry_times_measure_the_new_attempt").await else {
+            return;
+        };
+        let t0 = Utc::now() - ChronoDuration::days(3);
+        let job = new_job(&unique_environment(), t0);
+        let id = job.id;
+        let status = |status, started_at, finished_at| {
+            StatsEvent::Status(StatusUpdate {
+                job: job.clone(),
+                workflow_name: "wf-a".to_string(),
+                status,
+                started_at,
+                finished_at,
+                error_message: None,
+            })
+        };
+        db.apply(&status("running", t0 + ChronoDuration::seconds(10), None))
+            .await
+            .unwrap();
+        db.apply(&status(
+            "failed",
+            t0 + ChronoDuration::seconds(10),
+            Some(t0 + ChronoDuration::days(2)),
+        ))
+        .await
+        .unwrap();
+
+        let retried_at = t0 + ChronoDuration::days(2) + ChronoDuration::hours(1);
+        db.apply(&StatsEvent::Retried {
+            id,
+            workflow_name: "wf-a".to_string(),
+            retried_at,
+        })
+        .await
+        .unwrap();
+        let record = row(&db, id).await;
+        assert_eq!(record.get::<String, _>("status"), "running");
+        assert_eq!(
+            record.get::<Option<String>, _>("outcome").as_deref(),
+            Some("failed")
+        );
+        assert_eq!(
+            record
+                .get::<Option<DateTime<Utc>>, _>("submitted_at")
+                .map(|time| time.timestamp_micros()),
+            Some(retried_at.timestamp_micros())
+        );
+        assert_eq!(record.get::<Option<DateTime<Utc>>, _>("started_at"), None);
+        assert_eq!(record.get::<Option<f64>, _>("queue_seconds"), None);
+
+        // Argo resets startedAt on retry.
+        db.apply(&status(
+            "succeeded",
+            retried_at + ChronoDuration::seconds(60),
+            Some(retried_at + ChronoDuration::seconds(360)),
+        ))
+        .await
+        .unwrap();
+        let record = row(&db, id).await;
+        assert_eq!(
+            record.get::<Option<String>, _>("outcome").as_deref(),
+            Some("succeeded")
+        );
+        assert_eq!(record.get::<Option<f64>, _>("runtime_seconds"), Some(300.0));
+        assert_eq!(record.get::<Option<f64>, _>("queue_seconds"), Some(60.0));
     }
 
     #[tokio::test]
