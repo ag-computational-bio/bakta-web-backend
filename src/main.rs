@@ -19,6 +19,8 @@ mod bakta_handler;
 mod metrics;
 mod openapi;
 mod s3_handler;
+#[cfg(test)]
+mod stats_recording_tests;
 // Parts are used by the admin API, added in a later step.
 #[allow(dead_code)]
 mod stats;
