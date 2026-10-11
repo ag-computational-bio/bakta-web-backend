@@ -17,7 +17,7 @@ pub struct StatsFilter {
     pub to: Option<DateTime<Utc>>,
 }
 
-fn push_filter(builder: &mut QueryBuilder<Postgres>, filter: &StatsFilter) {
+pub(super) fn push_filter(builder: &mut QueryBuilder<Postgres>, filter: &StatsFilter) {
     builder.push(" WHERE TRUE");
     if let Some(environment) = &filter.environment {
         builder
@@ -160,6 +160,7 @@ pub struct TimeseriesBucket {
     pub jobs_failed: i64,
     pub jobs_error: i64,
     pub runtime_p50: Option<f64>,
+    pub runtime_p90: Option<f64>,
     pub runtime_avg: Option<f64>,
     pub total_input_bp: i64,
 }
@@ -286,7 +287,7 @@ pub struct JobRecord {
     pub updated_at: DateTime<Utc>,
 }
 
-fn escape_like(value: &str) -> String {
+pub(super) fn escape_like(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace('%', "\\%")
@@ -400,8 +401,11 @@ impl StatsDb {
                 count(*) FILTER (WHERE outcome = 'succeeded') AS jobs_succeeded,
                 count(*) FILTER (WHERE outcome = 'failed') AS jobs_failed,
                 count(*) FILTER (WHERE outcome = 'error') AS jobs_error,
-                percentile_cont(0.5) WITHIN GROUP (ORDER BY runtime_seconds) AS runtime_p50,
-                avg(runtime_seconds) AS runtime_avg,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY runtime_seconds)
+                    FILTER (WHERE outcome = 'succeeded') AS runtime_p50,
+                percentile_cont(0.9) WITHIN GROUP (ORDER BY runtime_seconds)
+                    FILTER (WHERE outcome = 'succeeded') AS runtime_p90,
+                avg(runtime_seconds) FILTER (WHERE outcome = 'succeeded') AS runtime_avg,
                 COALESCE(sum(total_length), 0)::bigint AS total_input_bp
              FROM jobs",
             );

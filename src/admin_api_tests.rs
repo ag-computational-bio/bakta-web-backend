@@ -239,6 +239,21 @@ async fn admin_stats_endpoints_return_the_contract_shapes() {
     assert_eq!(versions["items"][0]["bakta_version"], "1.12.2");
     assert_eq!(versions["items"][0]["jobs_total"], 3);
 
+    let (status, runtimes) = admin_call(
+        &setup,
+        "GET",
+        &format!("/api/admin/stats/runtimes?environment={env}&workflow_kind=bakta"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{runtimes}");
+    assert_eq!(runtimes["jobs"], 1);
+    assert_eq!(runtimes["by_workflow_kind"][0]["p50"], 100.0);
+    assert_eq!(runtimes["histogram"].as_array().unwrap().len(), 9);
+    assert_eq!(runtimes["histogram"][0]["jobs"], 1);
+    assert_eq!(runtimes["by_input_size"][0]["max_bp"], 1_000_000);
+    assert_eq!(runtimes["slowest"][0]["organism"], "Escherichia coli");
+
     for uri in [
         "/api/admin/stats/summary?environment=bad%20env",
         "/api/admin/stats/timeseries?interval=hour",

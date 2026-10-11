@@ -15,6 +15,7 @@ use crate::{
     stats::queries::{
         JobList, JobListQuery, JobSort, StatsFilter, StatsSummary, Timeseries, VersionList,
     },
+    stats::runtimes::RuntimeStats,
     v2::api_structs::V2LogsResponse,
 };
 
@@ -154,6 +155,37 @@ pub async fn stats_versions(
     let db = stats_db(&state)?;
     Ok(Json(
         db.versions(&filter).await.map_err(AdminError::database)?,
+    ))
+}
+
+/// Runtime statistics of succeeded jobs.
+#[utoipa::path(
+    get,
+    path = "/api/admin/stats/runtimes",
+    operation_id = "getAdminStatsRuntimes",
+    params(KindStatsQuery),
+    responses(
+        (status = 200, body = RuntimeStats),
+        (status = 400, body = AdminErrorResponse),
+        (status = 401, body = AdminErrorResponse),
+        (status = 403, body = AdminErrorResponse),
+        (status = 503, body = AdminErrorResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "admin",
+)]
+pub async fn stats_runtimes(
+    _admin: Admin,
+    State(state): State<Arc<BaktaHandler>>,
+    Query(query): Query<KindStatsQuery>,
+) -> Result<Json<RuntimeStats>, AdminError> {
+    let filter = stats_filter(query.environment.as_deref(), query.from, query.to)?;
+    let kinds = comma_list(query.workflow_kind.as_deref());
+    let db = stats_db(&state)?;
+    Ok(Json(
+        db.runtimes(&filter, &kinds)
+            .await
+            .map_err(AdminError::database)?,
     ))
 }
 

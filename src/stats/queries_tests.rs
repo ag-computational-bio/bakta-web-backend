@@ -326,3 +326,115 @@ async fn get_job_returns_the_full_record() {
     assert_eq!(record.outcome.as_deref(), Some("succeeded"));
     assert!(db.get_job(Uuid::new_v4()).await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn runtimes_use_succeeded_jobs_and_fixed_buckets() {
+    let Some(db) = test_db("runtimes_use_succeeded_jobs_and_fixed_buckets").await else {
+        return;
+    };
+    let env = unique_environment();
+    for (runtime, length, created) in [
+        (100.0, 500_000, day(9, 1)),
+        (200.0, 1_000_000, day(9, 2)),
+        (300.0, 2_000_000, day(9, 3)),
+        (5000.0, 5_000_000, day(9, 4)),
+    ] {
+        insert(
+            &db,
+            &env,
+            Row {
+                runtime: Some(runtime),
+                length: Some(length),
+                genus: Some("Escherichia"),
+                queue: Some(10.0),
+                ..row("bakta", "succeeded", created)
+            },
+        )
+        .await;
+    }
+    insert(
+        &db,
+        &env,
+        Row {
+            runtime: Some(50.0),
+            ..row("bakta", "failed", day(9, 5))
+        },
+    )
+    .await;
+    insert(
+        &db,
+        &env,
+        Row {
+            runtime: Some(700.0),
+            ..row("baktfold", "succeeded", day(9, 6))
+        },
+    )
+    .await;
+    insert(
+        &db,
+        &env,
+        Row {
+            queue: Some(600.0),
+            ..row("baktfold", "running", day(9, 7))
+        },
+    )
+    .await;
+
+    let stats = db.runtimes(&filter(&env), &[]).await.unwrap();
+    assert_eq!(stats.jobs, 5);
+    let bakta = &stats.by_workflow_kind[0];
+    assert_eq!((bakta.workflow_kind.as_str(), bakta.jobs), ("bakta", 4));
+    assert_eq!(
+        (bakta.min, bakta.max, bakta.p50),
+        (Some(100.0), Some(5000.0), Some(250.0))
+    );
+    assert!(bakta.stddev.is_some());
+    let histogram: Vec<_> = stats.histogram.iter().map(|bucket| bucket.jobs).collect();
+    assert_eq!(histogram, [1, 1, 1, 1, 0, 0, 1, 0, 0]);
+    assert_eq!(stats.histogram[8].max_seconds, None);
+    assert_eq!(stats.histogram[1].max_seconds, Some(300));
+    let sizes: Vec<_> = stats
+        .by_input_size
+        .iter()
+        .map(|bucket| bucket.jobs)
+        .collect();
+    assert_eq!(sizes, [1, 1, 1, 1, 0, 0, 0]);
+    assert_eq!(stats.by_input_size[0].runtime_p50, Some(100.0));
+    assert_eq!(stats.by_input_size[4].runtime_avg, None);
+    assert_eq!(stats.by_input_size[6].max_bp, None);
+    // 100 s / 0.5 Mbp, 200 / 1, 300 / 2, 5000 / 5 -> 200, 200, 150, 1000.
+    assert_eq!(stats.seconds_per_mbp.p50, Some(200.0));
+    assert_eq!(stats.seconds_per_mbp.avg, Some(387.5));
+    assert_eq!(stats.queue_seconds.max, Some(600.0));
+    assert_eq!(stats.slowest.len(), 5);
+    assert_eq!(stats.slowest[0].runtime_seconds, 5000.0);
+    assert_eq!(
+        stats.slowest[0].organism.as_deref(),
+        Some("Escherichia coli")
+    );
+
+    let fold_only = db
+        .runtimes(&filter(&env), &["baktfold".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(fold_only.jobs, 1);
+    assert_eq!(fold_only.queue_seconds.max, Some(600.0));
+
+    let empty = db
+        .runtimes(&filter(&unique_environment()), &[])
+        .await
+        .unwrap();
+    assert_eq!(empty.jobs, 0);
+    assert!(empty.by_workflow_kind.is_empty());
+    assert_eq!(empty.histogram.len(), 9);
+    assert_eq!(empty.by_input_size.len(), 7);
+    assert_eq!(empty.seconds_per_mbp.p50, None);
+    assert_eq!(empty.queue_seconds.avg, None);
+
+    let series = db
+        .timeseries(&filter(&env), Interval::Year, GroupBy::None)
+        .await
+        .unwrap();
+    assert_eq!(series.buckets[0].runtime_p50, Some(300.0));
+    assert!(series.buckets[0].runtime_p90.unwrap() > 300.0);
+}

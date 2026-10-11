@@ -33,6 +33,18 @@ pub struct StatsQuery {
     pub to: Option<DateTime<Utc>>,
 }
 
+/// Statistics filter with an optional workflow kind list.
+#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct KindStatsQuery {
+    /// `production` (default), `staging` or `all`.
+    pub environment: Option<String>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    /// Comma separated list of workflow kinds.
+    pub workflow_kind: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct TimeseriesQuery {
