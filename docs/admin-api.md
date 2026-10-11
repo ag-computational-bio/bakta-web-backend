@@ -112,12 +112,12 @@ All paths start with `/api/admin`. All responses are JSON. Errors use `{ "error"
   "queue_seconds": { "avg": 12.3, "p50": 8.0, "p90": 30.0, "p99": 90.0 },
   "total_input_bp": 5123456789,
   "by_workflow_kind": [
-    { "workflow_kind": "bakta", "jobs_total": 1000, "jobs_succeeded": 960, "runtime_seconds": { "avg": 400.0, "p50": 370.0, "p90": 700.0, "p99": 1400.0 } }
+    { "workflow_kind": "bakta", "jobs_total": 1000, "jobs_finished": 990, "jobs_succeeded": 960, "jobs_failed": 25, "jobs_error": 5, "runtime_seconds": { "avg": 400.0, "p50": 370.0, "p90": 700.0, "p99": 1400.0 } }
   ]
 }
 ```
 
-`jobs_finished`, `jobs_succeeded`, `jobs_failed` and `jobs_error` count by `outcome`. `jobs_active` counts jobs with status `submitted` or `running`.
+`jobs_finished`, `jobs_succeeded`, `jobs_failed` and `jobs_error` count by `outcome`, also in the `by_workflow_kind` items. `jobs_active` counts jobs with status `submitted` or `running`.
 `success_rate` is `jobs_succeeded / jobs_finished` (null when nothing finished). Percentiles use `percentile_cont`.
 The duration values (`avg`, `p50`, `p90`, `p99`) are null when no matching job has that duration.
 
@@ -153,6 +153,7 @@ With `group_by=none`, `group` is `null`. Buckets without jobs are left out; the 
 ```json
 {
   "jobs": 812,
+  "overall": { "jobs": 812, "min": 95.0, "p10": 180.0, "p25": 240.0, "p50": 380.0, "p75": 520.0, "p90": 720.0, "p95": 900.0, "p99": 1500.0, "max": 4200.0, "avg": 412.5, "stddev": 210.3 },
   "by_workflow_kind": [
     { "workflow_kind": "bakta", "jobs": 600, "min": 95.0, "p10": 180.0, "p25": 240.0, "p50": 380.0, "p75": 520.0, "p90": 720.0, "p95": 900.0, "p99": 1500.0, "max": 4200.0, "avg": 412.5, "stddev": 210.3 }
   ],
@@ -164,6 +165,7 @@ With `group_by=none`, `group` is `null`. Buckets without jobs are left out; the 
 }
 ```
 
+- `overall` has the same fields as a `by_workflow_kind` item, without `workflow_kind`, over all matching succeeded jobs (all selected workflow kinds together). Its values are null and `jobs` is 0 when there are no such jobs.
 - `histogram` uses fixed buckets in seconds: 0-120, 120-300, 300-600, 600-1200, 1200-1800, 1800-3600, 3600-7200, 7200-14400, and 14400 and more (`max_seconds` null for the last). Empty buckets are included with `jobs: 0`, so there are always 9 buckets.
 - `by_input_size` uses fixed buckets in bp: under 1 Mbp, 1-2, 2-4, 4-6, 6-8, 8-12 Mbp, and 12 Mbp and more (`max_bp` null for the last). Only jobs with `total_length`. Empty buckets are included with zero jobs and null percentiles.
 - Bucket ranges include `min` and exclude `max`.
