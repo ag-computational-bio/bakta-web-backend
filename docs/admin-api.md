@@ -130,18 +130,45 @@ The duration values (`avg`, `p50`, `p90`, `p99`) are null when no matching job h
   "interval": "month",
   "group_by": "workflow_kind",
   "buckets": [
-    { "period_start": "2026-09-01T00:00:00Z", "group": "bakta", "jobs_total": 120, "jobs_succeeded": 115, "jobs_failed": 4, "jobs_error": 1, "runtime_p50": 390.0, "runtime_avg": 420.0, "total_input_bp": 600000000 }
+    { "period_start": "2026-09-01T00:00:00Z", "group": "bakta", "jobs_total": 120, "jobs_succeeded": 115, "jobs_failed": 4, "jobs_error": 1, "runtime_p50": 390.0, "runtime_p90": 700.0, "runtime_avg": 420.0, "total_input_bp": 600000000 }
   ]
 }
 ```
 
 With `group_by=none`, `group` is `null`. Buckets without jobs are left out; the UI fills gaps.
+`runtime_p50`, `runtime_p90` and `runtime_avg` are null when the bucket has no succeeded jobs with a runtime.
 
 ### `GET /stats/versions?environment&from&to`
 
 ```json
 { "items": [ { "bakta_version": "1.12.2", "bakta_db_version": "6.0", "baktfold_version": "0.3.0", "jobs_total": 300, "first_seen": "...", "last_seen": "..." } ] }
 ```
+
+### `GET /stats/runtimes?environment&from&to&workflow_kind`
+
+`workflow_kind` is optional, comma separated. Runtime statistics only use jobs with status `succeeded` and a non-null `runtime_seconds`.
+
+```json
+{
+  "jobs": 812,
+  "by_workflow_kind": [
+    { "workflow_kind": "bakta", "jobs": 600, "min": 95.0, "p10": 180.0, "p25": 240.0, "p50": 380.0, "p75": 520.0, "p90": 720.0, "p95": 900.0, "p99": 1500.0, "max": 4200.0, "avg": 412.5, "stddev": 210.3 }
+  ],
+  "histogram": [ { "min_seconds": 0, "max_seconds": 120, "jobs": 12 } ],
+  "by_input_size": [ { "min_bp": 0, "max_bp": 1000000, "jobs": 40, "runtime_p50": 150.0, "runtime_p90": 300.0, "runtime_avg": 170.0 } ],
+  "seconds_per_mbp": { "p50": 70.5, "avg": 80.1 },
+  "queue_seconds": { "avg": 12.3, "p50": 8.0, "p90": 30.0, "p99": 90.0, "max": 600.0 },
+  "slowest": [ { "id": "...", "workflow_kind": "bakta", "organism": "Escherichia coli Sakai", "total_length": 5594605, "runtime_seconds": 4200.0, "created_at": "..." } ]
+}
+```
+
+- `histogram` uses fixed buckets in seconds: 0-120, 120-300, 300-600, 600-1200, 1200-1800, 1800-3600, 3600-7200, 7200-14400, and 14400 and more (`max_seconds` null for the last). Empty buckets are included with `jobs: 0`, so there are always 9 buckets.
+- `by_input_size` uses fixed buckets in bp: under 1 Mbp, 1-2, 2-4, 4-6, 6-8, 8-12 Mbp, and 12 Mbp and more (`max_bp` null for the last). Only jobs with `total_length`. Empty buckets are included with zero jobs and null percentiles.
+- Bucket ranges include `min` and exclude `max`.
+- `seconds_per_mbp`: runtime divided by `total_length / 1e6`, over jobs with `total_length > 0`.
+- `queue_seconds` covers all jobs with a non-null `queue_seconds` in the filter, not only succeeded ones.
+- `slowest`: top 10 by runtime, newest first on ties.
+- All percentile and average fields are null when there are no matching jobs; `jobs` is then 0.
 
 ### `GET /jobs?environment&from&to&status&workflow_kind&q&limit&offset&sort`
 
