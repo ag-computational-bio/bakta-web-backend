@@ -355,10 +355,34 @@ fn stage_status_from_nodes(
     Some(selected)
 }
 
+/// Pod name that Argo builds with `POD_NAMES=v2` (see Argo `workflow/util/pod_name.go`):
+/// `<workflow>-<template>-<fnv32a(node name)>`, with the prefix cut to fit the
+/// Kubernetes name length.
+fn argo_v2_pod_name(workflow_name: &str, node: &WorkflowNodeStatus) -> Option<String> {
+    const MAX_PREFIX_LENGTH: usize = 253 - 1 - 10;
+    if node.name.is_empty() || node.name == workflow_name {
+        return None;
+    }
+    let mut prefix = if node.name.contains(".inline") || node.template_name.is_empty() {
+        workflow_name.to_string()
+    } else {
+        format!("{workflow_name}-{}", node.template_name)
+    };
+    if prefix.len() > MAX_PREFIX_LENGTH {
+        prefix.truncate(MAX_PREFIX_LENGTH);
+    }
+    let mut hash: u32 = 0x811c9dc5;
+    for byte in node.name.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    Some(format!("{prefix}-{hash}"))
+}
+
 fn stage_indices_by_pod_name(
     stages: &[&str],
     nodes: Option<&HashMap<String, WorkflowNodeStatus>>,
-    _workflow_name: Option<&str>,
+    workflow_name: Option<&str>,
 ) -> HashMap<String, usize> {
     let mut pod_stage_indices = HashMap::new();
     let Some(nodes) = nodes else {
@@ -379,6 +403,9 @@ fn stage_indices_by_pod_name(
             pod_stage_indices
                 .entry(node.id.clone())
                 .or_insert(stage_index);
+        }
+        if let Some(pod_name) = workflow_name.and_then(|name| argo_v2_pod_name(name, node)) {
+            pod_stage_indices.entry(pod_name).or_insert(stage_index);
         }
     }
 
@@ -1427,6 +1454,57 @@ mod tests {
             Content {
                 content: "bakta line".to_string(),
                 pod_name: Some(bakta_pod),
+            },
+        ];
+
+        let stages = build_stage_logs(
+            &["bakta", "baktfold"],
+            Some(&nodes),
+            Some(workflow_name),
+            &logs,
+            Some(&ArgoStatus::Succeeded),
+        );
+
+        assert_eq!(stages[0].content, "bakta line");
+        assert_eq!(stages[1].content, "baktfold line");
+    }
+
+    #[test]
+    fn test_build_stage_logs_maps_v2_pod_names_to_stages() {
+        let workflow_name = "bakta-job-abc";
+        let mut nodes = HashMap::new();
+        for (key, node_name, stage, template) in [
+            ("n1", "bakta-job-abc[0].bakta", "bakta", "run-bakta"),
+            (
+                "n2",
+                "bakta-job-abc[1].baktfold",
+                "baktfold",
+                "run-baktfold",
+            ),
+        ] {
+            nodes.insert(
+                key.to_string(),
+                WorkflowNodeStatus {
+                    id: format!("{workflow_name}-{key}"),
+                    name: node_name.to_string(),
+                    display_name: stage.to_string(),
+                    template_name: template.to_string(),
+                    phase: "Succeeded".to_string(),
+                    node_type: "Pod".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+
+        // Pod names as built by Argo with POD_NAMES=v2: <workflow>-<template>-<fnv32a(node name)>.
+        let logs = vec![
+            Content {
+                content: "baktfold line".to_string(),
+                pod_name: Some("bakta-job-abc-run-baktfold-4284446571".to_string()),
+            },
+            Content {
+                content: "bakta line".to_string(),
+                pod_name: Some("bakta-job-abc-run-bakta-4251716466".to_string()),
             },
         ];
 
