@@ -19,6 +19,7 @@ Both sides implement exactly what is described here. Changes to the contract are
 | `ADMIN_OIDC_ISSUER` | `https://auth.bakta.computational.bio/realms/bakta` | Keycloak realm issuer. If unset, the admin API is disabled. |
 | `ADMIN_OIDC_CLIENT_ID` | `bakta-admin` | Keycloak client used by the admin UI. Tokens must have this value in `azp` (or in `aud`). |
 | `ADMIN_GROUP` | `bakta-admin` | Group name that must appear in the token `groups` claim. Default `bakta-admin`. |
+| `DATA_RETENTION_DAYS` | `30` | Days after which the job data in S3 (inputs, results and archived logs) is deleted. Default `30`. The admin API uses it to tell which jobs still have their data. |
 
 ## Authentication
 
@@ -78,6 +79,18 @@ The V2 start request gets an optional top level field, ignored by older clients:
 ```
 
 The web UI fills it from the parsed FASTA input. The backend stores it in `sequence_count` and `total_length`.
+
+## Data retention
+
+Job data in S3 (inputs, results and archived logs) is deleted `DATA_RETENTION_DAYS` days after the job. The backend keeps job state for 35 days, and the statistics database keeps job records forever. So a job can exist while its S3 data is gone.
+
+Job records (items of `GET /jobs` and the `job` object of `GET /jobs/{id}`) have two extra fields:
+
+- `data_expires_at`: timestamp, the reference time plus `DATA_RETENTION_DAYS` days. The reference time is `finished_at`, or `created_at` when the job never finished (a retry or resubmit clears `finished_at` until the new attempt ends).
+- `data_available`: boolean, true while now is before `data_expires_at`. At exactly `data_expires_at` it is false.
+
+When `data_available` is false, the admin API refuses everything that needs S3 data. The rules are listed at the endpoints below (`retry`, `resubmit`, `DELETE`, `logs`) and at `POST /workflows/bulk`.
+For a job without a database record, the backend uses the time of its in-memory job state (last update, or start) as reference time.
 
 ## Common query parameters
 
@@ -213,6 +226,7 @@ Input statistics over jobs with a non-null `total_length`. `workflow_kind` is op
       "id": "...", "environment": "production", "workflow_kind": "bakta", "status": "succeeded", "outcome": "succeeded",
       "organism": "Escherichia coli Sakai", "sequence_count": 3, "total_length": 5594605,
       "created_at": "...", "finished_at": "...", "runtime_seconds": 401.2,
+      "data_expires_at": "...", "data_available": true,
       "workflow_name": "bakta-job-1.12.2-...", "workflow_phase": "Succeeded"
     }
   ]
@@ -232,7 +246,8 @@ The full database record plus the live Argo state (null if the workflow no longe
            "name": "...", "genus": "...", "species": "...", "strain": "...", "sequence_count": 3, "total_length": 5594605,
            "config": { }, "bakta_version": "1.12.2", "bakta_db_version": "6.0", "baktfold_version": null, "baktfold_db_version": null,
            "workflow_name": "bakta-job-1.12.2-...", "created_at": "...", "submitted_at": "...", "started_at": "...", "finished_at": "...",
-           "runtime_seconds": 401.2, "queue_seconds": 9.1, "error_message": null, "updated_at": "..." },
+           "runtime_seconds": 401.2, "queue_seconds": 9.1, "error_message": null, "updated_at": "...",
+           "data_expires_at": "...", "data_available": true },
   "workflow": {
     "name": "bakta-job-1.12.2-...", "phase": "Succeeded", "started_at": "...", "finished_at": "...", "message": null, "suspended": false,
     "nodes": [ { "name": "...", "display_name": "bakta", "type": "Pod", "phase": "Succeeded", "pod_name": "...", "started_at": "...", "finished_at": "...", "message": null } ]
@@ -246,13 +261,15 @@ Unknown job: `404`.
 
 Same shape as the V2 logs response (`workflow_kind`, `stages` with `stage`, `status`, `content`), without the job secret.
 
+`410 Gone` with `{ "error": "Logs were deleted after the retention period" }` when `data_available` is false and the logs would come from the archive. Logs of a live (not archived) workflow are still served while Argo has its pods.
+
 ### `POST /jobs/{id}/retry`
 
-Argo retry of a failed or errored workflow (reruns failed steps). `409` if the workflow is not in `Failed` or `Error`. Response: `{ "workflow_name": "...", "phase": "Running" }`.
+Argo retry of a failed or errored workflow (reruns failed steps). `409` if the workflow is not in `Failed` or `Error`. `409` with `{ "error": "Input data was deleted after the retention period" }` when `data_available` is false (the inputs no longer exist). Response: `{ "workflow_name": "...", "phase": "Running" }`.
 
 ### `POST /jobs/{id}/resubmit`
 
-Argo resubmit: a new workflow with the same parameters. The job record points to the new `workflow_name` and goes back to `submitted`. Response: `{ "workflow_name": "...", "phase": "Pending" }`.
+Argo resubmit: a new workflow with the same parameters. The job record points to the new `workflow_name` and goes back to `submitted`. `409` with `{ "error": "Input data was deleted after the retention period" }` when `data_available` is false. Response: `{ "workflow_name": "...", "phase": "Pending" }`.
 
 ### `POST /jobs/{id}/stop`
 
@@ -267,6 +284,7 @@ A workflow is suspended when it is `Running` and has `spec.suspend` set to true 
 ### `DELETE /jobs/{id}?purge_data=false`
 
 Deletes the Argo workflow (Argo removes its pods) and sets the job status to `deleted`. With `purge_data=true` the job's S3 objects are deleted too. Response: `{ "deleted_workflow": true, "purged_objects": 12 }`.
+When `data_available` is false, the S3 listing and purge are skipped and `purged_objects` is `0`. The workflow is still deleted and the job is still marked `deleted`.
 `409` while the job is being started. While the delete runs, a start request for the job is refused with `409`.
 
 ### `GET /workflows?environment&phase&orphans`
@@ -307,6 +325,7 @@ Runs one action on all live workflows that match a filter.
 - `workflow_names`: when given (a real run after a dry run), only workflows in this list that still match the filter are processed.
 - Applicability: `stop` for `Pending` and `Running`, `retry` for `Failed` and `Error`, `resume` only for suspended workflows, `resubmit` for any finished workflow (`Succeeded`, `Failed`, `Error`), `delete` for any.
 - `retry` and `resubmit` only apply to the job's current workflow. An older workflow of a job that was resubmitted is not applicable (`reason` names the current workflow).
+- `retry` and `resubmit` do not apply when the input data is gone: `applicable` is false and `reason` is `Input data deleted after the retention period`. The reference time is the job's `finished_at` or `created_at` (see Data retention). For a workflow without a job record, it is the workflow's finish time or, if it has none, its creation time.
 - Workflows are processed one by one. One failure does not stop the others. Each action is logged with the admin user name.
 
 Response:
