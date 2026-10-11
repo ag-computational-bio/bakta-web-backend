@@ -351,3 +351,33 @@ async fn start_twice_is_rejected_with_conflict() {
     assert!(text.contains("already started"), "{text}");
     assert_eq!(argo.received_requests().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn start_rejects_jobs_with_non_bakta_workflow_kinds() {
+    let argo = MockServer::start().await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let router = test_router(handler.clone());
+    for kind in [
+        WorkflowKind::BaktaBaktfold,
+        WorkflowKind::BaktaProteins,
+        WorkflowKind::Baktfold,
+    ] {
+        let id = insert_state(
+            &handler,
+            job_state(ApiVersion::V2, kind, ResultKind::Bakta, None),
+        )
+        .await;
+        let (status, text) = call(
+            &router,
+            "POST",
+            "/api/v1/job/start",
+            Some(v1_start_body(id, TEST_SECRET)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{kind:?}: {text}");
+        assert!(text.contains("not supported by the V1 API"), "{text}");
+        let states = handler.state_handler.job_state.read().await;
+        assert_eq!(states[&id].workflow_kind, kind);
+    }
+    assert!(argo.received_requests().await.unwrap().is_empty());
+}

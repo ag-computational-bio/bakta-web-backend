@@ -988,6 +988,12 @@ impl StateHandler {
             if state.secret != *secret {
                 return Err(anyhow!("Unauthorized"));
             }
+            if state.workflow_kind != WorkflowKind::Bakta {
+                return Err(anyhow!(
+                    "Workflow kind {} is not supported by the V1 API, use the V2 API",
+                    workflow_kind_label_value(state.workflow_kind)
+                ));
+            }
             if has_workflow(state) {
                 return Err(JobAlreadyStarted.into());
             }
