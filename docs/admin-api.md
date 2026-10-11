@@ -130,13 +130,14 @@ The duration values (`avg`, `p50`, `p90`, `p99`) are null when no matching job h
   "interval": "month",
   "group_by": "workflow_kind",
   "buckets": [
-    { "period_start": "2026-09-01T00:00:00Z", "group": "bakta", "jobs_total": 120, "jobs_succeeded": 115, "jobs_failed": 4, "jobs_error": 1, "runtime_p50": 390.0, "runtime_p90": 700.0, "runtime_avg": 420.0, "total_input_bp": 600000000 }
+    { "period_start": "2026-09-01T00:00:00Z", "group": "bakta", "jobs_total": 120, "jobs_succeeded": 115, "jobs_failed": 4, "jobs_error": 1, "runtime_p50": 390.0, "runtime_p90": 700.0, "runtime_avg": 420.0, "total_input_bp": 600000000, "input_p50_bp": 4800000.0, "input_avg_bp": 5000000.0 }
   ]
 }
 ```
 
 With `group_by=none`, `group` is `null`. Buckets without jobs are left out; the UI fills gaps.
 `runtime_p50`, `runtime_p90` and `runtime_avg` use succeeded jobs only (by `outcome`) and are null when the bucket has no succeeded jobs with a runtime.
+`input_p50_bp` and `input_avg_bp` use all jobs of the bucket with a `total_length` and are null when there are none.
 
 ### `GET /stats/versions?environment&from&to`
 
@@ -170,9 +171,33 @@ With `group_by=none`, `group` is `null`. Buckets without jobs are left out; the 
 - `slowest`: top 10 by runtime, newest first on ties.
 - All percentile and average fields are null when there are no matching jobs; `jobs` is then 0.
 
-### `GET /jobs?environment&from&to&status&workflow_kind&q&limit&offset&sort`
+### `GET /stats/inputs?environment&from&to&workflow_kind`
+
+Input statistics over jobs with a non-null `total_length`. `workflow_kind` is optional, comma separated.
+
+```json
+{
+  "jobs": 1200,
+  "total_bp": 5123456789,
+  "total_length": { "min": 2000.0, "p10": 1500000.0, "p25": 2800000.0, "p50": 4800000.0, "p75": 5600000.0, "p90": 6500000.0, "p99": 11000000.0, "max": 15000000.0, "avg": 4600000.0 },
+  "sequence_count": { "min": 1, "p50": 3, "p90": 120, "p99": 800, "max": 4000, "avg": 42.5 },
+  "size_histogram": [ { "min_bp": 0, "max_bp": 1000000, "jobs": 40 } ],
+  "sequence_histogram": [ { "min_sequences": 1, "max_sequences": 1, "jobs": 300 } ],
+  "by_workflow_kind": [ { "workflow_kind": "bakta", "jobs": 900, "total_bp": 4000000000, "p50_bp": 4900000.0, "avg_bp": 4700000.0, "p50_sequences": 3.0 } ],
+  "largest": [ { "id": "...", "workflow_kind": "bakta", "organism": "...", "total_length": 15000000, "sequence_count": 4000, "status": "succeeded", "created_at": "..." } ]
+}
+```
+
+- `size_histogram`: the same 7 bp buckets as `by_input_size` in `GET /stats/runtimes`, always all 7.
+- `sequence_histogram`: fixed buckets 1, 2-5, 6-20, 21-100, 101-500, 501-2000, 2001 and more (`max_sequences` is inclusive and null for the last), always all 7, over jobs with a non-null `sequence_count`.
+- `sequence_count` statistics use jobs with a non-null `sequence_count`.
+- `largest`: top 10 by `total_length`.
+- Percentile and average fields are null when there are no matching jobs.
+
+### `GET /jobs?environment&from&to&status&workflow_kind&workflow_phase&q&limit&offset&sort`
 
 - `status`, `workflow_kind`: comma separated lists.
+- `workflow_phase`: comma separated list of live Argo phases (`Pending`, `Running`, `Succeeded`, `Failed`, `Error`). Only jobs with a live workflow in one of these phases match.
 - `q`: matches the job ID prefix, organism (genus, species, strain) or name, case insensitive.
 - `limit` default 50, max 500. `offset` default 0.
 - `sort`: `created_at` (default, newest first), `-created_at` (oldest first), `runtime_seconds`, `-runtime_seconds`, `total_length`, `-total_length`. For `runtime_seconds` and `total_length` the plain value sorts ascending and the `-` prefix descending. Empty values come last in both directions.
@@ -184,13 +209,15 @@ With `group_by=none`, `group` is `null`. Buckets without jobs are left out; the 
     {
       "id": "...", "environment": "production", "workflow_kind": "bakta", "status": "succeeded", "outcome": "succeeded",
       "organism": "Escherichia coli Sakai", "sequence_count": 3, "total_length": 5594605,
-      "created_at": "...", "finished_at": "...", "runtime_seconds": 401.2
+      "created_at": "...", "finished_at": "...", "runtime_seconds": 401.2,
+      "workflow_name": "bakta-job-1.12.2-...", "workflow_phase": "Succeeded"
     }
   ]
 }
 ```
 
 `organism` joins genus, species and strain with spaces, or is null.
+`workflow_name` and `workflow_phase` come from the workflow list the backend polls from Argo (no Argo request per row). Both are null when no live workflow exists for the job.
 
 ### `GET /jobs/{id}`
 
@@ -232,7 +259,7 @@ Argo terminate of a running workflow. `409` if the workflow is not running. Resp
 
 Deletes the Argo workflow (Argo removes its pods) and sets the job status to `deleted`. With `purge_data=true` the job's S3 objects are deleted too. Response: `{ "deleted_workflow": true, "purged_objects": 12 }`.
 
-### `GET /workflows?environment&phase`
+### `GET /workflows?environment&phase&orphans`
 
 For this endpoint and for `POST /cleanup`, `environment` defaults to the backend's own `ENVIRONMENT`.
 
@@ -243,6 +270,7 @@ Live Argo workflows of this backend, including ones without a job record. `phase
 ```
 
 `job_id` is null when the workflow has no `jobid` label. `workflow_kind` is null when the workflow has no `workflow-kind` label.
+With `orphans=true`, only workflows without a matching job record are returned: no `jobid` label, or a job ID that is not in the statistics database. This needs the statistics database (`503` without it).
 
 ### `POST /cleanup`
 
