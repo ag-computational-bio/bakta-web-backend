@@ -19,6 +19,9 @@ mod bakta_handler;
 mod metrics;
 mod openapi;
 mod s3_handler;
+// Wired into the job lifecycle and the admin API in later steps.
+#[allow(dead_code)]
+mod stats;
 #[cfg(test)]
 mod test_support;
 mod v1;
