@@ -334,15 +334,18 @@ fn current_workflows(
     workflows_by_job(items)
         .into_iter()
         .filter_map(|(id, workflows)| {
+            let in_list = |name: &String| workflows.iter().any(|item| item.metadata.name == *name);
             let recorded = match job_state.get(&id) {
+                // A recorded workflow that is not listed (yet) stays current.
                 Some(state) => state.workflowname.clone(),
-                None => recorded_in_db.get(&id).cloned(),
+                // The database may lag behind, so only use a listed name.
+                None => recorded_in_db
+                    .get(&id)
+                    .filter(|name| in_list(name))
+                    .cloned(),
             };
             let name = match recorded {
-                Some(recorded) => workflows
-                    .iter()
-                    .any(|item| item.metadata.name == recorded)
-                    .then_some(recorded)?,
+                Some(recorded) => in_list(&recorded).then_some(recorded)?,
                 None => workflows
                     .iter()
                     .max_by_key(|item| (item.metadata.creation_timestamp, &item.metadata.name))?

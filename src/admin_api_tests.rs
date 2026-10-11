@@ -415,11 +415,11 @@ fn polled(
     phase: &str,
     started_minutes_ago: i64,
 ) -> crate::argo::structs::SimpleStatus {
+    let started = (Utc::now() - Duration::minutes(started_minutes_ago)).to_rfc3339();
     serde_json::from_value(json!({
-        "metadata": {"name": name, "uid": Uuid::new_v4(),
+        "metadata": {"name": name, "uid": Uuid::new_v4(), "creationTimestamp": started,
                      "labels": {"jobid": id.to_string(), "secret": "x", "api-version": "v2"}},
-        "status": {"phase": phase,
-                   "startedAt": (Utc::now() - Duration::minutes(started_minutes_ago)).to_rfc3339()}
+        "status": {"phase": phase, "startedAt": started}
     }))
     .unwrap()
 }
