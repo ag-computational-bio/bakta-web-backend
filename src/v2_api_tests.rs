@@ -606,3 +606,67 @@ async fn empty_submit_lookup_keeps_the_job_unknown_until_the_workflow_is_listed(
     assert!(text.contains("already started"), "{text}");
     assert_eq!(submit_count(&argo.received_requests().await.unwrap()), 1);
 }
+
+/// Plays request A: holds the start reservation of `id`, then marks its
+/// submission unknown and releases the reservation. The reservation lock is
+/// held for a while, so a start request B made meanwhile waits on it.
+fn failed_start_that_marks_unknown(
+    handler: &crate::bakta_handler::BaktaHandler,
+    id: Uuid,
+) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
+    let state_handler = handler.state_handler.clone();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let mut starting = state_handler.starting_jobs.lock().unwrap();
+        starting.insert(id);
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        state_handler.unknown_submissions.lock().unwrap().insert(
+            id,
+            crate::bakta_handler::UnknownSubmission::new(chrono::Utc::now()),
+        );
+        starting.remove(&id);
+    });
+    (thread, locked_rx)
+}
+
+#[tokio::test]
+async fn start_checks_the_unknown_submission_after_taking_the_reservation() {
+    let argo = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/bakta/submit"))
+        .respond_with(submit_response("duplicate"))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let router = test_router(handler.clone());
+    let v2_id = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    let v1_id = insert_state(
+        &handler,
+        job_state(ApiVersion::V1, WorkflowKind::Bakta, ResultKind::Bakta, None),
+    )
+    .await;
+    let v1_body = json!({
+        "job": {"jobID": v1_id, "secret": TEST_SECRET},
+        "config": {
+            "hasReplicons": false, "translationTable": 11, "completeGenome": false,
+            "keepContigHeaders": false, "minContigLength": 1, "compliant": false
+        }
+    });
+    for (id, uri, body) in [
+        (
+            v2_id,
+            "/api/v2/job/start",
+            start_body(v2_id, TEST_SECRET, "bakta", json!({})),
+        ),
+        (v1_id, "/api/v1/job/start", v1_body),
+    ] {
+        let (request_a, locked) = failed_start_that_marks_unknown(&handler, id);
+        locked.recv().unwrap();
+        let (status, text) = call(&router, "POST", uri, Some(body)).await;
+        request_a.join().unwrap();
+        assert_eq!(status, StatusCode::CONFLICT, "{uri}: {text}");
+        assert!(text.contains("not known"), "{uri}: {text}");
+    }
+}

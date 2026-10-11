@@ -1585,10 +1585,12 @@ impl StateHandler {
             if has_workflow(state) {
                 return Err(JobAlreadyStarted.into());
             }
+            // Reserve first: a failed start marks its submission unknown
+            // before it releases the reservation, so the check sees the mark.
+            let reservation = self.reserve_start(id)?;
             if self.is_submission_unknown(&id) {
                 return Err(SubmissionUnknown.into());
             }
-            let reservation = self.reserve_start(id)?;
             (
                 self.submit_labels(state, origin),
                 state.api_version,
@@ -1696,11 +1698,12 @@ impl StateHandler {
                 return Err(JobAlreadyStarted.into());
             }
 
+            // Reserve first: a failed start marks its submission unknown
+            // before it releases the reservation, so the check sees the mark.
+            let reservation = self.reserve_start(job_id)?;
             if self.is_submission_unknown(&job_id) {
                 return Err(SubmissionUnknown.into());
             }
-
-            let reservation = self.reserve_start(job_id)?;
             (
                 self.submit_labels(state, origin),
                 state.api_version,
