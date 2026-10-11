@@ -241,7 +241,8 @@ pub async fn job_logs(
     params(JobReference),
     responses(
         (status = 200, body = ()),
-        (status = 400, body = String)
+        (status = 400, body = String),
+        (status = 409, body = String, description = "The result of an earlier start request is not known yet.")
     ),
     tag = "v2",
 )]
@@ -253,7 +254,14 @@ pub async fn delete_job(
         .state_handler
         .delete_job((job.job_id, job.secret))
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+        .map_err(|e| {
+            let status = if e.is::<SubmissionUnknown>() {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (status, e.to_string())
+        })
 }
 
 /// Get V2 version information.

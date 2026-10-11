@@ -26,7 +26,8 @@ use crate::{
     params(Job),
     responses(
         (status = 200, description = "Job deleted successfully."),
-        (status = 400, body = String, description = "Job not found, unauthorized, or deletion failed.")
+        (status = 400, body = String, description = "Job not found, unauthorized, or deletion failed."),
+        (status = 409, body = String, description = "The result of an earlier start request is not known yet.")
     ),
     tag = "v1",
 )]
@@ -38,7 +39,14 @@ pub async fn delete_job(
         .state_handler
         .delete_job((job.id, job.secret))
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+        .map_err(|e| {
+            let status = if e.is::<SubmissionUnknown>() {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (status, e.to_string())
+        })
 }
 
 /// Get raw stdout and stderr logs for a V1 job.

@@ -255,6 +255,41 @@ async fn delete_keeps_state_when_argo_fails() {
 }
 
 #[tokio::test]
+async fn delete_is_refused_while_a_submission_is_unknown() {
+    let argo = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let id = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    handler
+        .state_handler
+        .unknown_submissions
+        .lock()
+        .unwrap()
+        .insert(id, chrono::Utc::now());
+    let router = test_router(handler.clone());
+    for uri in [
+        format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+        format!("/api/v1/job/delete?jobID={id}&secret={TEST_SECRET}"),
+    ] {
+        let (status, body) = call(&router, "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("not known yet"), "{body}");
+    }
+    assert!(
+        handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
+}
+
+#[tokio::test]
 async fn delete_of_unknown_job_succeeds() {
     let router = test_router(test_handler("http://127.0.0.1:1", "https://s3.example.com"));
     let (status, _) = call(

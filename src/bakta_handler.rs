@@ -1245,6 +1245,10 @@ impl StateHandler {
             let _reservation = self
                 .reserve_start(job_id)
                 .map_err(|_| anyhow!("Job is starting, try again later"))?;
+            // A workflow may exist that the job state does not know yet.
+            if self.is_submission_unknown(&job_id) {
+                return Err(SubmissionUnknown.into());
+            }
             self.argo_client.delete_workflow(state).await?;
         }
         if write_lock.remove(&job_id).is_some() {
@@ -1326,7 +1330,7 @@ impl StateHandler {
         })
     }
 
-    fn is_submission_unknown(&self, job_id: &Uuid) -> bool {
+    pub(crate) fn is_submission_unknown(&self, job_id: &Uuid) -> bool {
         self.unknown_submissions
             .lock()
             .expect("unknown submissions lock poisoned")

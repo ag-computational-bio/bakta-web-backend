@@ -15,7 +15,7 @@ use super::{
 use crate::{
     api_structs::ArgoStatus,
     argo::structs::ArgoWorkflow,
-    bakta_handler::{BaktaHandler, FullJobState, state_reference_time},
+    bakta_handler::{BaktaHandler, FullJobState, SubmissionUnknown, state_reference_time},
     retention::{data_expires_at, is_data_available, reference_time},
     stats::StatsEvent,
     workflow_catalog::is_bakta_web_template,
@@ -348,7 +348,7 @@ pub async fn resume_job(
         (status = 401, body = AdminErrorResponse),
         (status = 403, body = AdminErrorResponse),
         (status = 404, body = AdminErrorResponse),
-        (status = 409, body = AdminErrorResponse, description = "The job is being started."),
+        (status = 409, body = AdminErrorResponse, description = "The job is being started, or the result of an earlier start request is not known yet."),
         (status = 502, body = AdminErrorResponse)
     ),
     security(("bearer_auth" = [])),
@@ -366,6 +366,10 @@ pub async fn delete_job(
     let _reservation = handler
         .reserve_start(id)
         .map_err(|_| AdminError::Conflict("Job is starting, try again later".to_string()))?;
+    // A workflow may exist that the backend does not know yet.
+    if handler.is_submission_unknown(&id) {
+        return Err(AdminError::Conflict(SubmissionUnknown.to_string()));
+    }
     let target = find_job(&state, id).await?;
     let deleted_workflow = match (&target.in_memory, &target.workflow_name) {
         (Some(job), _) if job.archived => {

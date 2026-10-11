@@ -385,6 +385,55 @@ async fn start_is_refused_while_an_admin_delete_runs() {
 }
 
 #[tokio::test]
+async fn delete_is_refused_while_a_submission_is_unknown() {
+    let argo = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let s3 = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&s3)
+        .await;
+    let s3_url = format!("http://s3.test:{}", s3.address().port());
+    let setup = admin_setup(&argo.uri(), &s3_url, None).await;
+    // Argo may have created a workflow, but the lookup failed.
+    let id = v2_state(&setup.handler, WorkflowKind::Bakta, None).await;
+    setup
+        .handler
+        .state_handler
+        .unknown_submissions
+        .lock()
+        .unwrap()
+        .insert(id, Utc::now());
+
+    let (status, body) = admin_call(
+        &setup,
+        "DELETE",
+        &format!("/api/admin/jobs/{id}?purge_data=true"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["error"],
+        "The result of an earlier start request is not known yet, try again later"
+    );
+    assert!(
+        setup
+            .handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
+}
+
+#[tokio::test]
 async fn delete_marks_database_only_jobs_as_deleted() {
     let Some(db) = test_db("delete_marks_database_only_jobs_as_deleted").await else {
         return;
