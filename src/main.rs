@@ -20,6 +20,8 @@ mod s3_handler;
 #[cfg(test)]
 mod test_support;
 mod v1;
+#[cfg(test)]
+mod v1_api_tests;
 mod v2;
 mod workflow_catalog;
 
