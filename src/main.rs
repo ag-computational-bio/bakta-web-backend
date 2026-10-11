@@ -10,6 +10,9 @@ use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+// Wired into the router in a later step.
+#[allow(dead_code)]
+mod admin;
 #[allow(clippy::upper_case_acronyms)]
 mod api_structs;
 mod argo;
