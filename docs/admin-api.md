@@ -94,6 +94,8 @@ All paths start with `/api/admin`. All responses are JSON. Errors use `{ "error"
 { "username": "jdoe", "name": "Jane Doe", "email": "jdoe@example.org", "groups": ["bakta-admin"] }
 ```
 
+`name` and `email` are null when the token has no such claim.
+
 ### `GET /stats/summary?environment&from&to`
 
 ```json
@@ -116,7 +118,7 @@ All paths start with `/api/admin`. All responses are JSON. Errors use `{ "error"
 
 `jobs_finished`, `jobs_succeeded`, `jobs_failed` and `jobs_error` count by `outcome`. `jobs_active` counts jobs with status `submitted` or `running`.
 `success_rate` is `jobs_succeeded / jobs_finished` (null when nothing finished). Percentiles use `percentile_cont`.
-Duration values are null when no job in the range has that duration.
+The duration values (`avg`, `p50`, `p90`, `p99`) are null when no matching job has that duration.
 
 ### `GET /stats/timeseries?environment&from&to&interval&group_by`
 
@@ -146,7 +148,7 @@ With `group_by=none`, `group` is `null`. Buckets without jobs are left out; the 
 - `status`, `workflow_kind`: comma separated lists.
 - `q`: matches the job ID prefix, organism (genus, species, strain) or name, case insensitive.
 - `limit` default 50, max 500. `offset` default 0.
-- `sort`: `created_at`, `-created_at` (default, newest first), `runtime_seconds`, `-runtime_seconds`, `total_length`, `-total_length`. A leading `-` sorts in descending order, without it the order is ascending. Empty values come last.
+- `sort`: `created_at` (default, newest first), `-created_at` (oldest first), `runtime_seconds`, `-runtime_seconds`, `total_length`, `-total_length`. For `runtime_seconds` and `total_length` the plain value sorts ascending and the `-` prefix descending. Empty values come last in both directions.
 
 ```json
 {
@@ -213,15 +215,16 @@ Live Argo workflows of this backend, including ones without a job record. `phase
 { "items": [ { "name": "...", "job_id": "...", "workflow_kind": "bakta", "phase": "Failed", "template": "bakta-job-1.12.2", "environment": "production", "started_at": "...", "finished_at": "...", "message": "..." } ] }
 ```
 
-`job_id` is null when the workflow has no `jobid` label.
+`job_id` is null when the workflow has no `jobid` label. `workflow_kind` is null when the workflow has no `workflow-kind` label.
 
 ### `POST /cleanup`
 
 ```json
-{ "phases": ["Failed", "Error"], "older_than_hours": 24, "environment": "production", "dry_run": true }
+{ "phases": ["Failed", "Error"], "older_than_hours": 24, "environment": "production", "dry_run": true, "workflow_names": ["..."] }
 ```
 
-Deletes matching workflows (and with them their pods). `dry_run` defaults to `true` and only lists what would be deleted. Response:
+Deletes matching workflows (and with them their pods). `dry_run` defaults to `true` and only lists what would be deleted.
+`workflow_names` is optional. When it is given (a real run after a dry run), only workflows in that list that still match the phase and age filters are deleted, so the admin deletes exactly what they saw. Response:
 
 ```json
 { "dry_run": true, "workflows": [ { "name": "...", "job_id": "...", "phase": "Failed", "finished_at": "..." } ] }

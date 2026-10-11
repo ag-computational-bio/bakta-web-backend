@@ -206,14 +206,16 @@ impl std::str::FromStr for JobSort {
     type Err = anyhow::Error;
 
     fn from_str(value: &str) -> Result<Self> {
-        let (descending, name) = match value.strip_prefix('-') {
+        let (prefixed, name) = match value.strip_prefix('-') {
             Some(name) => (true, name),
             None => (false, value),
         };
-        let column = match name {
-            "created_at" => "created_at",
-            "runtime_seconds" => "runtime_seconds",
-            "total_length" => "total_length",
+        // `created_at` lists the newest jobs first, `-created_at` the oldest.
+        // The other columns sort ascending, and descending with `-`.
+        let (column, descending) = match name {
+            "created_at" => ("created_at", !prefixed),
+            "runtime_seconds" => ("runtime_seconds", prefixed),
+            "total_length" => ("total_length", prefixed),
             _ => return Err(anyhow::anyhow!("Invalid sort value: {value}")),
         };
         Ok(Self { column, descending })

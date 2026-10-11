@@ -276,7 +276,7 @@ async fn list_jobs_filters_searches_sorts_and_pages() {
 
     let oldest_first = db
         .list_jobs(&query(JobListQuery {
-            sort: "created_at".parse().unwrap(),
+            sort: "-created_at".parse().unwrap(),
             limit: 1,
             offset: 1,
             ..Default::default()
@@ -309,6 +309,7 @@ async fn list_jobs_filters_searches_sorts_and_pages() {
         assert_eq!(found.total, expected, "{q}");
     }
 
+    assert_eq!("created_at".parse::<JobSort>().unwrap(), JobSort::default());
     assert!("name".parse::<JobSort>().is_err());
 }
 
