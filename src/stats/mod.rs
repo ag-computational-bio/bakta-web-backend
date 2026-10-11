@@ -2,6 +2,8 @@
 //! the queries used by the admin API.
 
 pub mod queries;
+#[cfg(test)]
+mod queries_tests;
 
 use std::time::Duration;
 
