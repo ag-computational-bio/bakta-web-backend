@@ -285,6 +285,7 @@ pub async fn list_jobs(
 }
 
 pub(crate) fn workflow_view(workflow: ArgoWorkflow) -> WorkflowView {
+    let suspended = workflow.is_suspended();
     let name = workflow.metadata.name;
     let mut nodes: Vec<_> = workflow
         .status
@@ -310,6 +311,7 @@ pub(crate) fn workflow_view(workflow: ArgoWorkflow) -> WorkflowView {
     });
     WorkflowView {
         name,
+        suspended,
         phase: workflow.status.phase,
         started_at: workflow.status.started_at,
         finished_at: workflow.status.finished_at,

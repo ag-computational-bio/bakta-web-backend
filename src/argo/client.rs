@@ -390,7 +390,7 @@ impl ArgoClient {
             url::Url::parse(&format!("{}/api/v1/workflows/{}", self.url, self.namespace))?;
         url.query_pairs_mut().append_pair(
             "fields",
-            "items.metadata.name,items.metadata.labels,items.metadata.creationTimestamp,items.spec.workflowTemplateRef,items.status.phase,items.status.startedAt,items.status.finishedAt,items.status.message",
+            "items.metadata.name,items.metadata.labels,items.metadata.creationTimestamp,items.spec.workflowTemplateRef,items.spec.suspend,items.status.phase,items.status.startedAt,items.status.finishedAt,items.status.message,items.status.nodes",
         );
         if let Some(selector) = label_selector {
             url.query_pairs_mut()
@@ -447,6 +447,16 @@ impl ArgoClient {
             workflow_name,
             "resubmit",
             serde_json::json!({"name": workflow_name, "namespace": self.namespace, "memoized": false}),
+        )
+        .await
+    }
+
+    /// Resumes a suspended workflow.
+    pub async fn resume_workflow(&self, workflow_name: &str) -> Result<ArgoWorkflow> {
+        self.workflow_action(
+            workflow_name,
+            "resume",
+            serde_json::json!({"name": workflow_name, "namespace": self.namespace}),
         )
         .await
     }

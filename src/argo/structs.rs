@@ -233,6 +233,22 @@ pub struct ArgoWorkflowMetadata {
 pub struct ArgoWorkflowSpec {
     #[serde(default)]
     pub workflow_template_ref: Option<WorkflowTemplateRef>,
+    #[serde(default)]
+    pub suspend: Option<bool>,
+}
+
+impl ArgoWorkflow {
+    /// A running workflow is suspended when `spec.suspend` is set or a
+    /// suspend node is still running.
+    pub fn is_suspended(&self) -> bool {
+        self.status.phase == "Running"
+            && (self.spec.suspend == Some(true)
+                || self
+                    .status
+                    .nodes
+                    .values()
+                    .any(|node| node.node_type == "Suspend" && node.phase == "Running"))
+    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

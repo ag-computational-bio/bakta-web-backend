@@ -39,8 +39,9 @@ pub fn router() -> Router<Arc<BaktaHandler>> {
         .route("/jobs/{id}/retry", post(operations::retry_job))
         .route("/jobs/{id}/resubmit", post(operations::resubmit_job))
         .route("/jobs/{id}/stop", post(operations::stop_job))
+        .route("/jobs/{id}/resume", post(operations::resume_job))
         .route("/workflows", get(operations::list_workflows))
-        .route("/cleanup", post(operations::cleanup))
+        .route("/workflows/bulk", post(operations::bulk_workflows))
 }
 
 #[derive(Debug)]

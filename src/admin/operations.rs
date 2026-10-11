@@ -1,4 +1,4 @@
-//! Admin handlers that change Argo workflows: retry, resubmit, stop, delete and cleanup.
+//! Admin handlers that change Argo workflows: retry, resubmit, stop, resume, delete and bulk actions.
 
 use std::sync::Arc;
 
@@ -69,6 +69,37 @@ fn response_phase(workflow: &ArgoWorkflow, fallback: &str) -> String {
     }
 }
 
+/// Updates the job state and record after an Argo retry.
+async fn after_retry(state: &BaktaHandler, id: Uuid, workflow_name: &str) {
+    let handler = &state.state_handler;
+    if let Some(job) = handler.job_state.write().await.get_mut(&id)
+        && job.workflowname.as_deref() == Some(workflow_name)
+    {
+        job.status = Some(ArgoStatus::Running);
+        job.updated = Some(Utc::now());
+    }
+    handler.stats.record(StatsEvent::Retried { id });
+}
+
+/// Points the job state and record to the new workflow after an Argo resubmit.
+async fn after_resubmit(state: &BaktaHandler, id: Uuid, workflow: &ArgoWorkflow) {
+    let handler = &state.state_handler;
+    let now = Utc::now();
+    if let Some(job) = handler.job_state.write().await.get_mut(&id) {
+        job.workflowname = Some(workflow.metadata.name.clone());
+        job.status = Some(ArgoStatus::Pending);
+        job.started = Some(workflow.metadata.creation_timestamp.unwrap_or(now));
+        job.updated = Some(now);
+        job.archived = false;
+        job.argo_uid = None;
+    }
+    handler.stats.record(StatsEvent::Resubmitted {
+        id,
+        workflow_name: workflow.metadata.name.clone(),
+        submitted_at: now,
+    });
+}
+
 /// Argo retry of a failed or errored workflow.
 #[utoipa::path(
     post,
@@ -105,13 +136,7 @@ pub async fn retry_job(
         .await
         .map_err(AdminError::argo)?;
     tracing::info!(user = %user.username, job_id = %id, workflow_name = %workflow_name, "admin_retry");
-    if let Some(job) = handler.job_state.write().await.get_mut(&id)
-        && job.workflowname.as_deref() == Some(workflow_name.as_str())
-    {
-        job.status = Some(ArgoStatus::Running);
-        job.updated = Some(Utc::now());
-    }
-    handler.stats.record(StatsEvent::Retried { id });
+    after_retry(&state, id, &workflow_name).await;
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Running"),
         workflow_name,
@@ -148,24 +173,11 @@ pub async fn resubmit_job(
         .await
         .map_err(AdminError::argo)?;
     let new_name = workflow.metadata.name.clone();
-    let now = Utc::now();
     tracing::info!(
         user = %user.username, job_id = %id, workflow_name = %old_name,
         new_workflow_name = %new_name, "admin_resubmit"
     );
-    if let Some(job) = handler.job_state.write().await.get_mut(&id) {
-        job.workflowname = Some(new_name.clone());
-        job.status = Some(ArgoStatus::Pending);
-        job.started = Some(workflow.metadata.creation_timestamp.unwrap_or(now));
-        job.updated = Some(now);
-        job.archived = false;
-        job.argo_uid = None;
-    }
-    handler.stats.record(StatsEvent::Resubmitted {
-        id,
-        workflow_name: new_name.clone(),
-        submitted_at: now,
-    });
+    after_resubmit(&state, id, &workflow).await;
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Pending"),
         workflow_name: new_name,
@@ -210,6 +222,50 @@ pub async fn stop_job(
     tracing::info!(user = %user.username, job_id = %id, workflow_name = %workflow_name, "admin_stop");
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Failed"),
+        workflow_name,
+    }))
+}
+
+/// Argo resume of a suspended workflow.
+#[utoipa::path(
+    post,
+    path = "/api/admin/jobs/{id}/resume",
+    operation_id = "resumeAdminJob",
+    params(("id" = Uuid, Path, description = "Job ID")),
+    responses(
+        (status = 200, body = WorkflowActionResponse),
+        (status = 401, body = AdminErrorResponse),
+        (status = 403, body = AdminErrorResponse),
+        (status = 404, body = AdminErrorResponse),
+        (status = 409, body = AdminErrorResponse, description = "Workflow is not suspended."),
+        (status = 502, body = AdminErrorResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "admin",
+)]
+pub async fn resume_job(
+    Admin(user): Admin,
+    State(state): State<Arc<BaktaHandler>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<WorkflowActionResponse>, AdminError> {
+    let workflow_name = require_workflow(&find_job(&state, id).await?)?;
+    let argo = &state.state_handler.argo_client;
+    let current = argo
+        .get_workflow(&workflow_name)
+        .await
+        .map_err(AdminError::argo)?;
+    if !current.is_suspended() {
+        return Err(AdminError::Conflict(
+            "Workflow is not suspended".to_string(),
+        ));
+    }
+    let workflow = argo
+        .resume_workflow(&workflow_name)
+        .await
+        .map_err(AdminError::argo)?;
+    tracing::info!(user = %user.username, job_id = %id, workflow_name = %workflow_name, "admin_resume");
+    Ok(Json(WorkflowActionResponse {
+        phase: response_phase(&workflow, "Running"),
         workflow_name,
     }))
 }
@@ -349,6 +405,7 @@ pub async fn list_workflows(
     let items = workflows
         .into_iter()
         .map(|workflow| {
+            let suspended = workflow.is_suspended();
             let labels = &workflow.metadata.labels;
             WorkflowSummary {
                 job_id: labels.get("jobid").cloned(),
@@ -362,6 +419,7 @@ pub async fn list_workflows(
                 phase: workflow.status.phase,
                 started_at: workflow.status.started_at,
                 finished_at: workflow.status.finished_at,
+                suspended,
                 message: workflow.status.message,
             }
         })
@@ -369,14 +427,100 @@ pub async fn list_workflows(
     Ok(Json(WorkflowListResponse { items }))
 }
 
-/// Deletes old workflows in the given phases. Lists them only with `dry_run`.
+fn bulk_applicable(action: BulkAction, workflow: &ArgoWorkflow) -> bool {
+    let phase = workflow.status.phase.as_str();
+    match action {
+        BulkAction::Delete => true,
+        BulkAction::Stop => matches!(phase, "Pending" | "Running"),
+        BulkAction::Retry => matches!(phase, "Failed" | "Error"),
+        BulkAction::Resume => workflow.is_suspended(),
+        BulkAction::Resubmit => matches!(phase, "Succeeded" | "Failed" | "Error"),
+    }
+}
+
+fn bulk_matches(
+    filter: &BulkFilter,
+    cutoff: Option<chrono::DateTime<Utc>>,
+    workflow: &ArgoWorkflow,
+) -> bool {
+    let labels = &workflow.metadata.labels;
+    let q_matches = filter
+        .q
+        .as_deref()
+        .map(|q| q.trim().to_lowercase())
+        .filter(|q| !q.is_empty())
+        .is_none_or(|q| {
+            workflow.metadata.name.to_lowercase().contains(&q)
+                || labels
+                    .get("jobid")
+                    .is_some_and(|id| id.to_lowercase().contains(&q))
+        });
+    let phase_matches = filter
+        .phases
+        .as_ref()
+        .is_none_or(|phases| phases.is_empty() || phases.contains(&workflow.status.phase));
+    let kind_matches = filter.workflow_kinds.as_ref().is_none_or(|kinds| {
+        kinds.is_empty()
+            || labels
+                .get("workflow-kind")
+                .is_some_and(|kind| kinds.contains(kind))
+    });
+    let age_matches = cutoff.is_none_or(|cutoff| {
+        workflow
+            .status
+            .finished_at
+            .is_some_and(|finished_at| finished_at < cutoff)
+    });
+    q_matches && phase_matches && kind_matches && age_matches
+}
+
+/// Runs one bulk action on one workflow.
+async fn run_bulk_action(
+    state: &BaktaHandler,
+    action: BulkAction,
+    workflow: &ArgoWorkflow,
+) -> anyhow::Result<()> {
+    let argo = &state.state_handler.argo_client;
+    let name = &workflow.metadata.name;
+    let job_id = workflow
+        .metadata
+        .labels
+        .get("jobid")
+        .and_then(|value| value.parse::<Uuid>().ok());
+    match action {
+        BulkAction::Delete => {
+            argo.delete_workflow_by_name(name).await?;
+        }
+        BulkAction::Stop => {
+            argo.terminate_workflow(name).await?;
+        }
+        BulkAction::Resume => {
+            argo.resume_workflow(name).await?;
+        }
+        BulkAction::Retry => {
+            argo.retry_workflow(name).await?;
+            if let Some(id) = job_id {
+                after_retry(state, id, name).await;
+            }
+        }
+        BulkAction::Resubmit => {
+            let new_workflow = argo.resubmit_workflow(name).await?;
+            if let Some(id) = job_id {
+                after_resubmit(state, id, &new_workflow).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Runs one action on all live workflows that match a filter. Lists them only with `dry_run`.
 #[utoipa::path(
     post,
-    path = "/api/admin/cleanup",
-    operation_id = "cleanupAdminWorkflows",
-    request_body = CleanupRequest,
+    path = "/api/admin/workflows/bulk",
+    operation_id = "bulkAdminWorkflows",
+    request_body = BulkRequest,
     responses(
-        (status = 200, body = CleanupResponse),
+        (status = 200, body = BulkResponse),
         (status = 400, body = AdminErrorResponse),
         (status = 401, body = AdminErrorResponse),
         (status = 403, body = AdminErrorResponse),
@@ -385,33 +529,27 @@ pub async fn list_workflows(
     security(("bearer_auth" = [])),
     tag = "admin",
 )]
-pub async fn cleanup(
+pub async fn bulk_workflows(
     Admin(user): Admin,
     State(state): State<Arc<BaktaHandler>>,
-    Json(request): Json<CleanupRequest>,
-) -> Result<Json<CleanupResponse>, AdminError> {
-    let phases = request
-        .phases
-        .unwrap_or_else(|| vec!["Failed".to_string(), "Error".to_string()]);
-    let older_than_hours = request.older_than_hours.unwrap_or(24.0);
-    if !older_than_hours.is_finite() || older_than_hours < 0.0 {
-        return Err(AdminError::BadRequest(
-            "older_than_hours must be zero or positive".to_string(),
-        ));
-    }
+    Json(request): Json<BulkRequest>,
+) -> Result<Json<BulkResponse>, AdminError> {
+    let cutoff = match request.filter.finished_before_hours {
+        Some(hours) if !hours.is_finite() || hours < 0.0 => {
+            return Err(AdminError::BadRequest(
+                "finished_before_hours must be zero or positive".to_string(),
+            ));
+        }
+        Some(hours) => Some(Utc::now() - chrono::Duration::seconds((hours * 3600.0) as i64)),
+        None => None,
+    };
     let dry_run = request.dry_run.unwrap_or(true);
-    let cutoff = Utc::now() - chrono::Duration::seconds((older_than_hours * 3600.0) as i64);
+    let action = request.action;
 
-    let matching: Vec<_> = environment_workflows(&state, request.environment.as_deref())
+    let workflows: Vec<_> = environment_workflows(&state, request.filter.environment.as_deref())
         .await?
         .into_iter()
-        .filter(|workflow| phases.contains(&workflow.status.phase))
-        .filter(|workflow| {
-            workflow
-                .status
-                .finished_at
-                .is_some_and(|finished_at| finished_at < cutoff)
-        })
+        .filter(|workflow| bulk_matches(&request.filter, cutoff, workflow))
         .filter(|workflow| {
             request
                 .workflow_names
@@ -420,32 +558,47 @@ pub async fn cleanup(
         })
         .collect();
 
-    let mut workflows = Vec::new();
-    for workflow in matching {
-        if !dry_run {
-            match state
-                .state_handler
-                .argo_client
-                .delete_workflow_by_name(&workflow.metadata.name)
-                .await
-            {
-                Ok(_) => tracing::info!(
-                    user = %user.username, workflow_name = %workflow.metadata.name,
-                    job_id = workflow.metadata.labels.get("jobid").map(String::as_str).unwrap_or(""),
-                    "admin_cleanup_delete"
-                ),
+    let mut items = Vec::with_capacity(workflows.len());
+    for workflow in workflows {
+        let applicable = bulk_applicable(action, &workflow);
+        let (result, error) = if dry_run {
+            (None, None)
+        } else if !applicable {
+            (Some(BulkResult::Skipped), None)
+        } else {
+            match run_bulk_action(&state, action, &workflow).await {
+                Ok(()) => {
+                    tracing::info!(
+                        user = %user.username, ?action, workflow_name = %workflow.metadata.name,
+                        job_id = workflow.metadata.labels.get("jobid").map(String::as_str).unwrap_or(""),
+                        "admin_bulk_action"
+                    );
+                    (Some(BulkResult::Done), None)
+                }
                 Err(error) => {
-                    tracing::warn!(%error, workflow_name = %workflow.metadata.name, "admin_cleanup_delete_failed");
-                    continue;
+                    tracing::warn!(
+                        user = %user.username, ?action, workflow_name = %workflow.metadata.name,
+                        %error, "admin_bulk_action_failed"
+                    );
+                    (Some(BulkResult::Failed), Some(error.to_string()))
                 }
             }
-        }
-        workflows.push(CleanupItem {
-            job_id: workflow.metadata.labels.get("jobid").cloned(),
+        };
+        let labels = &workflow.metadata.labels;
+        items.push(BulkItem {
+            job_id: labels.get("jobid").cloned(),
+            workflow_kind: labels.get("workflow-kind").cloned(),
             name: workflow.metadata.name,
             phase: workflow.status.phase,
             finished_at: workflow.status.finished_at,
+            applicable,
+            result,
+            error,
         });
     }
-    Ok(Json(CleanupResponse { dry_run, workflows }))
+    Ok(Json(BulkResponse {
+        dry_run,
+        action,
+        items,
+    }))
 }

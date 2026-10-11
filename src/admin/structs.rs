@@ -104,6 +104,8 @@ pub struct WorkflowView {
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub message: Option<String>,
+    /// True when resume applies.
+    pub suspended: bool,
     pub nodes: Vec<WorkflowNodeView>,
 }
 
@@ -160,6 +162,8 @@ pub struct WorkflowSummary {
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub message: Option<String>,
+    /// True when resume applies.
+    pub suspended: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -167,30 +171,64 @@ pub struct WorkflowListResponse {
     pub items: Vec<WorkflowSummary>,
 }
 
+/// Filter of a bulk action. All fields are optional and combine with AND.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
-pub struct CleanupRequest {
-    /// Default `["Failed", "Error"]`.
+pub struct BulkFilter {
+    /// Case insensitive substring of the workflow name or job ID.
+    pub q: Option<String>,
     pub phases: Option<Vec<String>>,
-    /// Default 24.
-    pub older_than_hours: Option<f64>,
+    pub workflow_kinds: Option<Vec<String>>,
+    /// Only workflows that finished more than this many hours ago.
+    pub finished_before_hours: Option<f64>,
     /// Default the backend's own environment, or `all`.
     pub environment: Option<String>,
-    /// Default `true`: only list what would be deleted.
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkAction {
+    Delete,
+    Stop,
+    Retry,
+    Resume,
+    Resubmit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BulkRequest {
+    #[serde(default)]
+    pub filter: BulkFilter,
+    pub action: BulkAction,
+    /// Default `true`: only list the matching workflows.
     pub dry_run: Option<bool>,
-    /// When given, only these workflows are deleted, if they still match the filters.
+    /// When given, only these workflows are processed, if they still match the filter.
     pub workflow_names: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct CleanupItem {
-    pub name: String,
-    pub job_id: Option<String>,
-    pub phase: String,
-    pub finished_at: Option<DateTime<Utc>>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkResult {
+    Done,
+    Skipped,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct CleanupResponse {
+pub struct BulkItem {
+    pub name: String,
+    pub job_id: Option<String>,
+    pub workflow_kind: Option<String>,
+    pub phase: String,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub applicable: bool,
+    /// Null in a dry run.
+    pub result: Option<BulkResult>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BulkResponse {
     pub dry_run: bool,
-    pub workflows: Vec<CleanupItem>,
+    pub action: BulkAction,
+    pub items: Vec<BulkItem>,
 }
