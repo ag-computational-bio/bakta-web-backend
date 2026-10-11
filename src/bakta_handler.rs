@@ -132,7 +132,10 @@ pub struct FullJobState {
     pub started: Option<DateTime<Utc>>,
     pub updated: Option<DateTime<Utc>>,
     pub workflowname: Option<String>,
-    pub secret: String,
+    /// The job secret. `None` when it is not known, for example for a
+    /// workflow without a `secret` label. A job without a secret denies every
+    /// user request.
+    pub secret: Option<String>,
     pub archived: bool,
     pub api_version: ApiVersion,
     pub workflow_kind: WorkflowKind,
@@ -269,6 +272,15 @@ fn result_kind_from_label_value(value: Option<&str>) -> ResultKind {
     }
 }
 
+/// The job secret from the workflow labels. A missing or empty label gives
+/// `None`, so nobody can use the job with a guessed secret.
+fn secret_label(labels: &HashMap<String, String>) -> Option<String> {
+    labels
+        .get("secret")
+        .filter(|secret| !secret.is_empty())
+        .cloned()
+}
+
 fn state_from_simple_status(simple_status: SimpleStatus) -> Option<FullJobState> {
     let labels = &simple_status.metadata.labels;
     let job_id = labels
@@ -291,10 +303,7 @@ fn state_from_simple_status(simple_status: SimpleStatus) -> Option<FullJobState>
         started: Some(simple_status.status.started_at),
         updated: Some(simple_status.status.finished_at.unwrap_or(Utc::now())),
         workflowname: Some(simple_status.metadata.name),
-        secret: labels
-            .get("secret")
-            .cloned()
-            .unwrap_or_else(|| "Unknown".to_string()),
+        secret: secret_label(labels),
         name: labels
             .get("name")
             .cloned()
@@ -326,11 +335,7 @@ pub(crate) fn resubmitted_job_state(
         started: Some(created_at),
         updated: Some(now),
         workflowname: Some(workflow_name.to_string()),
-        // Without the label nobody can know the secret.
-        secret: labels
-            .get("secret")
-            .cloned()
-            .unwrap_or_else(|| Alphanumeric.sample_string(&mut rand::rng(), 32)),
+        secret: secret_label(labels),
         name: labels
             .get("name")
             .cloned()
@@ -883,6 +888,14 @@ fn into_v2_failed_status(id: Uuid, status: FailedJobStatusEnum) -> V2FailedJobSt
 }
 
 impl FullJobState {
+    /// True when `given` is the job secret. Always false when the job has no
+    /// known secret.
+    pub fn secret_matches(&self, given: &str) -> bool {
+        self.secret
+            .as_deref()
+            .is_some_and(|secret| !secret.is_empty() && secret == given)
+    }
+
     fn to_v2_job_status(&self) -> Option<V2JobStatus> {
         Some(V2JobStatus {
             job_id: self.id,
@@ -1062,6 +1075,14 @@ impl StateHandler {
                     runtime_from_state(&state),
                 );
             }
+            let mut state = state;
+            // A workflow without a secret label keeps the secret that is
+            // already known for the job.
+            if state.secret.is_none() {
+                state.secret = write_lock
+                    .get(&state.id)
+                    .and_then(|previous| previous.secret.clone());
+            }
             write_lock.insert(state.id, state);
         }
         expired.extend(purge_expired_states(&mut write_lock, now));
@@ -1113,7 +1134,7 @@ impl StateHandler {
 
         for Job { id, secret } in request_jobs {
             if let Some(state) = read_lock.get(&id) {
-                if state.secret != secret {
+                if !state.secret_matches(&secret) {
                     failed.push(FailedJobStatus {
                         id,
                         status: FailedJobStatusEnum::Unauthorized,
@@ -1165,7 +1186,7 @@ impl StateHandler {
 
         for JobReference { job_id, secret } in request_jobs {
             if let Some(state) = read_lock.get(&job_id) {
-                if state.secret != secret {
+                if !state.secret_matches(&secret) {
                     failed_jobs.push(into_v2_failed_status(
                         job_id,
                         FailedJobStatusEnum::Unauthorized,
@@ -1188,7 +1209,7 @@ impl StateHandler {
         let state = {
             let read_lock = self.job_state.read().await;
             if let Some(state) = read_lock.get(&job_id) {
-                if state.secret != secret {
+                if !state.secret_matches(&secret) {
                     return Err(anyhow!("Unauthorized"));
                 }
                 state.clone()
@@ -1233,7 +1254,7 @@ impl StateHandler {
                 return Err(anyhow!("Job not found"));
             };
 
-            if state.secret != secret {
+            if !state.secret_matches(&secret) {
                 return Err(anyhow!("Unauthorized"));
             }
 
@@ -1352,7 +1373,7 @@ impl StateHandler {
     pub async fn delete_job(&self, (job_id, secret): (Uuid, String)) -> Result<()> {
         let mut write_lock = self.job_state.write().await;
         if let Some(state) = write_lock.get(&job_id) {
-            if state.secret != secret {
+            if !state.secret_matches(&secret) {
                 return Err(anyhow!("Unauthorized"));
             }
             // Same reservation as a start, so no start runs during the delete.
@@ -1420,7 +1441,7 @@ impl StateHandler {
                 started: None,
                 updated: Some(now),
                 workflowname: None,
-                secret: secret.clone(),
+                secret: Some(secret.clone()),
                 name: stripped,
                 archived: false,
                 api_version,
@@ -1571,7 +1592,10 @@ impl StateHandler {
             ("bakta-environment".to_string(), self.environment.clone()),
             ("jobid".to_string(), state.id.to_string()),
             ("name".to_string(), state.name.clone()),
-            ("secret".to_string(), state.secret.clone()),
+            (
+                "secret".to_string(),
+                state.secret.clone().unwrap_or_default(),
+            ),
             (
                 "api-version".to_string(),
                 state.api_version.as_label_value().to_string(),
@@ -1609,7 +1633,7 @@ impl StateHandler {
             let Some(state) = read_lock.get(&id) else {
                 return Ok(());
             };
-            if state.secret != *secret {
+            if !state.secret_matches(secret) {
                 return Err(anyhow!("Unauthorized"));
             }
             if state.workflow_kind != WorkflowKind::Bakta {
@@ -1718,7 +1742,7 @@ impl StateHandler {
                 return Err(anyhow!("Job not found"));
             };
 
-            if state.secret != secret {
+            if !state.secret_matches(&secret) {
                 return Err(anyhow!("Unauthorized"));
             }
 
@@ -1821,7 +1845,7 @@ impl StateHandler {
                 return Err(anyhow!("Job not found"));
             };
 
-            if state.secret != secret {
+            if !state.secret_matches(&secret) {
                 return Err(anyhow!("Unauthorized"));
             }
 
@@ -1858,7 +1882,7 @@ impl StateHandler {
         s3_handler: &S3Handler,
     ) -> Result<ResultResponse> {
         if let Some(state) = self.job_state.read().await.get(&id) {
-            if state.secret != secret {
+            if !state.secret_matches(&secret) {
                 return Err(anyhow!("Unauthorized"));
             }
 
@@ -1899,7 +1923,7 @@ mod tests {
             started: Some(updated - Duration::minutes(5)),
             updated: Some(updated),
             workflowname: None,
-            secret: "secret".to_string(),
+            secret: Some("secret".to_string()),
             archived: false,
             api_version: ApiVersion::V2,
             workflow_kind,
@@ -2194,7 +2218,7 @@ mod tests {
             started: Some(now - Duration::days(JOB_RETENTION_DAYS + 2)),
             updated: Some(now - Duration::days(JOB_RETENTION_DAYS + 1)),
             workflowname: None,
-            secret: "secret".to_string(),
+            secret: Some("secret".to_string()),
             archived: false,
             api_version: ApiVersion::V1,
             workflow_kind: WorkflowKind::Bakta,
@@ -2221,7 +2245,7 @@ mod tests {
                     started: Some(now - Duration::days(JOB_RETENTION_DAYS + 2)),
                     updated: Some(now - Duration::days(JOB_RETENTION_DAYS + 1)),
                     workflowname: None,
-                    secret: "secret".to_string(),
+                    secret: Some("secret".to_string()),
                     archived: false,
                     api_version: ApiVersion::V1,
                     workflow_kind: WorkflowKind::Bakta,
@@ -2239,7 +2263,7 @@ mod tests {
                     started: Some(now - Duration::days(1)),
                     updated: Some(now),
                     workflowname: None,
-                    secret: "secret".to_string(),
+                    secret: Some("secret".to_string()),
                     archived: false,
                     api_version: ApiVersion::V2,
                     workflow_kind: WorkflowKind::BaktaBaktfold,

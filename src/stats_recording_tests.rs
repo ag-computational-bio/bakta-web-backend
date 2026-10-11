@@ -780,7 +780,7 @@ async fn resubmit_of_a_database_only_job_is_current_before_the_writer_catches_up
 
     let states = setup.handler.state_handler.job_state.read().await;
     assert_eq!(states[&id].workflowname.as_deref(), Some("wf-b"));
-    assert_eq!(states[&id].secret, TEST_SECRET);
+    assert_eq!(states[&id].secret.as_deref(), Some(TEST_SECRET));
     drop(states);
     let polled: Vec<String> = drain(&mut events)
         .into_iter()

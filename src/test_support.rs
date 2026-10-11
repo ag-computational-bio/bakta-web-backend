@@ -168,7 +168,7 @@ pub fn job_state(
         started: Some(now),
         updated: Some(now),
         workflowname: None,
-        secret: TEST_SECRET.to_string(),
+        secret: Some(TEST_SECRET.to_string()),
         archived: false,
         api_version,
         workflow_kind,
