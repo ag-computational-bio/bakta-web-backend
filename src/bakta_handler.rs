@@ -1040,12 +1040,19 @@ impl StateHandler {
             .write()
             .expect("live workflows lock poisoned") = live;
 
+        // Jobs that are being started or deleted keep their state until
+        // that is done. The next poll updates them.
+        let reserved = self
+            .starting_jobs
+            .lock()
+            .expect("starting jobs lock poisoned")
+            .clone();
         let mut expired = Vec::new();
         let mut polled = Vec::new();
         for item in items {
             // Superseded workflows of a job (after a resubmit) never change
             // or expire the job.
-            if !is_current(&item) {
+            if !is_current(&item) || job_id_label(&item).is_some_and(|id| reserved.contains(&id)) {
                 continue;
             }
             let Some(state) = state_from_simple_status(item.clone()) else {
@@ -1371,26 +1378,32 @@ impl StateHandler {
     }
 
     pub async fn delete_job(&self, (job_id, secret): (Uuid, String)) -> Result<()> {
-        let mut write_lock = self.job_state.write().await;
-        if let Some(state) = write_lock.get(&job_id) {
+        // The Argo calls run without the job state lock, so a slow Argo does
+        // not block other jobs. The reservation keeps starts and polls of
+        // this job out until the delete is done.
+        let (state, _reservation) = {
+            let read_lock = self.job_state.read().await;
+            let Some(state) = read_lock.get(&job_id) else {
+                return Ok(());
+            };
             if !state.secret_matches(&secret) {
                 return Err(anyhow!("Unauthorized"));
             }
-            // Same reservation as a start, so no start runs during the delete.
-            let _reservation = self
+            let reservation = self
                 .reserve_start(job_id)
                 .map_err(|_| anyhow!("Job is starting, try again later"))?;
             // A workflow may exist that the job state does not know yet.
             if self.is_submission_unknown(&job_id) {
                 return Err(SubmissionUnknown.into());
             }
-            if state.workflowname.is_some() || state.archived {
-                self.argo_client.delete_workflow(state).await?;
-            } else {
-                self.delete_job_workflows(job_id).await?;
-            }
+            (state.clone(), reservation)
+        };
+        if state.workflowname.is_some() || state.archived {
+            self.argo_client.delete_workflow(&state).await?;
+        } else {
+            self.delete_job_workflows(job_id).await?;
         }
-        if write_lock.remove(&job_id).is_some() {
+        if self.job_state.write().await.remove(&job_id).is_some() {
             self.stats.record(StatsEvent::Deleted { id: job_id });
         }
         Ok(())

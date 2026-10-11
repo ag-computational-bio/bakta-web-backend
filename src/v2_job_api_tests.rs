@@ -343,3 +343,72 @@ async fn delete_removes_a_workflow_the_job_state_does_not_know() {
             .contains_key(&id)
     );
 }
+
+#[tokio::test]
+async fn a_slow_delete_does_not_block_other_jobs() {
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"items": []}))
+                .set_delay(std::time::Duration::from_secs(3)),
+        )
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let slow = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    let other = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    let router = test_router(handler.clone());
+    let delete = tokio::spawn({
+        let router = router.clone();
+        async move {
+            call(
+                &router,
+                "DELETE",
+                &format!("/api/v2/job/delete?job_id={slow}&secret={TEST_SECRET}"),
+                None,
+            )
+            .await
+        }
+    });
+    // Wait until the delete holds the reservation and waits on Argo.
+    while argo.received_requests().await.unwrap().is_empty() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let state = &handler.state_handler;
+    let others = async {
+        let (new_job, _) = state
+            .init_job_v2("x".to_string(), WorkflowKind::Bakta)
+            .await;
+        let workflow: crate::argo::structs::SimpleStatus = serde_json::from_value(json!({
+            "metadata": {"name": "wf-slow", "uid": Uuid::new_v4(),
+                         "labels": {"jobid": slow.to_string(), "secret": TEST_SECRET}},
+            "status": {"phase": "Running", "startedAt": chrono::Utc::now().to_rfc3339()}
+        }))
+        .unwrap();
+        state
+            .apply_workflow_statuses(vec![workflow], chrono::Utc::now())
+            .await;
+        let list = state
+            .get_job_states_v2(vec![crate::v2::api_structs::JobReference {
+                job_id: other,
+                secret: TEST_SECRET.to_string(),
+            }])
+            .await;
+        assert!(list.failed_jobs.is_empty());
+        new_job
+    };
+    let new_job = tokio::time::timeout(std::time::Duration::from_secs(1), others)
+        .await
+        .expect("other jobs were blocked by the delete");
+    // The poll did not change the job that is being deleted.
+    assert!(state.job_state.read().await[&slow].workflowname.is_none());
+    assert!(state.job_state.read().await.contains_key(&new_job));
+
+    let (status, body) = delete.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!state.job_state.read().await.contains_key(&slow));
+}
