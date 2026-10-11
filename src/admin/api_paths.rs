@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::{
     Admin, AdminError,
     extract::{Path, Query},
+    operations::job_data_available,
     parse_environment, stats_db,
     structs::*,
 };
@@ -393,6 +394,7 @@ pub async fn get_job(
         (status = 401, body = AdminErrorResponse),
         (status = 403, body = AdminErrorResponse),
         (status = 404, body = AdminErrorResponse),
+        (status = 410, body = AdminErrorResponse, description = "The logs were deleted after the retention period."),
         (status = 502, body = AdminErrorResponse)
     ),
     security(("bearer_auth" = [])),
@@ -405,6 +407,22 @@ pub async fn job_logs(
 ) -> Result<Json<V2LogsResponse>, AdminError> {
     let handler = &state.state_handler;
     let in_memory = handler.job_state.read().await.get(&id).cloned();
+    if !job_data_available(&state, id, in_memory.as_ref()).await {
+        // Archived logs are in S3 and gone. Only a workflow that Argo still has can show logs.
+        let live = in_memory
+            .as_ref()
+            .is_some_and(|job| !job.archived && job.workflowname.is_some())
+            || handler
+                .live_workflows
+                .read()
+                .expect("live workflows lock poisoned")
+                .contains_key(&id);
+        if !live {
+            return Err(AdminError::Gone(
+                "Logs were deleted after the retention period".to_string(),
+            ));
+        }
+    }
     let (kind, workflow_name, status, archived, argo_uid) = match in_memory {
         Some(job) => (
             job.workflow_kind,

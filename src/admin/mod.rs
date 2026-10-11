@@ -52,6 +52,7 @@ pub enum AdminError {
     Forbidden,
     NotFound(String),
     Conflict(String),
+    Gone(String),
     Unavailable(String),
     BadGateway(String),
     /// A request that could not be parsed, with the status of the rejection.
@@ -106,6 +107,7 @@ impl IntoResponse for AdminError {
             ),
             AdminError::NotFound(message) => (StatusCode::NOT_FOUND, message),
             AdminError::Conflict(message) => (StatusCode::CONFLICT, message),
+            AdminError::Gone(message) => (StatusCode::GONE, message),
             AdminError::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
             AdminError::BadGateway(message) => (StatusCode::BAD_GATEWAY, message),
             AdminError::Rejected(status, message) => (status, message),

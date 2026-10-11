@@ -622,3 +622,144 @@ async fn admin_jobs_show_when_their_data_expires() {
         );
     }
 }
+
+const LOGS_DELETED: &str = "Logs were deleted after the retention period";
+
+async fn old_state_job(
+    setup: &AdminSetup,
+    status: ArgoStatus,
+    archived: bool,
+    age: Duration,
+) -> Uuid {
+    let id = v2_state(&setup.handler, WorkflowKind::Bakta, Some(status)).await;
+    let mut states = setup.handler.state_handler.job_state.write().await;
+    let job = states.get_mut(&id).unwrap();
+    job.workflowname = Some("wf-old".to_string());
+    job.archived = archived;
+    job.updated = Some(Utc::now() - age);
+    id
+}
+
+#[tokio::test]
+async fn admin_job_logs_are_gone_after_the_retention_period() {
+    let argo = MockServer::start().await;
+    // Archived logs must not be requested at all.
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let s3 = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&s3)
+        .await;
+    let s3_url = format!("http://s3.test:{}", s3.address().port());
+    let setup = admin_setup(&argo.uri(), &s3_url, None).await;
+    let archived = old_state_job(
+        &setup,
+        ArgoStatus::Succeeded,
+        true,
+        Duration::days(30) + Duration::seconds(5),
+    )
+    .await;
+    let (status, body) = admin_call(
+        &setup,
+        "GET",
+        &format!("/api/admin/jobs/{archived}/logs"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    assert_eq!(body, json!({"error": LOGS_DELETED}));
+}
+
+#[tokio::test]
+async fn admin_job_logs_of_old_jobs_need_a_live_workflow() {
+    let Some(db) = test_db("admin_job_logs_of_old_jobs_need_a_live_workflow").await else {
+        return;
+    };
+    let env = unique_environment();
+    let now = Utc::now();
+    let old = aged_job(
+        &db,
+        &env,
+        now - Duration::days(40),
+        Some(now - Duration::days(31)),
+    )
+    .await;
+    let live = aged_job(
+        &db,
+        &env,
+        now - Duration::days(40),
+        Some(now - Duration::days(31)),
+    )
+    .await;
+    let recent = aged_job(
+        &db,
+        &env,
+        now - Duration::days(40),
+        Some(now - Duration::days(29)),
+    )
+    .await;
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db)).await;
+    setup
+        .handler
+        .state_handler
+        .live_workflows
+        .write()
+        .unwrap()
+        .insert(
+            live,
+            crate::bakta_handler::LiveWorkflow {
+                name: format!("wf-{live}"),
+                phase: "Failed".to_string(),
+            },
+        );
+    let (status, body) =
+        admin_call(&setup, "GET", &format!("/api/admin/jobs/{old}/logs"), None).await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    assert_eq!(body, json!({"error": LOGS_DELETED}));
+    for id in [live, recent] {
+        let (status, body) =
+            admin_call(&setup, "GET", &format!("/api/admin/jobs/{id}/logs"), None).await;
+        assert_ne!(status, StatusCode::GONE, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn admin_job_logs_of_a_live_workflow_are_served_after_the_retention_period() {
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    let live = old_state_job(&setup, ArgoStatus::Failed, false, Duration::days(31)).await;
+    let (status, body) =
+        admin_call(&setup, "GET", &format!("/api/admin/jobs/{live}/logs"), None).await;
+    assert_ne!(status, StatusCode::GONE, "{body}");
+
+    // Just before the expiry, archived logs are still requested.
+    let archived = old_state_job(
+        &setup,
+        ArgoStatus::Succeeded,
+        true,
+        Duration::days(30) - Duration::minutes(5),
+    )
+    .await;
+    let (status, body) = admin_call(
+        &setup,
+        "GET",
+        &format!("/api/admin/jobs/{archived}/logs"),
+        None,
+    )
+    .await;
+    assert_ne!(status, StatusCode::GONE, "{body}");
+}
