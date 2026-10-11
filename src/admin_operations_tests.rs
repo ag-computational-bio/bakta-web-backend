@@ -1142,3 +1142,153 @@ async fn delete_still_purges_data_just_before_the_expiry() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
+
+const BULK_INPUT_DELETED: &str = "Input data deleted after the retention period";
+
+async fn bulk_dry_run(setup: &crate::admin_api_tests::AdminSetup, action: &str) -> Value {
+    let (status, body) = admin_call(
+        setup,
+        "POST",
+        "/api/admin/workflows/bulk",
+        Some(json!({"action": action, "dry_run": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+fn bulk_item<'a>(body: &'a Value, name: &str) -> &'a Value {
+    body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == name)
+        .unwrap_or_else(|| panic!("no item {name}: {body}"))
+}
+
+#[tokio::test]
+async fn bulk_retry_and_resubmit_skip_workflows_without_input_data() {
+    let argo = MockServer::start().await;
+    let mut unfinished = listed_workflow("unfinished-old", "Failed", None, None);
+    unfinished["metadata"]["creationTimestamp"] =
+        (Utc::now() - Duration::days(31)).to_rfc3339().into();
+    let items = json!({"items": [
+        listed_workflow("gone", "Failed", None, Some(31 * 24)),
+        listed_workflow("kept", "Failed", None, Some(29 * 24)),
+        unfinished,
+    ]});
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(items))
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+
+    for action in ["retry", "resubmit"] {
+        let body = bulk_dry_run(&setup, action).await;
+        for name in ["gone", "unfinished-old"] {
+            let item = bulk_item(&body, name);
+            assert_eq!(item["applicable"], false, "{body}");
+            assert_eq!(item["reason"], BULK_INPUT_DELETED);
+        }
+        let kept = bulk_item(&body, "kept");
+        assert_eq!(kept["applicable"], true, "{body}");
+        assert_eq!(kept["reason"], Value::Null);
+    }
+    // Other actions do not need the input data.
+    let body = bulk_dry_run(&setup, "delete").await;
+    assert!(
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["applicable"] == true)
+    );
+}
+
+#[tokio::test]
+async fn bulk_real_run_does_not_touch_workflows_without_input_data() {
+    let argo = MockServer::start().await;
+    let items = json!({"items": [
+        listed_workflow("gone", "Failed", None, Some(31 * 24)),
+        listed_workflow("kept", "Failed", None, Some(29 * 24)),
+    ]});
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(items))
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/kept/retry"))
+        .respond_with(workflow("kept", "Running"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        "/api/admin/workflows/bulk",
+        Some(json!({"action": "retry", "dry_run": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(bulk_item(&body, "gone")["result"], "skipped");
+    assert_eq!(bulk_item(&body, "kept")["result"], "done");
+}
+
+#[tokio::test]
+async fn bulk_uses_the_job_record_for_the_retention_time() {
+    let Some(db) = test_db("bulk_uses_the_job_record_for_the_retention_time").await else {
+        return;
+    };
+    let env = unique_environment();
+    let now = Utc::now();
+    let gone = aged_job(
+        &db,
+        &env,
+        now - Duration::days(40),
+        Some(now - Duration::days(31)),
+    )
+    .await;
+    let kept = aged_job(
+        &db,
+        &env,
+        now - Duration::days(40),
+        Some(now - Duration::days(29)),
+    )
+    .await;
+    // The workflows finished recently: only the job record says the data is gone.
+    let items = json!({"items": [
+        listed_workflow("wf-gone", "Failed", Some(&gone.to_string()), Some(1)),
+        listed_workflow("wf-kept", "Failed", Some(&kept.to_string()), Some(1)),
+    ]});
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(items))
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+    // The records point to these workflows, so they are the current ones.
+    for (id, name) in [(gone, "wf-gone"), (kept, "wf-kept")] {
+        sqlx::query("UPDATE jobs SET workflow_name = $1 WHERE id = $2")
+            .bind(name)
+            .bind(id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+    for action in ["retry", "resubmit"] {
+        let body = bulk_dry_run(&setup, action).await;
+        let item = bulk_item(&body, "wf-gone");
+        assert_eq!(item["applicable"], false, "{body}");
+        assert_eq!(item["reason"], BULK_INPUT_DELETED);
+        assert_eq!(bulk_item(&body, "wf-kept")["applicable"], true, "{body}");
+    }
+}

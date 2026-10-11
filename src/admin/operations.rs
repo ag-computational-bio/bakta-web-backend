@@ -575,6 +575,39 @@ async fn superseded_by(state: &BaktaHandler, workflow: &ArgoWorkflow) -> Option<
     (current != workflow.metadata.name).then_some(current)
 }
 
+/// True while the S3 data of the workflow's job exists. The reference time
+/// is the job record's, or the workflow's finish or creation time when there
+/// is no record.
+async fn workflow_data_available(state: &BaktaHandler, workflow: &ArgoWorkflow) -> bool {
+    let record = match (
+        state.state_handler.stats.db(),
+        workflow
+            .metadata
+            .labels
+            .get("jobid")
+            .and_then(|value| value.parse::<Uuid>().ok()),
+    ) {
+        (Some(db), Some(id)) => db.get_job(id).await.unwrap_or_else(|error| {
+            tracing::warn!(%error, job_id = %id, "admin_retention_lookup_failed");
+            None
+        }),
+        _ => None,
+    };
+    let reference = match record {
+        Some(record) => Some(reference_time(record.finished_at, record.created_at)),
+        None => workflow
+            .status
+            .finished_at
+            .or(workflow.metadata.creation_timestamp),
+    };
+    reference.is_none_or(|reference| {
+        is_data_available(
+            data_expires_at(reference, state.data_retention_days),
+            Utc::now(),
+        )
+    })
+}
+
 /// Runs one bulk action on one workflow.
 async fn run_bulk_action(
     state: &BaktaHandler,
@@ -674,6 +707,12 @@ pub async fn bulk_workflows(
             && let Some(current) = superseded_by(&state, &workflow).await
         {
             reason = Some(format!("Workflow was superseded by {current}"));
+        }
+        if reason.is_none()
+            && matches!(action, BulkAction::Retry | BulkAction::Resubmit)
+            && !workflow_data_available(&state, &workflow).await
+        {
+            reason = Some("Input data deleted after the retention period".to_string());
         }
         let applicable = reason.is_none();
         let (result, error) = if dry_run {
