@@ -356,6 +356,7 @@ async fn admin_job_detail_includes_the_live_workflow() {
     assert_eq!(detail["job"]["runtime_seconds"], 100.0);
     let workflow = &detail["workflow"];
     assert_eq!(workflow["phase"], "Succeeded");
+    assert_eq!(workflow["suspended"], false);
     assert_eq!(workflow["nodes"][0]["type"], "Steps");
     assert_eq!(workflow["nodes"][0]["pod_name"], Value::Null);
     assert_eq!(workflow["nodes"][1]["display_name"], "bakta");
