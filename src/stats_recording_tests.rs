@@ -443,3 +443,266 @@ async fn current_workflow_comes_from_the_database_after_a_restart() {
     let states = handler.state_handler.job_state.read().await;
     assert_eq!(states[&id].workflowname.as_deref(), Some("wf-a"));
 }
+
+/// A workflow of the job created at `created` whose current attempt started
+/// at `started`.
+fn attempt(
+    id: Uuid,
+    name: &str,
+    phase: &str,
+    created: chrono::DateTime<Utc>,
+    started: chrono::DateTime<Utc>,
+    finished: Option<chrono::DateTime<Utc>>,
+) -> SimpleStatus {
+    let mut workflow = job_workflow(id, name, phase, started, finished);
+    workflow.metadata.creation_timestamp = Some(created);
+    workflow
+}
+
+fn micros(row: &sqlx::postgres::PgRow, column: &str) -> Option<i64> {
+    row.get::<Option<chrono::DateTime<Utc>>, _>(column)
+        .map(|time| time.timestamp_micros())
+}
+
+/// Argo mock for an admin retry of a failed `wf-1` that answers after a delay.
+async fn slow_retry_argo() -> MockServer {
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta/wf-1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"metadata": {"name": "wf-1"}, "status": {"phase": "Failed"}}),
+            ),
+        )
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-1/retry"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(
+                    json!({"metadata": {"name": "wf-1"}, "status": {"phase": "Running"}}),
+                )
+                .set_delay(std::time::Duration::from_millis(800)),
+        )
+        .mount(&argo)
+        .await;
+    argo
+}
+
+/// Runs an admin retry of the failed first attempt of `wf-1`. While Argo
+/// answers, a poll sees `second`, the retried attempt. A later poll sees it
+/// again. Returns the job record after the second poll.
+async fn retry_while_the_poll_sees(
+    db: &crate::stats::test_db::TestDb,
+    second: impl Fn(Uuid) -> SimpleStatus,
+    expected_status: &str,
+) -> sqlx::postgres::PgRow {
+    let argo = slow_retry_argo().await;
+    let setup = std::sync::Arc::new(
+        crate::admin_api_tests::admin_setup(
+            &argo.uri(),
+            "https://s3.example.com",
+            Some((**db).clone()),
+        )
+        .await,
+    );
+    let mut state = job_state(
+        ApiVersion::V2,
+        WorkflowKind::Bakta,
+        ResultKind::Bakta,
+        Some(ArgoStatus::Running),
+    );
+    state.workflowname = Some("wf-1".to_string());
+    let id = insert_state(&setup.handler, state).await;
+    let created = Utc::now() - Duration::minutes(30);
+    let first_started = created + Duration::minutes(1);
+    let first = attempt(
+        id,
+        "wf-1",
+        "Failed",
+        created,
+        first_started,
+        Some(created + Duration::minutes(5)),
+    );
+    let poll = |item: SimpleStatus| {
+        let setup = setup.clone();
+        async move {
+            setup
+                .handler
+                .state_handler
+                .apply_workflow_statuses(vec![item], Utc::now())
+                .await
+        }
+    };
+    poll(first).await;
+    wait_for_row(db, id, |row| status_of(row) == "failed").await;
+
+    let retry = {
+        let setup = setup.clone();
+        tokio::spawn(async move {
+            crate::admin_api_tests::admin_call(
+                &setup,
+                "POST",
+                &format!("/api/admin/jobs/{id}/retry"),
+                None,
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    poll(second(id)).await;
+    let (status, body) = retry.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    poll(second(id)).await;
+    // Background writes: wait until the row describes the retried attempt.
+    wait_for_row(db, id, |row| {
+        status_of(row) == expected_status
+            && micros(row, "started_at") != Some(first_started.timestamp_micros())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn quick_retry_that_fails_again_is_recorded_as_failed() {
+    let Some(db) = test_db("quick_retry_that_fails_again_is_recorded_as_failed").await else {
+        return;
+    };
+    // The retried attempt fails again at once, so the job stays in the Failed phase.
+    let started = Utc::now() + Duration::seconds(1);
+    let finished = started + Duration::seconds(2);
+    let created = Utc::now() - Duration::minutes(30);
+    let row = retry_while_the_poll_sees(
+        &db,
+        |id| attempt(id, "wf-1", "Failed", created, started, Some(finished)),
+        "failed",
+    )
+    .await;
+    assert_eq!(micros(&row, "started_at"), Some(started.timestamp_micros()));
+    assert_eq!(
+        micros(&row, "finished_at"),
+        Some(finished.timestamp_micros())
+    );
+    assert_eq!(row.get::<Option<f64>, _>("runtime_seconds"), Some(2.0));
+}
+
+#[tokio::test]
+async fn retried_attempt_seen_before_the_retry_returns_keeps_its_own_times() {
+    let Some(db) = test_db("retried_attempt_seen_before_the_retry_returns").await else {
+        return;
+    };
+    let started = Utc::now() + Duration::seconds(1);
+    let finished = started + Duration::seconds(90);
+    let created = Utc::now() - Duration::minutes(30);
+    let row = retry_while_the_poll_sees(
+        &db,
+        |id| attempt(id, "wf-1", "Succeeded", created, started, Some(finished)),
+        "succeeded",
+    )
+    .await;
+    assert_eq!(
+        row.get::<Option<String>, _>("outcome").as_deref(),
+        Some("succeeded")
+    );
+    assert_eq!(micros(&row, "started_at"), Some(started.timestamp_micros()));
+    assert_eq!(row.get::<Option<f64>, _>("runtime_seconds"), Some(90.0));
+}
+
+#[tokio::test]
+async fn late_resubmit_does_not_reset_a_finished_workflow_of_a_database_only_job() {
+    let Some(db) = test_db("late_resubmit_does_not_reset_a_finished_workflow").await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    let created = Utc::now() - Duration::hours(1);
+    let job = crate::stats::NewJob {
+        id,
+        environment: "production".to_string(),
+        workflow_kind: "bakta".to_string(),
+        api_version: "v2".to_string(),
+        name: None,
+        created_at: created,
+    };
+    db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
+    db.apply(&StatsEvent::Submitted(Box::new(
+        crate::stats::SubmittedJob {
+            job,
+            genus: None,
+            species: None,
+            strain: None,
+            sequence_count: None,
+            total_length: None,
+            config: None,
+            versions: JobVersions::default(),
+            workflow_name: "wf-a".to_string(),
+            submitted_at: created,
+        },
+    )))
+    .await
+    .unwrap();
+    let now = Utc::now();
+    let argo = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-a/resubmit"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "metadata": {"name": "wf-b", "creationTimestamp": now.to_rfc3339()},
+                    "status": {}
+                }))
+                .set_delay(std::time::Duration::from_millis(800)),
+        )
+        .mount(&argo)
+        .await;
+    let setup = std::sync::Arc::new(
+        crate::admin_api_tests::admin_setup(
+            &argo.uri(),
+            "https://s3.example.com",
+            Some(db.clone()),
+        )
+        .await,
+    );
+    // The job has no in-memory state, only its record.
+    let resubmit = {
+        let setup = setup.clone();
+        tokio::spawn(async move {
+            crate::admin_api_tests::admin_call(
+                &setup,
+                "POST",
+                &format!("/api/admin/jobs/{id}/resubmit"),
+                None,
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // wf-a is gone. The poll sees wf-b finish before the resubmit call returns.
+    let finished = attempt(
+        id,
+        "wf-b",
+        "Succeeded",
+        now,
+        now + Duration::seconds(5),
+        Some(now + Duration::seconds(65)),
+    );
+    let poll = || {
+        setup
+            .handler
+            .state_handler
+            .apply_workflow_statuses(vec![finished.clone()], Utc::now())
+    };
+    poll().await;
+    let (status, body) = resubmit.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    poll().await;
+    let row = wait_for_row(&db, id, |row| {
+        status_of(row) == "succeeded"
+            && row.get::<Option<String>, _>("workflow_name").as_deref() == Some("wf-b")
+    })
+    .await;
+    assert_eq!(
+        row.get::<Option<String>, _>("outcome").as_deref(),
+        Some("succeeded")
+    );
+    assert_eq!(row.get::<Option<f64>, _>("runtime_seconds"), Some(60.0));
+}

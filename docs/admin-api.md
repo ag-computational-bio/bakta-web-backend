@@ -51,9 +51,9 @@ Migrations are embedded in the backend and run at startup. Table `jobs`, one row
 | `bakta_version`, `bakta_db_version`, `baktfold_version`, `baktfold_db_version` | text, null | Versions used for the job |
 | `workflow_name` | text, null | Current Argo workflow name |
 | `created_at` | timestamptz | Job init |
-| `submitted_at`, `started_at`, `finished_at` | timestamptz, null | Start request, first running state, final state |
+| `submitted_at`, `started_at`, `finished_at` | timestamptz, null | Start, retry or resubmit request of the current attempt; Argo `status.startedAt` and `status.finishedAt` of the current workflow |
 | `runtime_seconds` | double precision, null | `finished_at - started_at` |
-| `queue_seconds` | double precision, null | `started_at - submitted_at` |
+| `queue_seconds` | double precision, null | `started_at - submitted_at`, null when `started_at` is before `submitted_at` |
 | `error_message` | text, null | Short reason for failed jobs, if known |
 | `updated_at` | timestamptz | Last change |
 
@@ -63,7 +63,17 @@ Rules:
 - Writes never block or fail a user request. If the database is unreachable, the backend logs a warning and continues.
 - Records are kept forever. Expired or deleted jobs keep their row with status `expired` or `deleted`.
 - Statistics count finished, succeeded, failed and error jobs by `outcome`, so a job still counts after it was deleted or has expired.
-- Runtime and queue time measure the current attempt: a retry or resubmit sets `submitted_at` to its own time and clears `started_at`, `finished_at`, `runtime_seconds` and `queue_seconds`, and the earlier `outcome` is kept until the new attempt finishes.
+- Runtime and queue time measure the current attempt: a retry or resubmit sets `submitted_at` to its own time, and the times of the current workflow describe the new attempt (Argo resets `startedAt` and clears `finishedAt` on retry). The earlier `outcome` is kept until the new attempt finishes.
+
+### How the job state is kept in sync
+
+The workflow state in a job record follows the job's current workflow in Argo:
+
+- On every poll (every 15 seconds), the backend takes the current workflow of each job: the workflow recorded for the job, else the one recorded in the database if it is listed, else the newest by creation time and then by name.
+- From that workflow it sets `workflow_name`, `status` (`Pending` is `submitted`, `Running` is `running`, a final phase is `succeeded`, `failed` or `error`), `started_at` (null while `submitted`), `finished_at`, `runtime_seconds`, `queue_seconds`, `error_message` and, for a final phase, `outcome`.
+- A record is only written when it differs from this state. The comparison is made against the database, so a wrong or outdated record is corrected by the next poll.
+- Records with status `deleted` or `expired` are not changed by polls.
+- Other writes only set what polls cannot see: the job init, the start request (input options, input statistics, versions, `submitted_at`), the request time of a retry or resubmit (`submitted_at`), user and admin deletes, and expiry. They never overwrite the workflow state of a newer poll. A resubmit only points the record to the new workflow (and resets its state to `submitted`) when no poll has seen that workflow yet.
 
 ### Input statistics in the V2 start request
 

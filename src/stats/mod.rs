@@ -84,16 +84,17 @@ pub enum StatsEvent {
     /// The current workflow state of every job in one poll. The records are
     /// set to it, so a wrong record is repaired by the next poll.
     Polled(Vec<WorkflowState>),
-    /// Argo retry of `workflow_name`, requested at `retried_at`. Ignored
-    /// unless it is the job's workflow, and when a finish after `retried_at`
-    /// (of the new attempt) was already recorded.
+    /// Argo retry of `workflow_name`, requested at `retried_at`. Sets
+    /// `submitted_at` when it is the job's workflow. The new attempt's state
+    /// comes from the next poll.
     Retried {
         id: Uuid,
         workflow_name: String,
         retried_at: DateTime<Utc>,
     },
-    /// Argo resubmit of `previous_workflow_name` as `workflow_name`. Ignored
-    /// unless the previous workflow is the job's workflow.
+    /// Argo resubmit of `previous_workflow_name` as `workflow_name`. Sets
+    /// `submitted_at`, and points the record to the new workflow unless a
+    /// poll already did. Ignored for other workflows.
     Resubmitted {
         id: Uuid,
         previous_workflow_name: String,
@@ -238,12 +239,14 @@ impl StatsDb {
                 let job = &submitted.job;
                 self.insert_job(job, "submitted").await?;
                 sqlx::query(
-                    "UPDATE jobs SET status = 'submitted', workflow_kind = $2, api_version = $3,
+                    "UPDATE jobs SET status = CASE WHEN status = 'created' THEN 'submitted' ELSE status END,
+                         workflow_kind = $2, api_version = $3,
                          name = COALESCE(name, $4), genus = $5, species = $6, strain = $7,
                          sequence_count = $8, total_length = $9, config = $10,
                          bakta_version = $11, bakta_db_version = $12,
                          baktfold_version = $13, baktfold_db_version = $14,
-                         workflow_name = $15, submitted_at = $16, updated_at = now()
+                         workflow_name = COALESCE(workflow_name, $15), submitted_at = $16,
+                         updated_at = now()
                      WHERE id = $1",
                 )
                 .bind(job.id)
@@ -271,12 +274,11 @@ impl StatsDb {
                 workflow_name,
                 retried_at,
             } => {
+                // The polled columns are left to the next poll, which also
+                // computes `queue_seconds` from this `submitted_at`.
                 sqlx::query(
-                    "UPDATE jobs SET status = 'running', submitted_at = $3, started_at = NULL,
-                         finished_at = NULL, runtime_seconds = NULL, queue_seconds = NULL,
-                         error_message = NULL, updated_at = now()
-                     WHERE id = $1 AND (workflow_name IS NULL OR workflow_name = $2)
-                         AND (finished_at IS NULL OR finished_at < $3)",
+                    "UPDATE jobs SET submitted_at = $3, updated_at = now()
+                     WHERE id = $1 AND (workflow_name IS NULL OR workflow_name = $2)",
                 )
                 .bind(id)
                 .bind(workflow_name)
@@ -290,12 +292,18 @@ impl StatsDb {
                 workflow_name,
                 submitted_at,
             } => {
+                // Once a poll has seen the new workflow, only `submitted_at`
+                // is set, so its state is not reset.
                 sqlx::query(
-                    "UPDATE jobs SET status = 'submitted', workflow_name = $2,
-                         submitted_at = $3, started_at = NULL, finished_at = NULL,
-                         runtime_seconds = NULL, queue_seconds = NULL, error_message = NULL,
-                         updated_at = now()
-                     WHERE id = $1 AND (workflow_name IS NULL OR workflow_name = $4)",
+                    "UPDATE jobs SET submitted_at = $3, updated_at = now(), workflow_name = $2,
+                         status = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN 'submitted' ELSE status END,
+                         started_at = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL ELSE started_at END,
+                         finished_at = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL ELSE finished_at END,
+                         runtime_seconds = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL ELSE runtime_seconds END,
+                         queue_seconds = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL ELSE queue_seconds END,
+                         error_message = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL ELSE error_message END
+                     WHERE id = $1
+                         AND (workflow_name IS NULL OR workflow_name = $4 OR workflow_name = $2)",
                 )
                 .bind(id)
                 .bind(workflow_name)
@@ -657,7 +665,13 @@ mod tests {
         );
         assert_eq!(record.get::<Option<f64>, _>("runtime_seconds"), None);
 
+        let submitted_at = |record: &sqlx::postgres::PgRow| {
+            record
+                .get::<Option<DateTime<Utc>>, _>("submitted_at")
+                .map(|time| time.timestamp_micros())
+        };
         // A retry of the superseded workflow changes nothing.
+        let before = submitted_at(&row(&db, id).await);
         db.apply(&StatsEvent::Retried {
             id,
             workflow_name: "wf-a".to_string(),
@@ -665,15 +679,19 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(row(&db, id).await.get::<String, _>("status"), "submitted");
+        assert_eq!(submitted_at(&row(&db, id).await), before);
+        // A retry of the current workflow only sets the request time.
+        let retried_at = t0 + ChronoDuration::seconds(90);
         db.apply(&StatsEvent::Retried {
             id,
             workflow_name: "wf-b".to_string(),
-            retried_at: Utc::now(),
+            retried_at,
         })
         .await
         .unwrap();
-        assert_eq!(row(&db, id).await.get::<String, _>("status"), "running");
+        let record = row(&db, id).await;
+        assert_eq!(record.get::<String, _>("status"), "submitted");
+        assert_eq!(submitted_at(&record), Some(retried_at.timestamp_micros()));
         // Neither does a resubmit of it.
         db.apply(&StatsEvent::Resubmitted {
             id,
@@ -722,20 +740,31 @@ mod tests {
         })
         .await
         .unwrap();
+        // The state stays until the next poll sees the new attempt.
         let record = row(&db, id).await;
-        assert_eq!(record.get::<String, _>("status"), "running");
-        assert_eq!(
-            record.get::<Option<String>, _>("outcome").as_deref(),
-            Some("failed")
-        );
+        assert_eq!(record.get::<String, _>("status"), "failed");
         assert_eq!(
             record
                 .get::<Option<DateTime<Utc>>, _>("submitted_at")
                 .map(|time| time.timestamp_micros()),
             Some(retried_at.timestamp_micros())
         );
-        assert_eq!(record.get::<Option<DateTime<Utc>>, _>("started_at"), None);
+        // The earlier attempt started before the retry: no queue time.
         assert_eq!(record.get::<Option<f64>, _>("queue_seconds"), None);
+        db.apply(&status(
+            "running",
+            retried_at + ChronoDuration::seconds(60),
+            None,
+        ))
+        .await
+        .unwrap();
+        let record = row(&db, id).await;
+        assert_eq!(record.get::<String, _>("status"), "running");
+        assert_eq!(
+            record.get::<Option<String>, _>("outcome").as_deref(),
+            Some("failed")
+        );
+        assert_eq!(record.get::<Option<DateTime<Utc>>, _>("finished_at"), None);
 
         // Argo resets startedAt on retry.
         db.apply(&status(
@@ -784,6 +813,92 @@ mod tests {
         assert_eq!(
             record.get::<Option<String>, _>("outcome").as_deref(),
             Some("succeeded")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_events_do_not_overwrite_the_polled_state() {
+        let Some(db) = test_db("test_events_do_not_overwrite_the_polled_state").await else {
+            return;
+        };
+        let t0 = Utc::now() - ChronoDuration::hours(1);
+        let job = new_job(&unique_environment(), t0);
+        let id = job.id;
+        let started_at = Some(t0 + ChronoDuration::seconds(30));
+        // The poll finds the workflow before the start is recorded.
+        db.apply(&polled(&job, "wf-a", "running", started_at, None))
+            .await
+            .unwrap();
+        db.apply(&StatsEvent::Submitted(Box::new(SubmittedJob {
+            job: job.clone(),
+            genus: None,
+            species: None,
+            strain: None,
+            sequence_count: Some(1),
+            total_length: Some(10),
+            config: None,
+            versions: JobVersions::default(),
+            workflow_name: "wf-a".to_string(),
+            submitted_at: t0 + ChronoDuration::seconds(10),
+        })))
+        .await
+        .unwrap();
+        let record = row(&db, id).await;
+        assert_eq!(record.get::<String, _>("status"), "running");
+        assert_eq!(record.get::<Option<i64>, _>("total_length"), Some(10));
+        // The next poll computes the queue time from the recorded start request.
+        db.apply(&polled(&job, "wf-a", "running", started_at, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            row(&db, id).await.get::<Option<f64>, _>("queue_seconds"),
+            Some(20.0)
+        );
+
+        // The poll sees the resubmitted workflow finish before the resubmit is recorded.
+        let started_b = Some(t0 + ChronoDuration::minutes(10));
+        let finished_b = Some(t0 + ChronoDuration::minutes(15));
+        db.apply(&polled(&job, "wf-b", "succeeded", started_b, finished_b))
+            .await
+            .unwrap();
+        db.apply(&StatsEvent::Resubmitted {
+            id,
+            previous_workflow_name: "wf-a".to_string(),
+            workflow_name: "wf-b".to_string(),
+            submitted_at: t0 + ChronoDuration::minutes(9),
+        })
+        .await
+        .unwrap();
+        let record = row(&db, id).await;
+        assert_eq!(record.get::<String, _>("status"), "succeeded");
+        assert_eq!(
+            record.get::<Option<String>, _>("workflow_name").as_deref(),
+            Some("wf-b")
+        );
+        assert_eq!(record.get::<Option<f64>, _>("runtime_seconds"), Some(300.0));
+        db.apply(&polled(&job, "wf-b", "succeeded", started_b, finished_b))
+            .await
+            .unwrap();
+        assert_eq!(
+            row(&db, id).await.get::<Option<f64>, _>("queue_seconds"),
+            Some(60.0)
+        );
+
+        // A wrong record is repaired by the next poll.
+        sqlx::query("UPDATE jobs SET status = 'running', finished_at = NULL WHERE id = $1")
+            .bind(id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        db.apply(&polled(&job, "wf-b", "succeeded", started_b, finished_b))
+            .await
+            .unwrap();
+        let record = row(&db, id).await;
+        assert_eq!(record.get::<String, _>("status"), "succeeded");
+        assert!(
+            record
+                .get::<Option<DateTime<Utc>>, _>("finished_at")
+                .is_some()
         );
     }
 
