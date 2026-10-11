@@ -408,7 +408,7 @@ async fn delete_is_refused_while_a_submission_is_unknown() {
         .unknown_submissions
         .lock()
         .unwrap()
-        .insert(id, Utc::now());
+        .insert(id, crate::bakta_handler::UnknownSubmission::new(Utc::now()));
 
     let (status, body) = admin_call(
         &setup,

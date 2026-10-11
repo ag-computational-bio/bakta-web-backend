@@ -48,13 +48,51 @@ pub struct StateHandler {
     /// Jobs with a workflow submission in progress.
     pub starting_jobs: std::sync::Mutex<HashSet<Uuid>>,
     /// Jobs whose submission may have created a workflow that could not be
-    /// found yet, with the time they were marked. The polling loop resolves them.
-    pub unknown_submissions: std::sync::Mutex<HashMap<Uuid, DateTime<Utc>>>,
+    /// found yet. The polling loop resolves them.
+    pub unknown_submissions: std::sync::Mutex<HashMap<Uuid, UnknownSubmission>>,
     /// Live workflow per job from the last successful poll.
     pub live_workflows: std::sync::RwLock<HashMap<Uuid, LiveWorkflow>>,
     /// Environment name for job records and the `bakta-environment` workflow label.
     pub environment: String,
     pub stats: StatsRecorder,
+}
+
+/// Polls without a workflow for the job needed before an unknown submission
+/// counts as having created nothing.
+const UNKNOWN_SUBMISSION_EMPTY_POLLS: u32 = 3;
+/// Time after the mark that must pass before an unknown submission counts as
+/// having created nothing. Argo may still be creating the workflow.
+const UNKNOWN_SUBMISSION_WAIT_MINUTES: i64 = 10;
+
+/// A submission that may have created a workflow that was not found yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownSubmission {
+    pub marked_at: DateTime<Utc>,
+    /// Polls fetched after `marked_at` that found no workflow for the job.
+    pub empty_polls: u32,
+}
+
+impl UnknownSubmission {
+    pub fn new(marked_at: DateTime<Utc>) -> Self {
+        Self {
+            marked_at,
+            empty_polls: 0,
+        }
+    }
+
+    /// Counts a poll from `now` and returns true while the submission is
+    /// still unknown. A found workflow resolves it at once. Otherwise it is
+    /// resolved after enough empty polls over enough time.
+    fn still_unknown(&mut self, found: bool, now: DateTime<Utc>) -> bool {
+        if found {
+            return false;
+        }
+        if now > self.marked_at {
+            self.empty_polls += 1;
+        }
+        self.empty_polls < UNKNOWN_SUBMISSION_EMPTY_POLLS
+            || now - self.marked_at < Duration::minutes(UNKNOWN_SUBMISSION_WAIT_MINUTES)
+    }
 }
 
 /// Name and phase of a live Argo workflow, as seen by the polling loop.
@@ -871,12 +909,14 @@ impl StateHandler {
         let recorded_in_db = self.recorded_workflow_names(&items).await;
         let mut write_lock = self.job_state.write().await;
         let current = current_workflows(&write_lock, &recorded_in_db, &items);
-        // A marked submission is resolved by a list fetched after the mark:
-        // a found workflow is recorded below, otherwise none was created.
+        // A found workflow resolves a marked submission and is recorded below.
+        // An empty list does not prove that none was created, because Argo
+        // may still be creating it, so several empty polls are needed.
+        let with_workflow = workflows_by_job(&items);
         self.unknown_submissions
             .lock()
             .expect("unknown submissions lock poisoned")
-            .retain(|id, marked_at| !current.contains_key(id) && *marked_at >= now);
+            .retain(|id, marker| marker.still_unknown(with_workflow.contains_key(id), now));
         let is_current = |item: &SimpleStatus| {
             job_id_label(item)
                 .and_then(|id| current.get(&id))
@@ -1339,8 +1379,8 @@ impl StateHandler {
 
     /// Handles a failed submit. When the submit may still have created a
     /// workflow, looks it up by its `jobid` label and returns it. When the
-    /// lookup fails too, marks the job, so starts are refused until the
-    /// polling loop knows whether a workflow exists.
+    /// lookup fails or finds nothing, marks the job, so starts and deletes are
+    /// refused until the polling loop knows whether a workflow exists.
     async fn recover_failed_submit(
         &self,
         job_id: Uuid,
@@ -1356,7 +1396,10 @@ impl StateHandler {
                     (a.metadata.creation_timestamp, &a.metadata.name)
                         .cmp(&(b.metadata.creation_timestamp, &b.metadata.name))
                 }) else {
-                    return Err(error);
+                    // Argo may still be creating the workflow.
+                    tracing::warn!(job_id = %job_id, error = %error, "workflow_submit_not_found");
+                    self.mark_submission_unknown(job_id);
+                    return Err(SubmissionUnknown.into());
                 };
                 tracing::info!(
                     job_id = %job_id,
@@ -1375,13 +1418,17 @@ impl StateHandler {
             }
             Err(lookup_error) => {
                 tracing::warn!(job_id = %job_id, error = %lookup_error, "workflow_submit_lookup_failed");
-                self.unknown_submissions
-                    .lock()
-                    .expect("unknown submissions lock poisoned")
-                    .insert(job_id, Utc::now());
+                self.mark_submission_unknown(job_id);
                 Err(SubmissionUnknown.into())
             }
         }
+    }
+
+    fn mark_submission_unknown(&self, job_id: Uuid) {
+        self.unknown_submissions
+            .lock()
+            .expect("unknown submissions lock poisoned")
+            .insert(job_id, UnknownSubmission::new(Utc::now()));
     }
 
     fn record_expired(&self, expired: Vec<(Uuid, Option<String>)>) {
@@ -2009,6 +2056,24 @@ mod tests {
             stage_status_from_nodes(&nodes, "bakta"),
             Some(StageStatus::Succeeded)
         );
+    }
+
+    #[test]
+    fn test_unknown_submission_needs_enough_empty_polls_over_enough_time() {
+        let marked_at = Utc::now();
+        let mut marker = UnknownSubmission::new(marked_at);
+        // A list fetched before the mark does not count.
+        assert!(marker.still_unknown(false, marked_at - Duration::seconds(1)));
+        assert!(marker.still_unknown(false, marked_at + Duration::minutes(20)));
+        assert!(marker.still_unknown(false, marked_at + Duration::minutes(21)));
+        assert!(!marker.still_unknown(false, marked_at + Duration::minutes(22)));
+
+        let mut marker = UnknownSubmission::new(marked_at);
+        for minutes in [1, 2, 3, 4, 5] {
+            assert!(marker.still_unknown(false, marked_at + Duration::minutes(minutes)));
+        }
+        assert!(!marker.still_unknown(false, marked_at + Duration::minutes(10)));
+        assert!(!UnknownSubmission::new(marked_at).still_unknown(true, marked_at));
     }
 
     #[test]

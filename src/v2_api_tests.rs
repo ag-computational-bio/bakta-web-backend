@@ -536,12 +536,73 @@ async fn start_is_refused_while_the_result_of_a_submit_is_unknown() {
     }
     assert_eq!(submit_count(&argo.received_requests().await.unwrap()), 1);
 
-    // A later poll without a workflow for the job resolves it.
+    // Empty polls only resolve it after 3 polls over at least 10 minutes.
+    let marked_at = chrono::Utc::now();
+    for minutes in [1, 2, 3, 9] {
+        handler
+            .state_handler
+            .apply_workflow_statuses(vec![], marked_at + chrono::Duration::minutes(minutes))
+            .await;
+        let (status, text) = call(&router, "POST", "/api/v2/job/start", Some(body.clone())).await;
+        assert!(text.contains("not known"), "{minutes}: {text}");
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+    assert_eq!(submit_count(&argo.received_requests().await.unwrap()), 1);
     handler
         .state_handler
-        .apply_workflow_statuses(vec![], chrono::Utc::now() + chrono::Duration::seconds(1))
+        .apply_workflow_statuses(vec![], marked_at + chrono::Duration::minutes(11))
         .await;
     let (status, _) = call(&router, "POST", "/api/v2/job/start", Some(body)).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(submit_count(&argo.received_requests().await.unwrap()), 2);
+}
+
+#[tokio::test]
+async fn empty_submit_lookup_keeps_the_job_unknown_until_the_workflow_is_listed() {
+    let id = Uuid::new_v4();
+    // Argo is still creating the workflow, so the lookup finds nothing.
+    let argo = submit_lost_argo(
+        id,
+        ResponseTemplate::new(200).set_body_json(json!({"items": []})),
+    )
+    .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let state = job_state(ApiVersion::V2, WorkflowKind::Bakta, ResultKind::Bakta, None);
+    insert_state(&handler, crate::bakta_handler::FullJobState { id, ..state }).await;
+    let router = test_router(handler.clone());
+    let body = start_body(id, TEST_SECRET, "bakta", json!({}));
+
+    for _ in 0..2 {
+        let (status, text) = call(&router, "POST", "/api/v2/job/start", Some(body.clone())).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{text}");
+        assert!(text.contains("not known"), "{text}");
+    }
+    // An empty poll right after the submit does not resolve it.
+    let now = chrono::Utc::now() + chrono::Duration::seconds(1);
+    handler
+        .state_handler
+        .apply_workflow_statuses(vec![], now)
+        .await;
+    let (_, text) = call(&router, "POST", "/api/v2/job/start", Some(body.clone())).await;
+    assert!(text.contains("not known"), "{text}");
+
+    // The next poll lists the workflow: the job knows it now.
+    let listed: crate::argo::structs::SimpleStatus = serde_json::from_value(json!({
+        "metadata": {"name": "wf-late", "uid": Uuid::new_v4(), "creationTimestamp": now.to_rfc3339(),
+                     "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}},
+        "status": {"phase": "Pending", "startedAt": now.to_rfc3339()}
+    }))
+    .unwrap();
+    handler
+        .state_handler
+        .apply_workflow_statuses(vec![listed], now + chrono::Duration::seconds(15))
+        .await;
+    assert!(!handler.state_handler.is_submission_unknown(&id));
+    let states = handler.state_handler.job_state.read().await;
+    assert_eq!(states[&id].workflowname.as_deref(), Some("wf-late"));
+    drop(states);
+    let (status, text) = call(&router, "POST", "/api/v2/job/start", Some(body)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(text.contains("already started"), "{text}");
+    assert_eq!(submit_count(&argo.received_requests().await.unwrap()), 1);
 }

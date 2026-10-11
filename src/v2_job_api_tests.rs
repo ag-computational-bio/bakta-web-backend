@@ -269,7 +269,10 @@ async fn delete_is_refused_while_a_submission_is_unknown() {
         .unknown_submissions
         .lock()
         .unwrap()
-        .insert(id, chrono::Utc::now());
+        .insert(
+            id,
+            crate::bakta_handler::UnknownSubmission::new(chrono::Utc::now()),
+        );
     let router = test_router(handler.clone());
     for uri in [
         format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),

@@ -92,6 +92,15 @@ Job records (items of `GET /jobs` and the `job` object of `GET /jobs/{id}`) have
 When `data_available` is false, the admin API refuses everything that needs S3 data. The rules are listed at the endpoints below (`retry`, `resubmit`, `DELETE`, `logs`) and at `POST /workflows/bulk`.
 For a job without a database record, the backend uses the time of its in-memory job state (last update, or start) as reference time.
 
+## Unresolved start requests
+
+A start request can fail in a way that leaves open whether Argo created the workflow (for example a timeout or an unreadable answer). The backend then looks for a workflow with the job's `jobid` label. If it finds one, the job uses it. If the lookup fails or finds nothing, the job is marked as unresolved, because Argo may still be creating the workflow.
+
+While a job is unresolved, start and delete requests for it are refused with `409` and `The result of an earlier start request is not known yet, try again later`. The polling loop resolves the job:
+
+- A polled workflow list that contains a workflow with the job's `jobid` label resolves it at once. The job then uses that workflow.
+- Otherwise it stays unresolved until at least 3 polls fetched after the mark found no such workflow and at least 10 minutes have passed since the mark. Then a new start is allowed.
+
 ## Common query parameters
 
 - `environment`: `production` (default), `staging` or `all`.
@@ -286,7 +295,7 @@ A workflow is suspended when it is `Running` and has `spec.suspend` set to true 
 Deletes the Argo workflow (Argo removes its pods) and sets the job status to `deleted`. With `purge_data=true` the job's S3 objects are deleted too. Response: `{ "deleted_workflow": true, "purged_objects": 12 }`.
 When `data_available` is false, the S3 listing and purge are skipped and `purged_objects` is `0`. The workflow is still deleted and the job is still marked `deleted`.
 `409` while the job is being started. While the delete runs, a start request for the job is refused with `409`.
-`409` with `{ "error": "The result of an earlier start request is not known yet, try again later" }` while an earlier start request may have created a workflow that the backend has not found yet. The user delete endpoints (`DELETE /api/v1/job/delete`, `DELETE /api/v2/job/delete`) answer `409` in the same case.
+`409` with `{ "error": "The result of an earlier start request is not known yet, try again later" }` while an earlier start request may have created a workflow that the backend has not found yet (see Unresolved start requests). The user delete endpoints (`DELETE /api/v1/job/delete`, `DELETE /api/v2/job/delete`) answer `409` in the same case.
 
 ### `GET /workflows?environment&phase&orphans`
 
