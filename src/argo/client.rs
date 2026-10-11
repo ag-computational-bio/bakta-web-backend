@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use reqwest::Client;
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 use uuid::Uuid;
 
 use crate::{api_structs::ArgoStatus, bakta_handler::FullJobState};
@@ -17,6 +17,9 @@ use super::{
     },
 };
 
+const ARGO_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const ARGO_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub struct ArgoClient {
     token: String,
     url: String,
@@ -30,7 +33,11 @@ impl ArgoClient {
             token,
             url,
             namespace,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(ARGO_CONNECT_TIMEOUT)
+                .timeout(ARGO_REQUEST_TIMEOUT)
+                .build()
+                .expect("Argo HTTP client should build"),
         }
     }
 }

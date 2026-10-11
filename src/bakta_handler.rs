@@ -27,7 +27,11 @@ use chrono::Utc;
 use rand::distr::Alphanumeric;
 use rand::distr::SampleString;
 use regex::Regex;
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    sync::Arc,
+};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -37,6 +41,22 @@ pub struct StateHandler {
     pub metrics: Arc<AppMetrics>,
     pub bakta_version: String,
     pub baktfold_version: String,
+    /// Jobs with a workflow submission in progress.
+    pub starting_jobs: std::sync::Mutex<HashSet<Uuid>>,
+}
+
+/// Releases a start reservation when dropped.
+pub struct StartReservation<'a> {
+    starting_jobs: &'a std::sync::Mutex<HashSet<Uuid>>,
+    job_id: Uuid,
+}
+
+impl Drop for StartReservation<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut starting) = self.starting_jobs.lock() {
+            starting.remove(&self.job_id);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -538,6 +558,7 @@ impl BaktaHandler {
             metrics,
             bakta_version: bakta_version.clone(),
             baktfold_version: baktfold_version.clone(),
+            starting_jobs: Default::default(),
         });
 
         let state_handler_clone = state_handler.clone();
@@ -843,6 +864,9 @@ impl StateHandler {
             if state.secret != secret {
                 return Err(anyhow!("Unauthorized"));
             }
+            if self.is_starting(&job_id) {
+                return Err(anyhow!("Job is starting, try again later"));
+            }
             self.argo_client.delete_workflow(state).await?;
         }
         write_lock.remove(&job_id);
@@ -896,6 +920,54 @@ impl StateHandler {
         (job_id, secret)
     }
 
+    /// Reserves a job for submission. The reservation is released when the
+    /// returned guard is dropped. Callers must hold the job state lock while
+    /// they check `has_workflow`, so a finished submission is always visible.
+    fn reserve_start(&self, job_id: Uuid) -> Result<StartReservation<'_>> {
+        let mut starting = self
+            .starting_jobs
+            .lock()
+            .expect("starting jobs lock poisoned");
+        if !starting.insert(job_id) {
+            return Err(JobAlreadyStarted.into());
+        }
+        Ok(StartReservation {
+            starting_jobs: &self.starting_jobs,
+            job_id,
+        })
+    }
+
+    fn is_starting(&self, job_id: &Uuid) -> bool {
+        self.starting_jobs
+            .lock()
+            .expect("starting jobs lock poisoned")
+            .contains(job_id)
+    }
+
+    fn submit_labels(state: &FullJobState, origin: Option<String>) -> HashMap<String, String> {
+        HashMap::from([
+            ("jobid".to_string(), state.id.to_string()),
+            ("name".to_string(), state.name.clone()),
+            ("secret".to_string(), state.secret.clone()),
+            (
+                "api-version".to_string(),
+                state.api_version.as_label_value().to_string(),
+            ),
+            (
+                "workflow-kind".to_string(),
+                workflow_kind_label_value(state.workflow_kind).to_string(),
+            ),
+            (
+                "result-kind".to_string(),
+                result_kind_label_value(state.result_kind).to_string(),
+            ),
+            (
+                "origin".to_string(),
+                origin.unwrap_or_else(|| "Unknown".to_string()),
+            ),
+        ])
+    }
+
     pub async fn start_job(
         &self,
         start_settings: StartRequest,
@@ -903,92 +975,86 @@ impl StateHandler {
         origin: Option<String>,
     ) -> Result<()> {
         let Job { id, secret } = &start_settings.job;
+        let id = *id;
 
         let parameters = start_settings.config.into_parameters();
         let template_name = format!("bakta-job-{}", bakta_version);
 
-        let mut write_lock = self.job_state.write().await;
-        if let Some(state) = write_lock.get_mut(id) {
+        let (labels, api_version, workflow_kind, _reservation) = {
+            let read_lock = self.job_state.read().await;
+            let Some(state) = read_lock.get(&id) else {
+                return Ok(());
+            };
             if state.secret != *secret {
                 return Err(anyhow!("Unauthorized"));
             }
-
             if has_workflow(state) {
                 return Err(JobAlreadyStarted.into());
             }
+            let reservation = self.reserve_start(id)?;
+            (
+                Self::submit_labels(state, origin),
+                state.api_version,
+                state.workflow_kind,
+                reservation,
+            )
+        };
 
-            let result = self
-                .argo_client
-                .submit_from_template(
-                    template_name.clone(),
-                    Some(HashMap::from([
-                        ("jobid".to_string(), id.to_string()),
-                        ("name".to_string(), state.name.clone()),
-                        ("secret".to_string(), state.secret.clone()),
-                        (
-                            "api-version".to_string(),
-                            state.api_version.as_label_value().to_string(),
-                        ),
-                        (
-                            "workflow-kind".to_string(),
-                            workflow_kind_label_value(state.workflow_kind).to_string(),
-                        ),
-                        (
-                            "result-kind".to_string(),
-                            result_kind_label_value(state.result_kind).to_string(),
-                        ),
-                        (
-                            "origin".to_string(),
-                            origin.unwrap_or_else(|| "Unknown".to_string()),
-                        ),
-                    ])),
-                    Some(HashMap::from([
-                        ("parameter".to_string(), parameters),
-                        ("jobid".to_string(), id.to_string()),
-                    ])),
-                    None,
-                    Some(format!("bakta-job-{}-", id)),
-                )
-                .await;
+        let result = self
+            .argo_client
+            .submit_from_template(
+                template_name.clone(),
+                Some(labels),
+                Some(HashMap::from([
+                    ("parameter".to_string(), parameters),
+                    ("jobid".to_string(), id.to_string()),
+                ])),
+                None,
+                Some(format!("bakta-job-{}-", id)),
+            )
+            .await;
 
-            let result = match result {
-                Ok(result) => result,
-                Err(e) => {
-                    tracing::warn!(
-                        job_id = %id,
-                        api_version = state.api_version.as_label_value(),
-                        workflow_kind = workflow_kind_label_value(state.workflow_kind),
-                        template = %template_name,
-                        error = %e,
-                        "workflow_submit_failed"
-                    );
-                    self.metrics
-                        .record_submit_error(workflow_kind_label_value(state.workflow_kind));
-                    return Err(e);
-                }
-            };
+        let result = match result {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %id,
+                    api_version = api_version.as_label_value(),
+                    workflow_kind = workflow_kind_label_value(workflow_kind),
+                    template = %template_name,
+                    error = %e,
+                    "workflow_submit_failed"
+                );
+                self.metrics
+                    .record_submit_error(workflow_kind_label_value(workflow_kind));
+                return Err(e);
+            }
+        };
 
-            let workflow_name = result.metadata.name.clone();
-            state.workflowname = Some(result.metadata.name);
-            state.status = Some(ArgoStatus::Pending);
-            state.started = Some(result.metadata.creation_timestamp);
-            state.updated = Some(Utc::now());
-            state.api_version = ApiVersion::V1;
-            state.workflow_kind = WorkflowKind::Bakta;
-            state.result_kind = ResultKind::Bakta;
-            self.metrics.record_job_submitted(
-                state.api_version.as_label_value(),
-                workflow_kind_label_value(state.workflow_kind),
-            );
-            tracing::info!(
-                job_id = %id,
-                api_version = state.api_version.as_label_value(),
-                workflow_kind = workflow_kind_label_value(state.workflow_kind),
-                template = %template_name,
-                workflow_name = %workflow_name,
-                "workflow_submitted"
-            );
-        }
+        let mut write_lock = self.job_state.write().await;
+        let Some(state) = write_lock.get_mut(&id) else {
+            return Ok(());
+        };
+        let workflow_name = result.metadata.name.clone();
+        state.workflowname = Some(result.metadata.name);
+        state.status = Some(ArgoStatus::Pending);
+        state.started = Some(result.metadata.creation_timestamp);
+        state.updated = Some(Utc::now());
+        state.api_version = ApiVersion::V1;
+        state.workflow_kind = WorkflowKind::Bakta;
+        state.result_kind = ResultKind::Bakta;
+        self.metrics.record_job_submitted(
+            state.api_version.as_label_value(),
+            workflow_kind_label_value(state.workflow_kind),
+        );
+        tracing::info!(
+            job_id = %id,
+            api_version = state.api_version.as_label_value(),
+            workflow_kind = workflow_kind_label_value(state.workflow_kind),
+            template = %template_name,
+            workflow_name = %workflow_name,
+            "workflow_submitted"
+        );
         Ok(())
     }
 
@@ -1004,52 +1070,41 @@ impl StateHandler {
         let template_name =
             workflow_template_name(workflow_kind, &self.bakta_version, &self.baktfold_version)?;
 
-        let mut write_lock = self.job_state.write().await;
-        let Some(state) = write_lock.get_mut(&job_id) else {
-            return Err(anyhow!("Job not found"));
+        let (labels, api_version, _reservation) = {
+            let read_lock = self.job_state.read().await;
+            let Some(state) = read_lock.get(&job_id) else {
+                return Err(anyhow!("Job not found"));
+            };
+
+            if state.secret != secret {
+                return Err(anyhow!("Unauthorized"));
+            }
+
+            if state.api_version != ApiVersion::V2 {
+                return Err(anyhow!("Wrong API version"));
+            }
+
+            if state.workflow_kind != workflow_kind {
+                return Err(anyhow!("Workflow kind mismatch"));
+            }
+
+            if has_workflow(state) {
+                return Err(JobAlreadyStarted.into());
+            }
+
+            let reservation = self.reserve_start(job_id)?;
+            (
+                Self::submit_labels(state, origin),
+                state.api_version,
+                reservation,
+            )
         };
-
-        if state.secret != secret {
-            return Err(anyhow!("Unauthorized"));
-        }
-
-        if state.api_version != ApiVersion::V2 {
-            return Err(anyhow!("Wrong API version"));
-        }
-
-        if state.workflow_kind != workflow_kind {
-            return Err(anyhow!("Workflow kind mismatch"));
-        }
-
-        if has_workflow(state) {
-            return Err(JobAlreadyStarted.into());
-        }
 
         let result = self
             .argo_client
             .submit_from_template(
                 template_name.clone(),
-                Some(HashMap::from([
-                    ("jobid".to_string(), job_id.to_string()),
-                    ("name".to_string(), state.name.clone()),
-                    ("secret".to_string(), state.secret.clone()),
-                    (
-                        "api-version".to_string(),
-                        state.api_version.as_label_value().to_string(),
-                    ),
-                    (
-                        "workflow-kind".to_string(),
-                        workflow_kind_label_value(state.workflow_kind).to_string(),
-                    ),
-                    (
-                        "result-kind".to_string(),
-                        result_kind_label_value(state.result_kind).to_string(),
-                    ),
-                    (
-                        "origin".to_string(),
-                        origin.unwrap_or_else(|| "Unknown".to_string()),
-                    ),
-                ])),
+                Some(labels),
                 Some(HashMap::from([
                     ("parameter".to_string(), parameters),
                     ("jobid".to_string(), job_id.to_string()),
@@ -1064,18 +1119,22 @@ impl StateHandler {
             Err(e) => {
                 tracing::warn!(
                     job_id = %job_id,
-                    api_version = state.api_version.as_label_value(),
-                    workflow_kind = workflow_kind_label_value(state.workflow_kind),
+                    api_version = api_version.as_label_value(),
+                    workflow_kind = workflow_kind_label_value(workflow_kind),
                     template = %template_name,
                     error = %e,
                     "workflow_submit_failed"
                 );
                 self.metrics
-                    .record_submit_error(workflow_kind_label_value(state.workflow_kind));
+                    .record_submit_error(workflow_kind_label_value(workflow_kind));
                 return Err(e);
             }
         };
 
+        let mut write_lock = self.job_state.write().await;
+        let Some(state) = write_lock.get_mut(&job_id) else {
+            return Ok(());
+        };
         let workflow_name = result.metadata.name.clone();
         state.workflowname = Some(result.metadata.name);
         state.status = Some(ArgoStatus::Pending);
@@ -1488,6 +1547,7 @@ mod tests {
             metrics: Arc::new(AppMetrics::new()),
             bakta_version: "1.0.0".to_string(),
             baktfold_version: "1.0.0".to_string(),
+            starting_jobs: Default::default(),
         };
 
         let rendered = state_handler

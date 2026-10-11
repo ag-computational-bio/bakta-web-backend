@@ -37,6 +37,7 @@ pub fn test_handler(argo_url: &str, s3_url: &str) -> Arc<BaktaHandler> {
         metrics: Arc::new(AppMetrics::new()),
         bakta_version: "1.9.0".to_string(),
         baktfold_version: "0.7.0".to_string(),
+        starting_jobs: Default::default(),
     });
     Arc::new(BaktaHandler {
         s3_handler: S3Handler::new(

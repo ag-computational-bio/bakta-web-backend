@@ -400,3 +400,50 @@ async fn start_twice_is_rejected_with_conflict() {
     assert!(text.contains("already started"), "{text}");
     assert_eq!(argo.received_requests().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn start_does_not_block_other_requests_while_argo_is_slow() {
+    let argo = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(submit_response("wf").set_delay(std::time::Duration::from_millis(1500)))
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let id = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    let router = test_router(handler);
+    let body = start_body(id, TEST_SECRET, "bakta", json!({}));
+
+    let first = {
+        let router = router.clone();
+        let body = body.clone();
+        tokio::spawn(async move { call(&router, "POST", "/api/v2/job/start", Some(body)).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let list = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        call(
+            &router,
+            "POST",
+            "/api/v2/job/list",
+            Some(json!({"jobs": [{"job_id": id, "secret": TEST_SECRET}]})),
+        ),
+    )
+    .await;
+    assert!(
+        list.is_ok(),
+        "list request was blocked by the start request"
+    );
+
+    let (status, text) = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        call(&router, "POST", "/api/v2/job/start", Some(body)),
+    )
+    .await
+    .expect("second start was blocked by the first one");
+    assert_eq!(status, StatusCode::CONFLICT, "{text}");
+
+    let (status, _) = first.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(argo.received_requests().await.unwrap().len(), 1);
+}
