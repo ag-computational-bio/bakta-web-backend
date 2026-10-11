@@ -332,9 +332,16 @@ fn stage_status_from_nodes(
     nodes: &HashMap<String, WorkflowNodeStatus>,
     stage: &str,
 ) -> Option<StageStatus> {
-    let mut statuses = nodes
+    let matching = nodes
         .values()
         .filter(|node| node_matches_stage(node, stage))
+        .collect::<Vec<_>>();
+    // With a retry strategy, the Retry parent holds the outcome of the stage.
+    // Its failed attempts must not hide a later successful attempt.
+    let has_retry_parent = matching.iter().any(|node| node.node_type == "Retry");
+    let mut statuses = matching
+        .into_iter()
+        .filter(|node| !has_retry_parent || node.node_type == "Retry")
         .map(|node| stage_status_from_phase(&node.phase));
 
     let mut selected = statuses.next()?;
@@ -1518,6 +1525,34 @@ mod tests {
 
         assert_eq!(stages[0].content, "bakta line");
         assert_eq!(stages[1].content, "baktfold line");
+    }
+
+    #[test]
+    fn test_stage_status_uses_retry_parent_when_a_retry_succeeded() {
+        let mut nodes = HashMap::new();
+        for (key, name, node_type, phase) in [
+            ("retry", "wf[0].bakta", "Retry", "Succeeded"),
+            ("first", "wf[0].bakta(0)", "Pod", "Failed"),
+            ("second", "wf[0].bakta(1)", "Pod", "Succeeded"),
+        ] {
+            nodes.insert(
+                key.to_string(),
+                WorkflowNodeStatus {
+                    id: key.to_string(),
+                    name: name.to_string(),
+                    display_name: name.trim_start_matches("wf[0].").to_string(),
+                    template_name: "bakta".to_string(),
+                    node_type: node_type.to_string(),
+                    phase: phase.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+
+        assert_eq!(
+            stage_status_from_nodes(&nodes, "bakta"),
+            Some(StageStatus::Succeeded)
+        );
     }
 
     #[test]
