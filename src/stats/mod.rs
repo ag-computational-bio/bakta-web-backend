@@ -400,13 +400,29 @@ impl StatsRecorder {
 #[cfg(test)]
 pub mod test_db {
     use super::StatsDb;
-    use sqlx::{AssertSqlSafe, Connection, PgConnection};
+    use sqlx::{AssertSqlSafe, Connection, PgConnection, postgres::PgPoolOptions};
+    use std::sync::{Arc, OnceLock};
+    use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+    /// Database tests that may run at the same time in one test process. With
+    /// the small pools below, several test runs fit into the default
+    /// `max_connections` of 100 of one database server.
+    const PARALLEL_TESTS: usize = 6;
+    const POOL_CONNECTIONS: u32 = 2;
+
+    fn test_slots() -> Arc<Semaphore> {
+        static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+        SLOTS
+            .get_or_init(|| Arc::new(Semaphore::new(PARALLEL_TESTS)))
+            .clone()
+    }
 
     /// A migrated schema that belongs to one test. It is dropped with the guard.
     pub struct TestDb {
         db: StatsDb,
         admin_url: String,
         name: String,
+        _slot: OwnedSemaphorePermit,
     }
 
     impl std::ops::Deref for TestDb {
@@ -430,16 +446,34 @@ pub mod test_db {
                     return;
                 };
                 runtime.block_on(async {
-                    if let Ok(mut conn) = PgConnection::connect(&admin_url).await {
+                    if let Ok(mut conn) = connect(&admin_url).await {
                         let _ = sqlx::query(AssertSqlSafe(format!(
                             "DROP SCHEMA IF EXISTS \"{name}\" CASCADE"
                         )))
                         .execute(&mut conn)
                         .await;
+                        let _ = conn.close().await;
                     }
                 });
             })
             .join();
+        }
+    }
+
+    /// Opens a connection. Retries while the server has too many clients, for
+    /// example when several test runs share one database server.
+    async fn connect(url: &str) -> Result<PgConnection, sqlx::Error> {
+        let mut attempts = 0;
+        loop {
+            match PgConnection::connect(url).await {
+                Err(sqlx::Error::Database(error))
+                    if error.code().as_deref() == Some("53300") && attempts < 120 =>
+                {
+                    attempts += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                result => return result,
+            }
         }
     }
 
@@ -456,20 +490,29 @@ pub mod test_db {
             eprintln!("skipping {test_name}: TEST_DATABASE_URL is not set");
             return None;
         };
+        let slot = test_slots()
+            .acquire_owned()
+            .await
+            .expect("the test slots are never closed");
         let name = format!("test_{}", uuid::Uuid::new_v4().simple());
-        let mut conn = PgConnection::connect(&url)
+        let mut conn = connect(&url)
             .await
             .expect("TEST_DATABASE_URL should be reachable");
         sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA \"{name}\"")))
             .execute(&mut conn)
             .await
             .expect("the test user should be allowed to create schemas");
-        let db = StatsDb::connect_lazy(&with_schema(&url, &name))
+        let _ = conn.close().await;
+        let pool = PgPoolOptions::new()
+            .max_connections(POOL_CONNECTIONS)
+            .acquire_timeout(std::time::Duration::from_secs(30))
+            .connect_lazy(&with_schema(&url, &name))
             .expect("TEST_DATABASE_URL should be valid");
         let guard = TestDb {
-            db,
+            db: StatsDb { pool },
             admin_url: url,
             name,
+            _slot: slot,
         };
         guard.migrate().await.expect("migrations should run");
         Some(guard)
