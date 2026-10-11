@@ -77,10 +77,13 @@ pub enum StatsEvent {
     Created(NewJob),
     Submitted(Box<SubmittedJob>),
     Status(StatusUpdate),
-    /// Argo retry of `workflow_name`. Ignored unless it is the job's workflow.
+    /// Argo retry of `workflow_name`, requested at `retried_at`. Ignored
+    /// unless it is the job's workflow, and when a finish after `retried_at`
+    /// (of the new attempt) was already recorded.
     Retried {
         id: Uuid,
         workflow_name: String,
+        retried_at: DateTime<Utc>,
     },
     /// Argo resubmit of `previous_workflow_name` as `workflow_name`. Ignored
     /// unless the previous workflow is the job's workflow.
@@ -202,14 +205,20 @@ impl StatsDb {
                 .execute(&self.pool)
                 .await?;
             }
-            StatsEvent::Retried { id, workflow_name } => {
+            StatsEvent::Retried {
+                id,
+                workflow_name,
+                retried_at,
+            } => {
                 sqlx::query(
                     "UPDATE jobs SET status = 'running', outcome = NULL, finished_at = NULL,
                          runtime_seconds = NULL, error_message = NULL, updated_at = now()
-                     WHERE id = $1 AND (workflow_name IS NULL OR workflow_name = $2)",
+                     WHERE id = $1 AND (workflow_name IS NULL OR workflow_name = $2)
+                         AND (finished_at IS NULL OR finished_at < $3)",
                 )
                 .bind(id)
                 .bind(workflow_name)
+                .bind(retried_at)
                 .execute(&self.pool)
                 .await?;
             }
@@ -514,6 +523,7 @@ mod tests {
         db.apply(&StatsEvent::Retried {
             id,
             workflow_name: "wf-a".to_string(),
+            retried_at: Utc::now(),
         })
         .await
         .unwrap();
@@ -521,6 +531,7 @@ mod tests {
         db.apply(&StatsEvent::Retried {
             id,
             workflow_name: "wf-b".to_string(),
+            retried_at: Utc::now(),
         })
         .await
         .unwrap();
@@ -540,6 +551,47 @@ mod tests {
                 .get::<Option<String>, _>("workflow_name")
                 .as_deref(),
             Some("wf-b")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_late_retry_reset_keeps_the_newer_outcome() {
+        let Some(db) = test_db("test_late_retry_reset_keeps_the_newer_outcome").await else {
+            return;
+        };
+        let t0 = Utc::now() - ChronoDuration::minutes(10);
+        let job = new_job(&unique_environment(), t0);
+        let id = job.id;
+        let status = |status, finished_at| {
+            StatsEvent::Status(StatusUpdate {
+                job: job.clone(),
+                workflow_name: "wf-a".to_string(),
+                status,
+                started_at: t0,
+                finished_at: Some(finished_at),
+                error_message: None,
+            })
+        };
+        db.apply(&status("failed", t0 + ChronoDuration::seconds(30)))
+            .await
+            .unwrap();
+        // The retried attempt finished and was recorded before the reset.
+        let retried_at = t0 + ChronoDuration::seconds(60);
+        db.apply(&status("succeeded", t0 + ChronoDuration::seconds(90)))
+            .await
+            .unwrap();
+        db.apply(&StatsEvent::Retried {
+            id,
+            workflow_name: "wf-a".to_string(),
+            retried_at,
+        })
+        .await
+        .unwrap();
+        let record = row(&db, id).await;
+        assert_eq!(record.get::<String, _>("status"), "succeeded");
+        assert_eq!(
+            record.get::<Option<String>, _>("outcome").as_deref(),
+            Some("succeeded")
         );
     }
 

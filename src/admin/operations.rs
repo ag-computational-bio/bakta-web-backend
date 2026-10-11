@@ -6,7 +6,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::{Admin, AdminError, parse_environment, stats_db, structs::*};
@@ -70,11 +70,21 @@ fn response_phase(workflow: &ArgoWorkflow, fallback: &str) -> String {
     }
 }
 
-/// Updates the job state and record after an Argo retry.
-async fn after_retry(state: &BaktaHandler, id: Uuid, workflow_name: &str) {
+/// Updates the job state and record after an Argo retry requested at
+/// `retried_at`. The event is recorded while the job state lock is held, so
+/// it is ordered with the status updates of the polling loop. A finish seen
+/// after `retried_at` belongs to the new attempt and is kept.
+async fn after_retry(
+    state: &BaktaHandler,
+    id: Uuid,
+    workflow_name: &str,
+    retried_at: DateTime<Utc>,
+) {
     let handler = &state.state_handler;
-    if let Some(job) = handler.job_state.write().await.get_mut(&id)
+    let mut job_state = handler.job_state.write().await;
+    if let Some(job) = job_state.get_mut(&id)
         && job.workflowname.as_deref() == Some(workflow_name)
+        && job.updated.is_none_or(|updated| updated < retried_at)
     {
         job.status = Some(ArgoStatus::Running);
         job.updated = Some(Utc::now());
@@ -82,7 +92,9 @@ async fn after_retry(state: &BaktaHandler, id: Uuid, workflow_name: &str) {
     handler.stats.record(StatsEvent::Retried {
         id,
         workflow_name: workflow_name.to_string(),
+        retried_at,
     });
+    drop(job_state);
 }
 
 /// Points the job state and record to the new workflow after an Argo resubmit
@@ -90,7 +102,9 @@ async fn after_retry(state: &BaktaHandler, id: Uuid, workflow_name: &str) {
 async fn after_resubmit(state: &BaktaHandler, id: Uuid, old_name: &str, workflow: &ArgoWorkflow) {
     let handler = &state.state_handler;
     let now = Utc::now();
-    if let Some(job) = handler.job_state.write().await.get_mut(&id)
+    // Record while holding the lock, so the event is ordered with the poll.
+    let mut job_state = handler.job_state.write().await;
+    if let Some(job) = job_state.get_mut(&id)
         && job
             .workflowname
             .as_deref()
@@ -109,6 +123,7 @@ async fn after_resubmit(state: &BaktaHandler, id: Uuid, old_name: &str, workflow
         workflow_name: workflow.metadata.name.clone(),
         submitted_at: now,
     });
+    drop(job_state);
 }
 
 /// Argo retry of a failed or errored workflow.
@@ -141,13 +156,14 @@ pub async fn retry_job(
         )));
     }
     let handler = &state.state_handler;
+    let retried_at = Utc::now();
     let workflow = handler
         .argo_client
         .retry_workflow(&workflow_name)
         .await
         .map_err(AdminError::argo)?;
     tracing::info!(user = %user.username, job_id = %id, workflow_name = %workflow_name, "admin_retry");
-    after_retry(&state, id, &workflow_name).await;
+    after_retry(&state, id, &workflow_name, retried_at).await;
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Running"),
         workflow_name,
@@ -540,9 +556,10 @@ async fn run_bulk_action(
             argo.resume_workflow(name).await?;
         }
         BulkAction::Retry => {
+            let retried_at = Utc::now();
             argo.retry_workflow(name).await?;
             if let Some(id) = job_id {
-                after_retry(state, id, name).await;
+                after_retry(state, id, name, retried_at).await;
             }
         }
         BulkAction::Resubmit => {

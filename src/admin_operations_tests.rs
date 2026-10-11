@@ -102,6 +102,57 @@ async fn retry_only_accepts_failed_workflows() {
 }
 
 #[tokio::test]
+async fn late_retry_reset_does_not_hide_a_finish_seen_by_the_poll() {
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta/wf-1"))
+        .respond_with(workflow("wf-1", "Failed"))
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-1/retry"))
+        .respond_with(workflow("wf-1", "Running").set_delay(std::time::Duration::from_millis(800)))
+        .mount(&argo)
+        .await;
+    let setup = std::sync::Arc::new(admin_setup(&argo.uri(), "https://s3.example.com", None).await);
+    let id = job_with_workflow(&setup.handler, "wf-1", ArgoStatus::Failed).await;
+    setup
+        .handler
+        .state_handler
+        .job_state
+        .write()
+        .await
+        .get_mut(&id)
+        .unwrap()
+        .updated = Some(Utc::now() - Duration::minutes(5));
+
+    let retry = {
+        let setup = setup.clone();
+        tokio::spawn(async move {
+            admin_call(&setup, "POST", &format!("/api/admin/jobs/{id}/retry"), None).await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // The retried attempt finishes and the poll sees it before the retry call returns.
+    let now = Utc::now();
+    let finished: SimpleStatus = serde_json::from_value(json!({
+        "metadata": {"name": "wf-1", "uid": Uuid::new_v4(),
+                     "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}},
+        "status": {"phase": "Succeeded", "startedAt": now.to_rfc3339(), "finishedAt": now.to_rfc3339()}
+    }))
+    .unwrap();
+    setup
+        .handler
+        .state_handler
+        .apply_workflow_statuses(vec![finished], now)
+        .await;
+    let (status, body) = retry.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let states = setup.handler.state_handler.job_state.read().await;
+    assert!(matches!(states[&id].status, Some(ArgoStatus::Succeeded)));
+}
+
+#[tokio::test]
 async fn resubmit_points_the_job_to_the_new_workflow() {
     let argo = MockServer::start().await;
     Mock::given(method("PUT"))
