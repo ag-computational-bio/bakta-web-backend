@@ -6,10 +6,13 @@ use std::time::Duration;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 /// Upper limit for a single database write. Recording must never stall.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Number of events that may wait for the database before new ones are dropped.
+const EVENT_QUEUE_SIZE: usize = 10_000;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -232,6 +235,57 @@ impl StatsDb {
     }
 }
 
+/// Sends job lifecycle events to the statistics database in the background.
+/// Events are written in order by a single worker. When recording is
+/// disabled, every call is a no-op.
+#[derive(Clone, Default)]
+pub struct StatsRecorder {
+    sender: Option<mpsc::Sender<StatsEvent>>,
+    db: Option<StatsDb>,
+    pub versions: JobVersions,
+}
+
+impl StatsRecorder {
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    /// Starts the background writer. Must be called inside a Tokio runtime.
+    pub fn new(db: StatsDb, versions: JobVersions) -> Self {
+        let (sender, mut receiver) = mpsc::channel::<StatsEvent>(EVENT_QUEUE_SIZE);
+        let worker_db = db.clone();
+        tokio::spawn(async move {
+            while let Some(event) = receiver.recv().await {
+                match tokio::time::timeout(WRITE_TIMEOUT, worker_db.apply(&event)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, ?event, "stats_write_failed");
+                    }
+                    Err(_) => tracing::warn!(?event, "stats_write_timed_out"),
+                }
+            }
+        });
+        Self {
+            sender: Some(sender),
+            db: Some(db),
+            versions,
+        }
+    }
+
+    pub fn db(&self) -> Option<&StatsDb> {
+        self.db.as_ref()
+    }
+
+    pub fn record(&self, event: StatsEvent) {
+        let Some(sender) = &self.sender else {
+            return;
+        };
+        if let Err(error) = sender.try_send(event) {
+            tracing::warn!(%error, "stats_event_dropped");
+        }
+    }
+}
+
 #[cfg(test)]
 pub mod test_db {
     use super::StatsDb;
@@ -415,5 +469,32 @@ mod tests {
 
         db.apply(&StatsEvent::Retried { id }).await.unwrap();
         assert_eq!(row(&db, id).await.get::<String, _>("status"), "running");
+    }
+
+    #[tokio::test]
+    async fn test_recorder_writes_in_background_and_disabled_recorder_is_a_no_op() {
+        StatsRecorder::disabled().record(StatsEvent::Deleted { id: Uuid::new_v4() });
+
+        let Some(db) = test_db("test_recorder_writes_in_background").await else {
+            return;
+        };
+        let recorder = StatsRecorder::new(db.clone(), JobVersions::default());
+        let job = new_job(&unique_environment(), Utc::now());
+        let id = job.id;
+        recorder.record(StatsEvent::Created(job));
+        recorder.record(StatsEvent::Deleted { id });
+        for _ in 0..50 {
+            let status: Option<String> =
+                sqlx::query_scalar("SELECT status FROM jobs WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(db.pool())
+                    .await
+                    .unwrap();
+            if status.as_deref() == Some("deleted") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("recorder did not write the events");
     }
 }
