@@ -242,6 +242,20 @@ pub async fn metrics(State(state): State<Arc<BaktaHandler>>) -> impl IntoRespons
     }
 }
 
+/// Maps the request method to a fixed label set so clients cannot create new label values.
+fn method_label(method: &axum::http::Method) -> &'static str {
+    match method.as_str() {
+        "GET" => "GET",
+        "POST" => "POST",
+        "PUT" => "PUT",
+        "DELETE" => "DELETE",
+        "PATCH" => "PATCH",
+        "HEAD" => "HEAD",
+        "OPTIONS" => "OPTIONS",
+        _ => "other",
+    }
+}
+
 pub async fn track_http_metrics(
     State(state): State<Arc<BaktaHandler>>,
     request: Request<axum::body::Body>,
@@ -251,8 +265,8 @@ pub async fn track_http_metrics(
         .extensions()
         .get::<MatchedPath>()
         .map(|matched| matched.as_str().to_string())
-        .unwrap_or_else(|| request.uri().path().to_string());
-    let method = request.method().to_string();
+        .unwrap_or_else(|| "unmatched".to_string());
+    let method = method_label(request.method()).to_string();
     let started_at = Instant::now();
 
     let response = next.run(request).await;
@@ -294,5 +308,33 @@ mod tests {
         assert!(encoded.contains("workflow_kind=\"bakta\""));
         assert!(encoded.contains("jobs_active"));
         assert!(encoded.contains("http_request_duration_seconds"));
+    }
+}
+
+#[cfg(test)]
+mod middleware_tests {
+    use crate::test_support::{call, test_handler};
+    use axum::{Router, middleware, routing::get};
+
+    #[tokio::test]
+    async fn test_track_http_metrics_bounds_route_and_method_labels() {
+        let handler = test_handler("http://127.0.0.1:1", "https://s3.example.com");
+        let router = Router::new().route("/known", get(|| async { "ok" })).layer(
+            middleware::from_fn_with_state(handler.clone(), super::track_http_metrics),
+        );
+
+        call(&router, "GET", "/known", None).await;
+        call(&router, "GET", "/random/path/abc123", None).await;
+        call(&router, "BREW", "/known", None).await;
+
+        let encoded = handler.state_handler.metrics.encode().unwrap();
+        assert!(
+            encoded.contains("route=\"/known\",method=\"GET\""),
+            "{encoded}"
+        );
+        assert!(encoded.contains("route=\"unmatched\""), "{encoded}");
+        assert!(!encoded.contains("abc123"), "{encoded}");
+        assert!(encoded.contains("method=\"other\""), "{encoded}");
+        assert!(!encoded.contains("BREW"), "{encoded}");
     }
 }
