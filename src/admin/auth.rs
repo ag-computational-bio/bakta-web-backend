@@ -13,7 +13,7 @@ use jsonwebtoken::{
 use serde::Deserialize;
 use tokio::sync::{Mutex, RwLock};
 
-/// An unknown `kid` triggers a JWKS refresh at most this often.
+/// JWKS refreshes are attempted at most this often, successful or not.
 const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 /// Cached keys are refreshed when they are older than this.
 const MAX_KEY_AGE: Duration = Duration::from_secs(3600);
@@ -89,6 +89,8 @@ struct Claims {
 struct KeyCache {
     keys: HashMap<String, DecodingKey>,
     fetched_at: Option<Instant>,
+    /// Last refresh attempt, also a failed one.
+    attempted_at: Option<Instant>,
 }
 
 pub struct AdminAuth {
@@ -97,6 +99,7 @@ pub struct AdminAuth {
     client: reqwest::Client,
     cache: RwLock<KeyCache>,
     refresh_lock: Mutex<()>,
+    min_refresh_interval: Duration,
 }
 
 impl AdminAuth {
@@ -114,7 +117,14 @@ impl AdminAuth {
                 .expect("JWKS HTTP client should build"),
             cache: RwLock::new(KeyCache::default()),
             refresh_lock: Mutex::new(()),
+            min_refresh_interval: MIN_REFRESH_INTERVAL,
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_min_refresh_interval(mut self, interval: Duration) -> Self {
+        self.min_refresh_interval = interval;
+        self
     }
 
     /// Validates the `Authorization` header value and returns the admin user.
@@ -174,60 +184,68 @@ impl AdminAuth {
     }
 
     async fn key(&self, kid: &str) -> Result<DecodingKey, AuthError> {
-        {
+        let (cached, may_refresh) = {
             let cache = self.cache.read().await;
             let fresh = cache
                 .fetched_at
                 .is_some_and(|fetched_at| fetched_at.elapsed() < MAX_KEY_AGE);
-            if fresh && let Some(key) = cache.keys.get(kid) {
-                return Ok(key.clone());
+            let cached = cache.keys.get(kid).cloned();
+            if fresh && let Some(key) = cached {
+                return Ok(key);
             }
-        }
-
-        let _refresh = self.refresh_lock.lock().await;
-        let may_refresh = {
-            let cache = self.cache.read().await;
-            let stale = cache
-                .fetched_at
-                .is_none_or(|fetched_at| fetched_at.elapsed() >= MAX_KEY_AGE);
-            let can_retry = cache
-                .fetched_at
-                .is_none_or(|fetched_at| fetched_at.elapsed() >= MIN_REFRESH_INTERVAL);
-            if !stale && let Some(key) = cache.keys.get(kid) {
-                return Ok(key.clone());
-            }
-            stale || can_retry
+            (cached, self.may_attempt_refresh(&cache))
         };
 
         if may_refresh {
-            match self.fetch_keys().await {
-                Ok(keys) => {
-                    let mut cache = self.cache.write().await;
-                    cache.keys = keys;
-                    cache.fetched_at = Some(Instant::now());
-                }
-                Err(error) => {
-                    tracing::warn!(%error, url = %self.jwks_url, "jwks_fetch_failed");
-                    let cache = self.cache.read().await;
-                    // Keep using known keys while Keycloak is unreachable.
-                    return match cache.keys.get(kid) {
-                        Some(key) => Ok(key.clone()),
-                        None if cache.keys.is_empty() => Err(AuthError::Unavailable(
-                            "Token signing keys are not available".to_string(),
-                        )),
-                        None => Err(AuthError::Unauthorized("Unknown token key".to_string())),
-                    };
+            // Never wait for a refresh in progress: use the cached key or fail fast.
+            match self.refresh_lock.try_lock() {
+                Ok(_refresh) => self.refresh().await,
+                Err(_) if cached.is_some() => {}
+                Err(_) => {
+                    return Err(AuthError::Unavailable(
+                        "Token signing keys are being refreshed, try again".to_string(),
+                    ));
                 }
             }
         }
 
-        self.cache
-            .read()
-            .await
-            .keys
-            .get(kid)
-            .cloned()
-            .ok_or_else(|| AuthError::Unauthorized("Unknown token key".to_string()))
+        // Keep using known keys while Keycloak is unreachable.
+        let cache = self.cache.read().await;
+        match cache.keys.get(kid) {
+            Some(key) => Ok(key.clone()),
+            None if cache.keys.is_empty() => Err(AuthError::Unavailable(
+                "Token signing keys are not available".to_string(),
+            )),
+            None => Err(AuthError::Unauthorized("Unknown token key".to_string())),
+        }
+    }
+
+    fn may_attempt_refresh(&self, cache: &KeyCache) -> bool {
+        cache
+            .attempted_at
+            .is_none_or(|attempted_at| attempted_at.elapsed() >= self.min_refresh_interval)
+    }
+
+    /// Fetches the keys unless another attempt was made within the minimum
+    /// interval. Callers must hold `refresh_lock`.
+    async fn refresh(&self) {
+        {
+            let mut cache = self.cache.write().await;
+            if !self.may_attempt_refresh(&cache) {
+                return;
+            }
+            cache.attempted_at = Some(Instant::now());
+        }
+        match self.fetch_keys().await {
+            Ok(keys) => {
+                let mut cache = self.cache.write().await;
+                cache.keys = keys;
+                cache.fetched_at = Some(Instant::now());
+            }
+            Err(error) => {
+                tracing::warn!(%error, url = %self.jwks_url, "jwks_fetch_failed");
+            }
+        }
     }
 
     async fn fetch_keys(&self) -> Result<HashMap<String, DecodingKey>> {
@@ -422,6 +440,83 @@ mod tests {
                 .is_err()
         );
         assert_eq!(keycloak.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_failed_refreshes_are_throttled() {
+        let keycloak = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&keycloak)
+            .await;
+        let issuer = format!("{}/realms/bakta", keycloak.uri());
+        let auth = AdminAuth::new(AdminAuthConfig {
+            issuer: issuer.clone(),
+            client_id: TEST_CLIENT.to_string(),
+            group: TEST_GROUP.to_string(),
+        });
+        for _ in 0..3 {
+            let result = check(&auth, &claims(&issuer)).await;
+            assert!(
+                matches!(result, Err(AuthError::Unavailable(_))),
+                "{result:?}"
+            );
+        }
+        assert_eq!(keycloak.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_validation_does_not_wait_for_a_running_refresh() {
+        let keycloak = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jwks()))
+            .up_to_n_times(1)
+            .mount(&keycloak)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(jwks())
+                    .set_delay(Duration::from_secs(3)),
+            )
+            .mount(&keycloak)
+            .await;
+        let issuer = format!("{}/realms/bakta", keycloak.uri());
+        let auth = std::sync::Arc::new(
+            AdminAuth::new(AdminAuthConfig {
+                issuer: issuer.clone(),
+                client_id: TEST_CLIENT.to_string(),
+                group: TEST_GROUP.to_string(),
+            })
+            .with_min_refresh_interval(Duration::ZERO),
+        );
+        check(&auth, &claims(&issuer)).await.unwrap();
+
+        // An unknown key starts a slow refresh.
+        let slow = {
+            let auth = auth.clone();
+            let token = token_with_kid(&claims(&issuer), "rotated-key");
+            tokio::spawn(async move { auth.authenticate(Some(&format!("Bearer {token}"))).await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let other = token_with_kid(&claims(&issuer), "other-key");
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            auth.authenticate(Some(&format!("Bearer {other}"))),
+        )
+        .await
+        .expect("validation must not wait for the refresh");
+        assert!(
+            matches!(result, Err(AuthError::Unavailable(_))),
+            "{result:?}"
+        );
+        // Known keys keep working during the refresh.
+        tokio::time::timeout(Duration::from_secs(1), check(&auth, &claims(&issuer)))
+            .await
+            .expect("validation must not wait for the refresh")
+            .unwrap();
+        slow.abort();
     }
 
     #[tokio::test]
