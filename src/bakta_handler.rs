@@ -1212,9 +1212,7 @@ impl StateHandler {
                 return Err(anyhow!("Unauthorized"));
             }
 
-            if let Some(status) = &state.status
-                && status != &ArgoStatus::Succeeded
-            {
+            if state.status != Some(ArgoStatus::Succeeded) {
                 return Err(anyhow!("Job not finished"));
             }
 
@@ -1251,9 +1249,7 @@ impl StateHandler {
                 return Err(anyhow!("Unauthorized"));
             }
 
-            if let Some(status) = &state.status
-                && status != &ArgoStatus::Succeeded
-            {
+            if state.status != Some(ArgoStatus::Succeeded) {
                 return Err(anyhow!("Job not finished"));
             }
 

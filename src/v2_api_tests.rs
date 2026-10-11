@@ -447,3 +447,20 @@ async fn start_does_not_block_other_requests_while_argo_is_slow() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(argo.received_requests().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn result_rejects_jobs_that_were_never_started() {
+    let s3 = MockServer::start().await;
+    let handler = test_handler("http://127.0.0.1:1", &s3.uri());
+    let id = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    let router = test_router(handler);
+    let (status, body) = call(
+        &router,
+        "POST",
+        "/api/v2/job/result",
+        Some(json!({"job_id": id, "secret": TEST_SECRET})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("Job not finished"), "{body}");
+}
