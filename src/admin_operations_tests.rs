@@ -1096,6 +1096,57 @@ async fn retry_and_resubmit_are_refused_when_the_current_workflow_is_unknown() {
 }
 
 #[tokio::test]
+async fn bulk_retry_and_resubmit_wait_for_the_first_poll_without_a_database() {
+    let argo = MockServer::start().await;
+    // No statistics database, and the job is not in memory after a restart.
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    let id = Uuid::new_v4();
+    let items = json!({"items": [
+        listed_workflow("wf-a", "Failed", Some(&id.to_string()), Some(1)),
+    ]});
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(items))
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(workflow("any", "Running"))
+        .mount(&argo)
+        .await;
+
+    for action in ["retry", "resubmit"] {
+        let (status, body) = admin_call(
+            &setup,
+            "POST",
+            "/api/admin/workflows/bulk",
+            Some(json!({"action": action, "dry_run": false})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let item = bulk_item(&body, "wf-a");
+        assert_eq!(item["applicable"], false, "{body}");
+        assert_eq!(item["reason"], "Current workflow unknown, try again later");
+        assert_eq!(item["result"], "skipped");
+    }
+    assert!(argo_changes(argo.received_requests().await.unwrap()).is_empty());
+
+    // Once a poll put the job into memory, its current workflow is known.
+    let state = crate::bakta_handler::FullJobState {
+        id,
+        workflowname: Some("wf-a".to_string()),
+        ..job_state(
+            crate::bakta_handler::ApiVersion::V2,
+            WorkflowKind::Bakta,
+            crate::v2::api_structs::ResultKind::Bakta,
+            Some(ArgoStatus::Failed),
+        )
+    };
+    insert_state(&setup.handler, state).await;
+    let body = bulk_dry_run(&setup, "retry").await;
+    assert_eq!(bulk_item(&body, "wf-a")["applicable"], true, "{body}");
+}
+
+#[tokio::test]
 async fn resume_only_accepts_suspended_workflows() {
     let argo = MockServer::start().await;
     let mut paused = suspended_workflow();

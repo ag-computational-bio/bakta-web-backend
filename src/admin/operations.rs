@@ -611,7 +611,7 @@ enum CurrentWorkflow {
     /// The job has another current workflow (after a resubmit).
     SupersededBy(String),
     /// The job's current workflow cannot be determined, for example while
-    /// the statistics database fails.
+    /// the statistics database fails, or without it before a poll found the job.
     Unknown,
 }
 
@@ -633,7 +633,8 @@ async fn current_workflow(state: &BaktaHandler, workflow: &ArgoWorkflow) -> Curr
         .map(|job| job.workflowname.clone());
     let current = match (in_memory, handler.stats.db()) {
         (Some(name), _) => name,
-        (None, None) => return CurrentWorkflow::Current,
+        // Not known before the first poll after a restart finds the job.
+        (None, None) => return CurrentWorkflow::Unknown,
         (None, Some(db)) => match db.get_job(id).await {
             Ok(Some(record)) => record.workflow_name,
             Ok(None) => return CurrentWorkflow::Current,
