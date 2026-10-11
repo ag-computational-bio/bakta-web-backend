@@ -776,6 +776,39 @@ async fn bulk_run_processes_listed_workflows_one_by_one() {
 }
 
 #[tokio::test]
+async fn bulk_delete_skips_pending_and_running_workflows() {
+    let argo = workflow_list_argo().await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    for dry_run in [true, false] {
+        let (status, body) = admin_call(
+            &setup,
+            "POST",
+            "/api/admin/workflows/bulk",
+            Some(json!({"action": "delete", "dry_run": dry_run})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for name in ["running", "paused"] {
+            let item = bulk_item(&body, name);
+            assert_eq!(item["applicable"], false, "{body}");
+            assert_eq!(item["reason"], "Still running, stop it first");
+            if !dry_run {
+                assert_eq!(item["result"], "skipped");
+            }
+        }
+        assert_eq!(bulk_item(&body, "old-failed")["applicable"], true);
+    }
+    assert_eq!(
+        argo_changes(argo.received_requests().await.unwrap()),
+        [
+            "DELETE /api/v1/workflows/bakta/old-failed",
+            "DELETE /api/v1/workflows/bakta/old-error",
+            "DELETE /api/v1/workflows/bakta/new-failed",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn bulk_retry_and_resubmit_update_the_job_state() {
     let argo = workflow_list_argo().await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;

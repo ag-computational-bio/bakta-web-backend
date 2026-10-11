@@ -519,10 +519,20 @@ pub async fn list_workflows(
     Ok(Json(WorkflowListResponse { items }))
 }
 
+/// Why `action` does not apply to `workflow` because of its phase, or `None`.
+fn bulk_phase_reason(action: BulkAction, workflow: &ArgoWorkflow) -> Option<String> {
+    let phase = workflow.status.phase.as_str();
+    if action == BulkAction::Delete && matches!(phase, "Pending" | "Running") {
+        return Some("Still running, stop it first".to_string());
+    }
+    (!bulk_applicable(action, workflow))
+        .then(|| format!("Action does not apply to a {phase} workflow"))
+}
+
 fn bulk_applicable(action: BulkAction, workflow: &ArgoWorkflow) -> bool {
     let phase = workflow.status.phase.as_str();
     match action {
-        BulkAction::Delete => true,
+        BulkAction::Delete => !matches!(phase, "Pending" | "Running"),
         BulkAction::Stop => matches!(phase, "Pending" | "Running"),
         BulkAction::Retry => matches!(phase, "Failed" | "Error"),
         BulkAction::Resume => workflow.is_suspended(),
@@ -734,12 +744,7 @@ pub async fn bulk_workflows(
 
     let mut items = Vec::with_capacity(workflows.len());
     for workflow in workflows {
-        let mut reason = (!bulk_applicable(action, &workflow)).then(|| {
-            format!(
-                "Action does not apply to a {} workflow",
-                workflow.status.phase
-            )
-        });
+        let mut reason = bulk_phase_reason(action, &workflow);
         // Retry and resubmit only act on the job's current workflow, and
         // not when it cannot be determined.
         if reason.is_none() && matches!(action, BulkAction::Retry | BulkAction::Resubmit) {
