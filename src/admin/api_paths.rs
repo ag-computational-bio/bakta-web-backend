@@ -1,5 +1,6 @@
 //! Handlers of the admin API.
 
+use chrono::Utc;
 use std::sync::Arc;
 
 use axum::{Json, extract::State};
@@ -277,7 +278,9 @@ pub async fn list_jobs(
         );
     }
     let mut list = db.list_jobs(&query).await.map_err(AdminError::database)?;
+    let now = Utc::now();
     for item in &mut list.items {
+        item.set_retention(state.data_retention_days, now);
         if let Some(workflow) = live.get(&item.id) {
             item.workflow_name = Some(workflow.name.clone());
             item.workflow_phase = Some(workflow.phase.clone());
@@ -360,11 +363,12 @@ pub async fn get_job(
     Path(id): Path<Uuid>,
 ) -> Result<Json<JobDetail>, AdminError> {
     let db = stats_db(&state)?;
-    let job = db
+    let mut job = db
         .get_job(id)
         .await
         .map_err(AdminError::database)?
         .ok_or_else(|| AdminError::NotFound("Job not found".to_string()))?;
+    job.set_retention(state.data_retention_days, Utc::now());
     let workflow = match current_workflow_name(&state, id, job.workflow_name.clone()).await {
         Some(name) => match state.state_handler.argo_client.get_workflow(&name).await {
             Ok(workflow) => Some(workflow_view(workflow)),

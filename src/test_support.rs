@@ -76,6 +76,7 @@ pub fn test_handler_full(
             baktfold_db_version: "1.0".to_string(),
         },
         state_handler,
+        data_retention_days: crate::retention::DEFAULT_DATA_RETENTION_DAYS,
     })
 }
 

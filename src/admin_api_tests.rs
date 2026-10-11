@@ -123,6 +123,37 @@ async fn finished_job(db: &StatsDb, environment: &str, kind: &str, status: &'sta
     id
 }
 
+/// Inserts a job with the given creation and finish times. The job has the
+/// workflow `wf-<id>`. Without a finish time the job is still running.
+pub async fn aged_job(
+    db: &StatsDb,
+    environment: &str,
+    created_at: chrono::DateTime<Utc>,
+    finished_at: Option<chrono::DateTime<Utc>>,
+) -> Uuid {
+    let job = NewJob {
+        created_at,
+        ..new_job(environment, "bakta", 0)
+    };
+    let id = job.id;
+    db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
+    db.apply(&StatsEvent::Status(StatusUpdate {
+        job,
+        workflow_name: format!("wf-{id}"),
+        status: if finished_at.is_some() {
+            "failed"
+        } else {
+            "running"
+        },
+        started_at: created_at,
+        finished_at,
+        error_message: None,
+    }))
+    .await
+    .unwrap();
+    id
+}
+
 #[tokio::test]
 async fn admin_api_requires_configuration_and_a_valid_admin_token() {
     let router = test_router(test_handler("http://127.0.0.1:1", "https://s3.example.com"));
@@ -528,4 +559,66 @@ async fn admin_workflows_can_list_orphans_only() {
     assert_eq!(names, ["unknown", "no-label", "bad-label"]);
     let (_, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
     assert_eq!(body["items"].as_array().unwrap().len(), 4);
+}
+
+fn time(value: &Value) -> chrono::DateTime<Utc> {
+    value.as_str().unwrap().parse().unwrap()
+}
+
+#[tokio::test]
+async fn admin_jobs_show_when_their_data_expires() {
+    let Some(db) = test_db("admin_jobs_show_when_their_data_expires").await else {
+        return;
+    };
+    let env = unique_environment();
+    let now = Utc::now();
+    let finished = aged_job(
+        &db,
+        &env,
+        now - Duration::days(40),
+        Some(now - Duration::days(5)),
+    )
+    .await;
+    let unfinished = aged_job(&db, &env, now - Duration::days(10), None).await;
+    let old_unfinished = aged_job(&db, &env, now - Duration::days(31), None).await;
+    let old_finished = aged_job(
+        &db,
+        &env,
+        now - Duration::days(32),
+        Some(now - Duration::days(31)),
+    )
+    .await;
+    let setup = admin_setup("http://127.0.0.1:1", "https://s3.example.com", Some(db)).await;
+
+    let (status, list) = admin_call(
+        &setup,
+        "GET",
+        &format!("/api/admin/jobs?environment={env}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let items = list["items"].as_array().unwrap();
+    assert_eq!(items.len(), 4);
+    for (id, available, reference_field) in [
+        (finished, true, "finished_at"),
+        (unfinished, true, "created_at"),
+        (old_unfinished, false, "created_at"),
+        (old_finished, false, "finished_at"),
+    ] {
+        let item = items.iter().find(|i| i["id"] == id.to_string()).unwrap();
+        assert_eq!(item["data_available"], available, "{item}");
+        assert_eq!(
+            time(&item["data_expires_at"]),
+            time(&item[reference_field]) + Duration::days(30)
+        );
+        let (status, detail) =
+            admin_call(&setup, "GET", &format!("/api/admin/jobs/{id}"), None).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["job"]["data_available"], available);
+        assert_eq!(
+            detail["job"]["data_expires_at"], item["data_expires_at"],
+            "{detail}"
+        );
+    }
 }

@@ -120,6 +120,8 @@ pub struct BaktaHandler {
     pub version: VersionResponse,
     pub version_v2: V2VersionResponse,
     pub state_handler: Arc<StateHandler>,
+    /// Days after which the job data in S3 is deleted.
+    pub data_retention_days: i64,
 }
 
 const JOB_RETENTION_DAYS: i64 = 35;
@@ -823,6 +825,7 @@ impl BaktaHandler {
                 baktfold_db_version: baktfold_database_version,
             },
             state_handler,
+            data_retention_days: crate::retention::DEFAULT_DATA_RETENTION_DAYS,
         }
     }
 }

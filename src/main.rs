@@ -23,6 +23,7 @@ mod argo_and_catalog_tests;
 mod bakta_handler;
 mod metrics;
 mod openapi;
+mod retention;
 mod s3_handler;
 mod stats;
 #[cfg(test)]
@@ -135,6 +136,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
+    if let Ok(days) = dotenvy::var("DATA_RETENTION_DAYS")
+        && !days.is_empty()
+    {
+        bakta_handler.data_retention_days = match days.parse::<i64>() {
+            Ok(days) if days > 0 => days,
+            _ => return Err(format!("Invalid DATA_RETENTION_DAYS value: {days}").into()),
+        };
+    }
     let bakta_handler = Arc::new(bakta_handler);
 
     tracing::info!(?socket_address, "Starting bakta web backend");

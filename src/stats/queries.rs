@@ -8,6 +8,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::StatsDb;
+use crate::retention::{data_expires_at, is_data_available, reference_time};
 
 /// Common filter: environment (`None` means all) and a `created_at` range.
 #[derive(Debug, Clone, Default)]
@@ -257,6 +258,12 @@ pub struct JobListItem {
     pub created_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub runtime_seconds: Option<f64>,
+    /// When the job data in S3 is deleted.
+    #[sqlx(skip)]
+    pub data_expires_at: DateTime<Utc>,
+    /// True while the job data in S3 still exists.
+    #[sqlx(skip)]
+    pub data_available: bool,
     /// Live Argo workflow name, null without a live workflow.
     #[sqlx(skip)]
     pub workflow_name: Option<String>,
@@ -301,6 +308,32 @@ pub struct JobRecord {
     pub queue_seconds: Option<f64>,
     pub error_message: Option<String>,
     pub updated_at: DateTime<Utc>,
+    /// When the job data in S3 is deleted.
+    #[sqlx(skip)]
+    pub data_expires_at: DateTime<Utc>,
+    /// True while the job data in S3 still exists.
+    #[sqlx(skip)]
+    pub data_available: bool,
+}
+
+impl JobListItem {
+    pub fn set_retention(&mut self, retention_days: i64, now: DateTime<Utc>) {
+        self.data_expires_at = data_expires_at(
+            reference_time(self.finished_at, self.created_at),
+            retention_days,
+        );
+        self.data_available = is_data_available(self.data_expires_at, now);
+    }
+}
+
+impl JobRecord {
+    pub fn set_retention(&mut self, retention_days: i64, now: DateTime<Utc>) {
+        self.data_expires_at = data_expires_at(
+            reference_time(self.finished_at, self.created_at),
+            retention_days,
+        );
+        self.data_available = is_data_available(self.data_expires_at, now);
+    }
 }
 
 pub(super) fn escape_like(value: &str) -> String {
