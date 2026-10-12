@@ -186,6 +186,26 @@ impl StatsDb {
         Ok(())
     }
 
+    /// Name and phase of the current workflow of each job whose recorded
+    /// workflow has a live row.
+    pub async fn job_workflows(
+        &self,
+        namespace: &str,
+    ) -> Result<HashMap<Uuid, crate::bakta_handler::LiveWorkflow>> {
+        let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT workflows.job_id, workflows.name, workflows.phase
+             FROM workflows JOIN jobs ON jobs.id = workflows.job_id AND jobs.workflow_name = workflows.name
+             WHERE workflows.namespace = $1 AND workflows.gone_at IS NULL",
+        )
+        .bind(namespace)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, name, phase)| (id, crate::bakta_handler::LiveWorkflow { name, phase }))
+            .collect())
+    }
+
     /// Live workflows of one environment, or of all with `None`, newest first.
     /// They have no nodes: `spec.suspend` is set for suspended workflows.
     pub async fn live_workflows(

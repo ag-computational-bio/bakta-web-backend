@@ -263,12 +263,19 @@ pub async fn list_jobs(
         ids: None,
     };
     let db = stats_db(&state)?;
-    let live = state
-        .state_handler
-        .live_workflows
-        .read()
-        .expect("live workflows lock poisoned")
-        .clone();
+    // Finished jobs are only in the `workflows` table, live ones are newer in memory.
+    let mut live = db
+        .job_workflows(state.state_handler.argo_client.namespace())
+        .await
+        .map_err(AdminError::database)?;
+    live.extend(
+        state
+            .state_handler
+            .live_workflows
+            .read()
+            .expect("live workflows lock poisoned")
+            .clone(),
+    );
     let phases = comma_list(params.workflow_phase.as_deref());
     if !phases.is_empty() {
         query.ids = Some(

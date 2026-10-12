@@ -567,6 +567,31 @@ async fn admin_job_list_shows_live_workflows_from_the_poll() {
     .await;
     assert_eq!(list["total"], 1);
     assert_eq!(list["items"][0]["id"], running.to_string());
+
+    // A finished job that is no longer in memory gets its workflow from the table.
+    sqlx::query("UPDATE jobs SET workflow_name = 'wf-table' WHERE id = $1")
+        .bind(without)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    store_listed_workflows(
+        &setup.handler,
+        &json!({"items": [{
+            "metadata": {"name": "wf-table", "labels": {"jobid": without.to_string(), "bakta-environment": env}},
+            "status": {"phase": "Succeeded"}
+        }]}),
+    )
+    .await;
+    let (_, list) = admin_call(
+        &setup,
+        "GET",
+        &format!("/api/admin/jobs?environment={env}&workflow_phase=Succeeded"),
+        None,
+    )
+    .await;
+    assert_eq!(list["total"], 1, "{list}");
+    assert_eq!(list["items"][0]["id"], without.to_string());
+    assert_eq!(list["items"][0]["workflow_name"], "wf-table");
 }
 
 #[tokio::test]
