@@ -148,12 +148,19 @@ fn response_phase(workflow: &ArgoWorkflow, fallback: &str) -> String {
 /// the job's reservation until it is done.
 const TABLE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Logs a failed or timed out admin write to the `workflows` table.
-fn log_table_write(result: Result<anyhow::Result<()>, tokio::time::error::Elapsed>) {
+/// Logs a failed or timed out admin write to the `workflows` table and
+/// returns true on success.
+fn log_table_write(result: Result<anyhow::Result<()>, tokio::time::error::Elapsed>) -> bool {
     match result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => tracing::warn!(%error, "admin_workflow_store_failed"),
-        Err(_) => tracing::warn!("admin_workflow_store_timed_out"),
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "admin_workflow_store_failed");
+            false
+        }
+        Err(_) => {
+            tracing::warn!("admin_workflow_store_timed_out");
+            false
+        }
     }
 }
 
@@ -197,7 +204,14 @@ async fn store_workflow_gone(state: &BaktaHandler, name: Option<&str>, job_id: O
             (None, None) => Ok(()),
         }
     };
-    log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, write).await);
+    // A deleted workflow sends no watch event, so a failed write is repeated.
+    if !log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, write).await) {
+        match (name, job_id) {
+            (Some(name), _) => handler.keep_unwritten(Vec::new(), vec![name.to_string()], now),
+            (None, Some(id)) => handler.keep_unwritten_job(id, now),
+            (None, None) => {}
+        }
+    }
 }
 
 /// Updates the job state and record after an Argo retry requested at

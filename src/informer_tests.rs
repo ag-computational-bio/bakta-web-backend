@@ -1167,3 +1167,84 @@ async fn a_pending_completion_does_not_undo_a_newer_state_of_its_workflow() {
         Some(crate::api_structs::ArgoStatus::Running)
     ));
 }
+
+#[tokio::test]
+async fn a_failed_gone_write_after_an_admin_delete_is_repeated() {
+    let Some(db) = test_db("a_failed_gone_write_after_an_admin_delete").await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    let done = kube_workflow("wf-g", id, "Failed", true, 7);
+    let kube = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", LIVE))
+        .and(query_param_is_missing("watch"))
+        .respond_with(page(Vec::new(), "", "10"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("watch", "true"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .respond_with(page(vec![done.clone()], "", "10"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{WORKFLOWS}/wf-g")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(done.clone()))
+        .mount(&kube)
+        .await;
+    let argo = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&argo)
+        .await;
+    let setup = crate::admin_api_tests::admin_setup(
+        &argo.uri(),
+        "https://s3.example.com",
+        Some((*db).clone()),
+    )
+    .await;
+    let state = setup.handler.state_handler.clone();
+    start(
+        state.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the reconciled workflow", || async {
+        live_names(&db).await == ["wf-g"] && job_status(&db, id).await.is_some()
+    })
+    .await;
+
+    // The table fails while the admin deletes the job.
+    sqlx::query("ALTER TABLE workflows RENAME TO workflows_away")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let (status, body) = crate::admin_api_tests::admin_call(
+        &setup,
+        "DELETE",
+        &format!("/api/admin/jobs/{id}"),
+        None,
+    )
+    .await;
+    sqlx::query("ALTER TABLE workflows_away RENAME TO workflows")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    wait_for("the repeated gone write", || async {
+        live_names(&db).await.is_empty()
+    })
+    .await;
+}

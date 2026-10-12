@@ -628,10 +628,13 @@ pub(crate) struct Completions {
 /// Writes to the `workflows` table that failed and are repeated.
 #[derive(Default)]
 pub(crate) struct Unwritten {
-    items: HashMap<String, SimpleStatus>,
-    gone: HashSet<String>,
-    /// The earliest observation time of the kept writes.
-    observed_at: Option<DateTime<Utc>>,
+    /// Workflow states by name, with the time they were seen.
+    items: HashMap<String, (SimpleStatus, DateTime<Utc>)>,
+    /// Workflows to mark as gone, with the time they were seen gone.
+    gone: HashMap<String, DateTime<Utc>>,
+    /// Jobs whose workflows are all to be marked as gone, after an admin
+    /// delete without a known workflow name.
+    gone_jobs: HashMap<Uuid, DateTime<Utc>>,
 }
 
 /// Changes waiting to be applied together.
@@ -977,7 +980,7 @@ impl StateHandler {
     }
 
     /// Keeps workflow table writes that failed, to repeat them later.
-    fn keep_unwritten(
+    pub(crate) fn keep_unwritten(
         &self,
         items: Vec<SimpleStatus>,
         gone: Vec<String>,
@@ -986,36 +989,55 @@ impl StateHandler {
         let mut unwritten = self.unwritten.lock().expect("unwritten lock poisoned");
         for item in items {
             unwritten.gone.remove(&item.metadata.name);
-            unwritten.items.insert(item.metadata.name.clone(), item);
+            unwritten
+                .items
+                .insert(item.metadata.name.clone(), (item, observed_at));
         }
         for name in gone {
             unwritten.items.remove(&name);
-            unwritten.gone.insert(name);
+            unwritten.gone.insert(name, observed_at);
         }
-        let earliest = unwritten
-            .observed_at
-            .map_or(observed_at, |at| at.min(observed_at));
-        unwritten.observed_at = Some(earliest);
     }
 
-    /// Repeats the workflow table writes that failed. A row that was written
-    /// later with a newer state is kept.
+    /// Keeps a failed write that marks all workflows of a job as gone.
+    pub(crate) fn keep_unwritten_job(&self, id: Uuid, observed_at: DateTime<Utc>) {
+        self.unwritten
+            .lock()
+            .expect("unwritten lock poisoned")
+            .gone_jobs
+            .insert(id, observed_at);
+    }
+
+    /// Repeats the workflow table writes that failed, each with the time it
+    /// was seen. A row that was written later with a newer state is kept.
     async fn write_unwritten(&self) {
-        let (items, gone, observed_at) = {
-            let mut unwritten = self.unwritten.lock().expect("unwritten lock poisoned");
-            let Some(observed_at) = unwritten.observed_at.take() else {
-                return;
-            };
-            let items: Vec<SimpleStatus> =
-                std::mem::take(&mut unwritten.items).into_values().collect();
-            let gone: Vec<String> = std::mem::take(&mut unwritten.gone).into_iter().collect();
-            (items, gone, observed_at)
+        let unwritten =
+            std::mem::take(&mut *self.unwritten.lock().expect("unwritten lock poisoned"));
+        for (item, observed_at) in unwritten.items.into_values() {
+            let item = [item];
+            if !self.record_changed_workflows(&item, &[], observed_at).await {
+                let [item] = item;
+                self.keep_unwritten(vec![item], Vec::new(), observed_at);
+            }
+        }
+        for (name, observed_at) in unwritten.gone {
+            let gone = [name];
+            if !self.record_changed_workflows(&[], &gone, observed_at).await {
+                let [name] = gone;
+                self.keep_unwritten(Vec::new(), vec![name], observed_at);
+            }
+        }
+        let Some(db) = self.stats.db() else {
+            return;
         };
-        if !self
-            .record_changed_workflows(&items, &gone, observed_at)
-            .await
-        {
-            self.keep_unwritten(items, gone, observed_at);
+        for (id, observed_at) in unwritten.gone_jobs {
+            let remove = db.remove_job_workflows(self.argo_client.namespace(), observed_at, id);
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(10), remove).await,
+                Ok(Ok(()))
+            ) {
+                self.keep_unwritten_job(id, observed_at);
+            }
         }
     }
 
