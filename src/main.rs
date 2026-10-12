@@ -24,6 +24,8 @@ mod backfill;
 mod bakta_handler;
 mod informer;
 #[cfg(test)]
+mod informer_tests;
+#[cfg(test)]
 mod job_secret_tests;
 mod metrics;
 mod openapi;
