@@ -1313,3 +1313,121 @@ async fn the_reconcile_completes_only_when_the_job_records_are_written() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn the_reconcile_adopts_a_newer_completed_attempt_than_the_recorded_one() {
+    let Some(db) = test_db("the_reconcile_adopts_a_newer_completed_attempt").await else {
+        return;
+    };
+    let mut completed = Vec::new();
+    let mut jobs = Vec::new();
+    for known_creation in [true, false] {
+        let id = Uuid::new_v4();
+        let mut failed = kube_workflow(&format!("wf-a-{known_creation}"), id, "Failed", true, 5);
+        failed["metadata"]["creationTimestamp"] =
+            (Utc::now() - Duration::hours(3)).to_rfc3339().into();
+        // The record names the failed attempt: the update of the resubmit
+        // was lost with a restart.
+        record_final_state(&db, &failed).await;
+        sqlx::query("DELETE FROM workflows")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        if !known_creation {
+            // Old and backfilled records have no creation time.
+            sqlx::query("UPDATE jobs SET workflow_created_at = NULL WHERE id = $1")
+                .bind(id)
+                .execute(db.pool())
+                .await
+                .unwrap();
+        }
+        let resubmitted =
+            kube_workflow(&format!("wf-b-{known_creation}"), id, "Succeeded", true, 6);
+        completed.extend([failed, resubmitted]);
+        jobs.push((id, format!("wf-b-{known_creation}")));
+    }
+    let kube = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", LIVE))
+        .and(query_param_is_missing("watch"))
+        .respond_with(page(Vec::new(), "", "10"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("watch", "true"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+        .mount(&kube)
+        .await;
+    // The newer attempts come on a later page.
+    let (older, newer): (Vec<Value>, Vec<Value>) = completed.into_iter().partition(|workflow| {
+        workflow["metadata"]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("wf-a")
+    });
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .and(query_param_is_missing("continue"))
+        .respond_with(page(older.clone(), "p2", "10"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .and(query_param("continue", "p2"))
+        .respond_with(page(newer.clone(), "", "10"))
+        .mount(&kube)
+        .await;
+    for workflow in older.iter().chain(newer.iter()) {
+        let name = workflow["metadata"]["name"].as_str().unwrap();
+        Mock::given(method("GET"))
+            .and(path(format!("{WORKFLOWS}/{name}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(workflow))
+            .mount(&kube)
+            .await;
+    }
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new((*db).clone(), JobVersions::default()),
+    );
+    let state = handler.state_handler.clone();
+    start(
+        state.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the reconcile", || async {
+        state.reconciled.load(std::sync::atomic::Ordering::Relaxed)
+    })
+    .await;
+    for (id, newer) in jobs {
+        let (name, status, created): (Option<String>, String, Option<chrono::DateTime<Utc>>) =
+            sqlx::query_as(
+                "SELECT workflow_name, status, workflow_created_at FROM jobs WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(name.as_deref(), Some(newer.as_str()));
+        assert_eq!(status, "succeeded");
+        assert!(created.is_some());
+        let served = state
+            .user_job_state(id, TEST_SECRET)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            served.status,
+            Some(crate::api_structs::ArgoStatus::Succeeded)
+        ));
+    }
+}

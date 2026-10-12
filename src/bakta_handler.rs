@@ -1283,8 +1283,8 @@ impl StateHandler {
         let ids: Vec<Uuid> = by_job.keys().copied().collect();
         let recorded = match self.stats.db() {
             Some(db) if !ids.is_empty() => {
-                match tokio::time::timeout(TABLE_WRITE_TIMEOUT, db.workflow_names(&ids)).await {
-                    Ok(Ok(names)) => names,
+                match tokio::time::timeout(TABLE_WRITE_TIMEOUT, db.workflow_attempts(&ids)).await {
+                    Ok(Ok(attempts)) => attempts,
                     _ => {
                         tracing::warn!("recorded_workflow_names_failed");
                         return None;
@@ -1304,37 +1304,59 @@ impl StateHandler {
         let mut polled = Vec::new();
         let mut metadata = Vec::new();
         let mut deferred = deferred;
+        let mut incomplete = false;
+        let key =
+            |item: &SimpleStatus| (item.metadata.creation_timestamp, item.metadata.name.clone());
         for (id, workflows) in by_job {
-            // Without a recorded workflow the newest one is current, which
-            // may be on a later page: such jobs wait for the end of the list.
+            // The newest attempt is current when the job has no recorded
+            // workflow, or when it was created after the recorded one (for
+            // example a resubmit whose record update was lost). A record
+            // without creation time counts as older than any attempt.
+            let newest = workflows.iter().max_by_key(|item| key(item)).copied();
+            let candidate = newest.filter(|item| match recorded.get(&id) {
+                None => true,
+                Some((name, created)) => {
+                    item.metadata.name != *name
+                        && match (item.metadata.creation_timestamp, created) {
+                            (Some(attempt), Some(recorded)) => attempt > *recorded,
+                            (Some(_), None) => true,
+                            (None, _) => false,
+                        }
+                }
+            });
+            // Such an attempt may have a newer one on a later page: these
+            // jobs wait for the end of the list.
             if let Some(deferred) = deferred.as_deref_mut()
-                && !recorded.contains_key(&id)
+                && let Some(candidate) = candidate
             {
-                for item in workflows {
-                    let key = |item: &SimpleStatus| {
-                        (item.metadata.creation_timestamp, item.metadata.name.clone())
-                    };
-                    if deferred
-                        .get(&id)
-                        .is_none_or(|newest| key(newest) < key(item))
-                    {
-                        deferred.insert(id, item.clone());
-                    }
+                if deferred
+                    .get(&id)
+                    .is_none_or(|newest| key(newest) < key(candidate))
+                {
+                    deferred.insert(id, candidate.clone());
                 }
                 continue;
             }
-            // The recorded workflow is current. Another page or the watch
-            // has it when it is not in this page.
-            let current = match recorded.get(&id) {
-                Some(name) => workflows
+            // Else the recorded workflow is current. Another page or the
+            // watch has it when it is not in this page.
+            let current = candidate.or_else(|| {
+                let (name, _) = recorded.get(&id)?;
+                workflows
                     .iter()
                     .find(|item| item.metadata.name == *name)
-                    .copied(),
-                None => workflows
-                    .iter()
-                    .max_by_key(|item| (item.metadata.creation_timestamp, &item.metadata.name))
-                    .copied(),
-            };
+                    .copied()
+            });
+            // A job that is being started, deleted or resubmitted is written
+            // by a later reconcile.
+            if self
+                .starting_jobs
+                .lock()
+                .expect("starting jobs lock poisoned")
+                .contains(&id)
+            {
+                incomplete = true;
+                continue;
+            }
             let Some(item) = current else {
                 continue;
             };
@@ -1373,7 +1395,7 @@ impl StateHandler {
             self.stats
                 .record(StatsEvent::PolledMetadata(chunk.to_vec()));
         }
-        Some(for_memory)
+        (!incomplete).then_some(for_memory)
     }
 
     /// Drops finished jobs from memory once the database has their final
