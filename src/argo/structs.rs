@@ -135,6 +135,7 @@ impl From<&SimpleStatus> for ArgoWorkflow {
                 name: item.metadata.name.clone(),
                 labels: item.metadata.labels.clone(),
                 creation_timestamp: item.metadata.creation_timestamp,
+                resource_version: item.metadata.resource_version.clone(),
             },
             spec: item.spec.clone(),
             status: ArgoWorkflowStatus {
@@ -251,6 +252,9 @@ pub struct ArgoWorkflowMetadata {
     pub labels: HashMap<String, String>,
     #[serde(default)]
     pub creation_timestamp: Option<DateTime<Utc>>,
+    /// Kubernetes resource version of this state.
+    #[serde(default)]
+    pub resource_version: Option<String>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

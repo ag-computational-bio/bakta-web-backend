@@ -88,6 +88,10 @@ async fn record_final_state(db: &crate::stats::StatsDb, workflow: &Value) {
     db.apply(&crate::stats::StatsEvent::Polled(vec![polled]))
         .await
         .unwrap();
+    let row = crate::argo::structs::ArgoWorkflow::from(&item);
+    db.upsert_workflows("bakta", Utc::now() - Duration::hours(1), &[row])
+        .await
+        .unwrap();
 }
 
 async fn live_names(db: &crate::stats::StatsDb) -> Vec<String> {
@@ -292,6 +296,26 @@ async fn the_watch_follows_live_workflows_and_records_completions_once() {
         .expect(1..)
         .mount(&kube)
         .await;
+    // The reconcile fetches only the completed workflow that the table
+    // does not have.
+    Mock::given(method("GET"))
+        .and(path(format!("{WORKFLOWS}/wf-done")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(kube_workflow(
+            "wf-done",
+            done,
+            "Succeeded",
+            true,
+            50,
+        )))
+        .expect(1)
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{WORKFLOWS}/wf-recorded")))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&kube)
+        .await;
     Mock::given(method("GET"))
         .and(path(format!("{WORKFLOWS}/wf-quick")))
         .respond_with(ResponseTemplate::new(500))
@@ -476,4 +500,109 @@ async fn without_a_database_finished_jobs_stay_in_memory() {
         job.status,
         Some(crate::api_structs::ArgoStatus::Succeeded)
     ));
+}
+
+const METADATA_ACCEPT: &str = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1";
+
+/// Serves no live workflows, a watch without events and `completed` as the
+/// completed workflows: their metadata with `metadata`, else in full. Single
+/// fetches must not happen.
+async fn reconcile_server(completed: &[Value], metadata: ResponseTemplate) -> MockServer {
+    let kube = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", LIVE))
+        .and(query_param_is_missing("watch"))
+        .respond_with(page(Vec::new(), "", "10"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("watch", "true"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .and(wiremock::matchers::header("accept", METADATA_ACCEPT))
+        .respond_with(metadata)
+        .with_priority(1)
+        .expect(1)
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .respond_with(page(completed.to_vec(), "", "10"))
+        .with_priority(2)
+        .expect(1)
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(format!("^{WORKFLOWS}/.+")))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&kube)
+        .await;
+    kube
+}
+
+async fn reconcile_with(db: &crate::stats::StatsDb, kube: &MockServer, jobs: &[Uuid]) {
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new((*db).clone(), JobVersions::default()),
+    );
+    start(
+        handler.state_handler.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    for id in jobs {
+        wait_for("the reconciled jobs", || async {
+            job_status(db, *id).await.as_deref() == Some("succeeded")
+        })
+        .await;
+    }
+}
+
+fn completed_workflows(count: usize) -> (Vec<Uuid>, Vec<Value>) {
+    let jobs: Vec<Uuid> = (0..count).map(|_| Uuid::new_v4()).collect();
+    let workflows = jobs
+        .iter()
+        .enumerate()
+        .map(|(index, id)| kube_workflow(&format!("wf-{index}"), *id, "Succeeded", true, 7))
+        .collect();
+    (jobs, workflows)
+}
+
+#[tokio::test]
+async fn many_missing_completed_workflows_are_fetched_as_a_full_page() {
+    let Some(db) = test_db("many_missing_completed_workflows").await else {
+        return;
+    };
+    let (jobs, workflows) = completed_workflows(60);
+    let metadata: Vec<Value> = workflows
+        .iter()
+        .map(|workflow| json!({"metadata": workflow["metadata"]}))
+        .collect();
+    let kube = reconcile_server(&workflows, page(metadata, "", "10")).await;
+    reconcile_with(&db, &kube, &jobs).await;
+    assert_eq!(live_names(&db).await.len(), 60);
+}
+
+#[tokio::test]
+async fn a_refused_metadata_list_falls_back_to_the_full_list() {
+    let Some(db) = test_db("a_refused_metadata_list").await else {
+        return;
+    };
+    let (jobs, workflows) = completed_workflows(2);
+    let kube = reconcile_server(&workflows, ResponseTemplate::new(406)).await;
+    reconcile_with(&db, &kube, &jobs).await;
+    assert_eq!(live_names(&db).await.len(), 2);
 }

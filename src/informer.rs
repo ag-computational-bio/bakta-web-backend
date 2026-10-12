@@ -39,6 +39,11 @@ use crate::{
 /// Label selectors of workflows that are not completed, and of completed ones.
 const LIVE_SELECTOR: &str = "workflows.argoproj.io/completed!=true";
 const COMPLETED_SELECTOR: &str = "workflows.argoproj.io/completed=true";
+/// Accept header of a list with only the metadata of each workflow.
+const METADATA_ACCEPT: &str = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1";
+/// Above this many changed completed workflows in one page, the full page
+/// is fetched instead of the single workflows.
+const FULL_PAGE_THRESHOLD: usize = 50;
 const SERVICE_ACCOUNT_CA: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 const PAGE_SIZE: &str = "500";
 const PAGE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -120,6 +125,20 @@ impl KubeApi {
         selector: &str,
         next: Option<&str>,
     ) -> Result<(Vec<SimpleStatus>, Option<String>, Option<String>)> {
+        self.list_page_as(selector, next, false)
+            .await?
+            .context("full workflow list refused")
+    }
+
+    /// Like `list_page`. With `metadata_only`, only the metadata of the
+    /// workflows is requested (name, uid, labels, resource version), and
+    /// `None` means that the API server refused this form.
+    async fn list_page_as(
+        &self,
+        selector: &str,
+        next: Option<&str>,
+        metadata_only: bool,
+    ) -> Result<Option<(Vec<SimpleStatus>, Option<String>, Option<String>)>> {
         let mut url = url::Url::parse(&self.workflows_url)?;
         url.query_pairs_mut()
             .append_pair("labelSelector", selector)
@@ -127,16 +146,24 @@ impl KubeApi {
         if let Some(token) = next {
             url.query_pairs_mut().append_pair("continue", token);
         }
-        let page: Page<Box<RawValue>> = self
+        let mut request = self
             .client
             .get(url)
             .bearer_auth(&self.token)
-            .timeout(PAGE_TIMEOUT)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+            .timeout(PAGE_TIMEOUT);
+        if metadata_only {
+            request = request.header(reqwest::header::ACCEPT, METADATA_ACCEPT);
+        }
+        let response = request.send().await?;
+        if metadata_only
+            && matches!(
+                response.status(),
+                reqwest::StatusCode::NOT_ACCEPTABLE | reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+            )
+        {
+            return Ok(None);
+        }
+        let page: Page<Box<RawValue>> = response.error_for_status()?.json().await?;
         let mut items = Vec::new();
         for item in page.items {
             match serde_json::from_str::<KubeWorkflow>(item.get()) {
@@ -145,7 +172,7 @@ impl KubeApi {
             }
         }
         let next = page.metadata.next.filter(|token| !token.is_empty());
-        Ok((items, next, page.metadata.resource_version))
+        Ok(Some((items, next, page.metadata.resource_version)))
     }
 
     /// All workflows that are not completed, and the resource version of
@@ -624,22 +651,34 @@ fn take_secret_hashes(items: &mut [SimpleStatus]) -> HashMap<String, String> {
 }
 
 /// Lists the completed workflows once, page by page, and writes those that
-/// the database does not have in this state yet. Jobs in memory get the
-/// final state of their workflow like after a completion. Then all rows of
-/// workflows that Kubernetes no longer has are marked as gone. Without a
-/// database, all finished jobs are kept in memory instead, as before.
+/// the database does not have in this state yet. Only the metadata is
+/// listed: full workflows are fetched only when their row is missing or has
+/// another resource version, one by one or, when many changed, as a full
+/// page. Jobs in memory get the final state of their workflow like after a
+/// completion. Then all rows of workflows that Kubernetes no longer has are
+/// marked as gone. Without a database, all completed workflows are fetched
+/// and their finished jobs kept in memory instead, as before.
 async fn reconcile_completed(
     api: Arc<KubeApi>,
     state: Arc<StateHandler>,
     changes: UnboundedSender<WorkflowChange>,
     observed_at: DateTime<Utc>,
 ) {
+    let mut metadata_only = state.stats.db().is_some();
     let mut names: Vec<String> = Vec::new();
     let mut next: Option<String> = None;
-    let mut count = 0;
+    let (mut count, mut fetched) = (0, 0);
     loop {
-        let (page, page_next) = match api.list_page(COMPLETED_SELECTOR, next.as_deref()).await {
-            Ok((page, page_next, _)) => (page, page_next),
+        let listed = api
+            .list_page_as(COMPLETED_SELECTOR, next.as_deref(), metadata_only)
+            .await;
+        let (listed, page_next) = match listed {
+            Ok(Some((listed, page_next, _))) => (listed, page_next),
+            Ok(None) => {
+                tracing::warn!("workflow_metadata_list_refused, listing full workflows");
+                metadata_only = false;
+                continue;
+            }
             Err(error) => {
                 state.metrics.record_watch_error();
                 tracing::warn!(
@@ -649,14 +688,26 @@ async fn reconcile_completed(
                 return;
             }
         };
+        count += listed.len();
+        names.extend(listed.iter().map(|item| item.metadata.name.clone()));
+        let page = if metadata_only {
+            match state
+                .changed_completed_workflows(&api, listed, next.as_deref())
+                .await
+            {
+                Some(page) => page,
+                None => return,
+            }
+        } else {
+            listed
+        };
+        fetched += page.len();
         let mut page = page;
         // Without a database, the jobs are kept in memory with their secret.
         let hashes = match state.stats.db() {
             Some(_) => take_secret_hashes(&mut page),
             None => HashMap::new(),
         };
-        count += page.len();
-        names.extend(page.iter().map(|item| item.metadata.name.clone()));
         state.upsert_workflows(&page, observed_at).await;
         for item in state.reconcile_jobs(page, &hashes, observed_at).await {
             let jobs = job_id_label(&item).into_iter().collect();
@@ -680,10 +731,74 @@ async fn reconcile_completed(
             .cloned(),
     );
     state.remove_missing_workflows(&names, observed_at).await;
-    tracing::info!(workflows = count, "completed_workflows_reconciled");
+    tracing::info!(workflows = count, fetched, "completed_workflows_reconciled");
 }
 
 impl StateHandler {
+    /// The full completed workflows of a metadata page (listed with the
+    /// continue token `next`) whose row is missing or has another resource
+    /// version. `None` when the lookup fails.
+    async fn changed_completed_workflows(
+        &self,
+        api: &KubeApi,
+        listed: Vec<SimpleStatus>,
+        next: Option<&str>,
+    ) -> Option<Vec<SimpleStatus>> {
+        let db = self.stats.db()?;
+        let names: Vec<String> = listed
+            .iter()
+            .map(|item| item.metadata.name.clone())
+            .collect();
+        let lookup = db.workflow_versions(self.argo_client.namespace(), &names);
+        let stored = match tokio::time::timeout(Duration::from_secs(10), lookup).await {
+            Ok(Ok(stored)) => stored,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "workflow_versions_lookup_failed");
+                return None;
+            }
+            Err(_) => {
+                tracing::warn!("workflow_versions_lookup_timed_out");
+                return None;
+            }
+        };
+        let changed: Vec<String> = listed
+            .into_iter()
+            .filter(|item| {
+                stored
+                    .get(&item.metadata.name)
+                    .is_none_or(|version| *version != item.metadata.resource_version)
+            })
+            .map(|item| item.metadata.name)
+            .collect();
+        if changed.is_empty() {
+            return Some(Vec::new());
+        }
+        if changed.len() > FULL_PAGE_THRESHOLD {
+            return match api.list_page(COMPLETED_SELECTOR, next).await {
+                Ok((page, _, _)) => Some(page),
+                Err(error) => {
+                    self.metrics.record_watch_error();
+                    tracing::warn!(
+                        error = format!("{error:#}"),
+                        "completed_workflows_list_failed"
+                    );
+                    None
+                }
+            };
+        }
+        let mut page = Vec::new();
+        for name in changed {
+            match api.get(&name).await {
+                Ok(item) => page.extend(item.filter(is_completed).and_then(relevant)),
+                Err(error) => {
+                    self.metrics.record_watch_error();
+                    tracing::warn!(workflow_name = name, %error, "workflow_fetch_failed");
+                }
+            }
+        }
+        Some(page)
+    }
+
     /// IDs of the jobs with an unresolved submission.
     fn marked_jobs(&self) -> Vec<Uuid> {
         self.unknown_submissions

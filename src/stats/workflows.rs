@@ -44,30 +44,33 @@ impl StatsDb {
         sqlx::query(
             "INSERT INTO workflows (namespace, name, job_id, environment, workflow_kind, template, phase,
                                     created_at, started_at, finished_at, message, suspended, origin, labels,
-                                    gone_at, updated_at)
+                                    resource_version, gone_at, updated_at)
              SELECT $1, name, job_id, environment, workflow_kind, template, phase, created_at, started_at,
-                 finished_at, message, suspended, origin, labels, NULL, $2
+                 finished_at, message, suspended, origin, labels, resource_version, NULL, $2
              FROM UNNEST($3::text[], $4::uuid[], $5::text[], $6::text[], $7::text[], $8::text[],
                          $9::timestamptz[], $10::timestamptz[], $11::timestamptz[], $12::text[],
-                         $13::boolean[], $14::text[], $15::jsonb[])
+                         $13::boolean[], $14::text[], $15::jsonb[], $16::text[])
                  AS polled(name, job_id, environment, workflow_kind, template, phase, created_at,
-                           started_at, finished_at, message, suspended, origin, labels)
+                           started_at, finished_at, message, suspended, origin, labels, resource_version)
              ON CONFLICT (namespace, name) DO UPDATE SET job_id = EXCLUDED.job_id,
                  environment = EXCLUDED.environment, workflow_kind = EXCLUDED.workflow_kind,
                  template = EXCLUDED.template, phase = EXCLUDED.phase, created_at = EXCLUDED.created_at,
                  started_at = EXCLUDED.started_at, finished_at = EXCLUDED.finished_at,
                  message = EXCLUDED.message, suspended = EXCLUDED.suspended, origin = EXCLUDED.origin,
-                 labels = EXCLUDED.labels, gone_at = NULL, updated_at = EXCLUDED.updated_at
+                 labels = EXCLUDED.labels,
+                 resource_version = COALESCE(EXCLUDED.resource_version, workflows.resource_version),
+                 gone_at = NULL, updated_at = EXCLUDED.updated_at
              WHERE workflows.updated_at <= EXCLUDED.updated_at
                  AND (workflows.job_id, workflows.environment, workflows.workflow_kind, workflows.template,
                       workflows.phase, workflows.created_at, workflows.started_at, workflows.finished_at,
                       workflows.message, workflows.suspended, workflows.origin, workflows.labels,
-                      workflows.gone_at)
+                      workflows.gone_at, workflows.resource_version)
                  IS DISTINCT FROM
                      (EXCLUDED.job_id, EXCLUDED.environment, EXCLUDED.workflow_kind, EXCLUDED.template,
                       EXCLUDED.phase, EXCLUDED.created_at, EXCLUDED.started_at, EXCLUDED.finished_at,
                       EXCLUDED.message, EXCLUDED.suspended, EXCLUDED.origin, EXCLUDED.labels,
-                      NULL::timestamptz)",
+                      NULL::timestamptz,
+                      COALESCE(EXCLUDED.resource_version, workflows.resource_version))",
         )
         .bind(namespace)
         .bind(observed_at)
@@ -112,9 +115,28 @@ impl StatsDb {
                 })
                 .collect::<Vec<_>>(),
         )
+        .bind(text(|workflow| workflow.metadata.resource_version.clone()))
         .execute(self.pool())
         .await?;
         Ok(())
+    }
+
+    /// Resource versions of the stored live rows of the named workflows.
+    /// A row without one maps to `None`.
+    pub async fn workflow_versions(
+        &self,
+        namespace: &str,
+        names: &[String],
+    ) -> Result<HashMap<String, Option<String>>> {
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT name, resource_version FROM workflows
+             WHERE namespace = $1 AND name = ANY($2) AND gone_at IS NULL",
+        )
+        .bind(namespace)
+        .bind(names)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows.into_iter().collect())
     }
 
     /// Marks the named workflows as gone from Argo at `observed_at`.
@@ -231,6 +253,7 @@ impl StatsDb {
                         name: row.try_get("name")?,
                         labels,
                         creation_timestamp: row.try_get("created_at")?,
+                        resource_version: None,
                     },
                     spec: ArgoWorkflowSpec {
                         workflow_template_ref: row
