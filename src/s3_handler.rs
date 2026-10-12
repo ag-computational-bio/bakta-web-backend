@@ -23,6 +23,10 @@ pub struct S3Handler {
 
 const RESULT_DOWNLOAD_DURATION_SECONDS: i64 = 6 * 86400;
 const RESULT_EXISTENCE_CHECK_DURATION_SECONDS: i64 = 60;
+#[cfg(not(test))]
+const RESULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const RESULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub enum InputType {
     Fasta,
@@ -186,9 +190,19 @@ impl S3Handler {
             )
             .await?;
 
-        let response = self.client.get(url).send().await?;
+        // the timeout covers the body too, so a stalled read cannot block the caller;
+        // errors drop the URL, which carries a usable signature
+        let response = self
+            .client
+            .get(url)
+            .timeout(RESULT_READ_TIMEOUT)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
         match response.status() {
-            StatusCode::OK => Ok(Some(response.text().await?)),
+            StatusCode::OK => Ok(Some(
+                response.text().await.map_err(reqwest::Error::without_url)?,
+            )),
             StatusCode::NOT_FOUND => Ok(None),
             status => Err(anyhow!("Failed to read result file {key_name}: {status}")),
         }
@@ -699,6 +713,11 @@ mod tests {
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
+        Mock::given(method("GET"))
+            .and(path("/jobs/job-4/results/result.txt"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(10)))
+            .mount(&server)
+            .await;
 
         let handler = S3Handler::new(
             "access".to_string(),
@@ -728,6 +747,13 @@ mod tests {
                 .await
                 .is_err()
         );
+        // a stalled read ends with an error that does not show the signed URL
+        let error = handler
+            .read_result_text("job-4", "result.txt")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("Signature"), "{error}");
     }
 
     #[tokio::test]
