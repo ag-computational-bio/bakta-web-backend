@@ -20,6 +20,7 @@ mod api_structs;
 mod argo;
 #[cfg(test)]
 mod argo_and_catalog_tests;
+mod backfill;
 mod bakta_handler;
 #[cfg(test)]
 mod job_secret_tests;

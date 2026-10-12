@@ -632,17 +632,17 @@ fn non_empty(value: &Option<String>) -> Option<String> {
 
 /// Input details of a start request that go into the job statistics.
 #[derive(Default)]
-struct SubmissionDetails {
-    genus: Option<String>,
-    species: Option<String>,
-    strain: Option<String>,
-    sequence_count: Option<i32>,
-    total_length: Option<i64>,
-    config: Option<serde_json::Value>,
+pub(crate) struct SubmissionDetails {
+    pub(crate) genus: Option<String>,
+    pub(crate) species: Option<String>,
+    pub(crate) strain: Option<String>,
+    pub(crate) sequence_count: Option<i32>,
+    pub(crate) total_length: Option<i64>,
+    pub(crate) config: Option<serde_json::Value>,
 }
 
 impl SubmissionDetails {
-    fn from_v1(config: &crate::api_structs::JobConfig) -> Self {
+    pub(crate) fn from_v1(config: &crate::api_structs::JobConfig) -> Self {
         let mut value = serde_json::to_value(config).ok();
         // Only record whether a training file was given, not its value.
         if let Some(object) = value.as_mut().and_then(|value| value.as_object_mut())
@@ -662,7 +662,7 @@ impl SubmissionDetails {
         }
     }
 
-    fn from_v2(request: &V2StartRequest) -> Self {
+    pub(crate) fn from_v2(request: &V2StartRequest) -> Self {
         let mut details = match &request.workflow {
             WorkflowStartConfig::Bakta(config) | WorkflowStartConfig::BaktaBaktfold(config) => {
                 Self {
