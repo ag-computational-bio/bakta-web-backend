@@ -466,6 +466,8 @@ async fn delete_marks_database_only_jobs_as_deleted() {
         api_version: "v1".to_string(),
         name: None,
         created_at: Utc::now(),
+        secret_hash: None,
+        result_kind: None,
     }))
     .await
     .unwrap();
@@ -502,6 +504,8 @@ async fn delete_removes_a_workflow_the_backend_does_not_know() {
         api_version: "v2".to_string(),
         name: None,
         created_at: Utc::now(),
+        secret_hash: None,
+        result_kind: None,
     }))
     .await
     .unwrap();

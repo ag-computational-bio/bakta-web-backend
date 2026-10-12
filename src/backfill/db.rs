@@ -31,6 +31,7 @@ pub struct BackfillJob {
     pub versions: JobVersions,
     pub sequence_count: Option<i32>,
     pub total_length: Option<i64>,
+    pub argo_uid: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +43,7 @@ pub enum Fill {
 
 /// Columns that an existing record gets when they are NULL. The ID,
 /// environment, kind, API version, status and creation time are never changed.
-const FILL_COLUMNS: [&str; 20] = [
+const FILL_COLUMNS: [&str; 23] = [
     "outcome",
     "origin",
     "name",
@@ -63,6 +64,9 @@ const FILL_COLUMNS: [&str; 20] = [
     "baktfold_db_version",
     "sequence_count",
     "total_length",
+    "secret_hash",
+    "result_kind",
+    "argo_uid",
 ];
 
 /// Columns that belong to one workflow attempt. They are only filled when the
@@ -144,6 +148,9 @@ impl StatsDb {
             .bind(&job.versions.baktfold_db_version)
             .bind(job.sequence_count)
             .bind(job.total_length)
+            .bind(&job.job.secret_hash)
+            .bind(&job.job.result_kind)
+            .bind(job.argo_uid)
             .fetch_optional(self.pool())
             .await?;
         Ok(match inserted {
@@ -185,6 +192,8 @@ mod tests {
                 api_version: "v1".to_string(),
                 name: Some("genome.fasta".to_string()),
                 created_at,
+                secret_hash: None,
+                result_kind: None,
             },
             status: "expired".to_string(),
             outcome: Some("succeeded".to_string()),
@@ -207,6 +216,7 @@ mod tests {
             },
             sequence_count: Some(2),
             total_length: Some(5_000_000),
+            argo_uid: None,
         }
     }
 
@@ -288,6 +298,7 @@ mod tests {
             finished_at: Some(created_at + Duration::seconds(20)),
             error_message: Some("polled error".to_string()),
             origin: Some("staging.bakta.computational.bio".to_string()),
+            argo_uid: None,
         };
         db.apply(&StatsEvent::Polled(vec![polled])).await.unwrap();
         job.job.environment = "other".to_string();

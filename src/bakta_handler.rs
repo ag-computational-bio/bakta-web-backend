@@ -563,6 +563,8 @@ fn stats_new_job(state: &FullJobState, environment: &str, created_at: DateTime<U
         api_version: state.api_version.as_label_value().to_string(),
         name: Some(state.name.clone()),
         created_at,
+        secret_hash: state.secret.as_deref().map(stats::secret_hash),
+        result_kind: Some(result_kind_label_value(state.result_kind).to_string()),
     }
 }
 
@@ -647,6 +649,7 @@ pub(crate) fn polled_workflow_state(
                 message
             }),
         origin: item.metadata.labels.get("origin").cloned(),
+        argo_uid: Some(item.metadata.uid).filter(|uid| !uid.is_nil()),
     })
 }
 
@@ -1755,6 +1758,8 @@ impl StateHandler {
             api_version: api_version.as_label_value().to_string(),
             name: Some(stripped.clone()),
             created_at: now,
+            secret_hash: Some(stats::secret_hash(&secret)),
+            result_kind: Some(result_kind_label_value(result_kind).to_string()),
         }));
         self.job_state.write().await.insert(
             job_id,

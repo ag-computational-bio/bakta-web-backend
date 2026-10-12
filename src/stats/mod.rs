@@ -45,6 +45,9 @@ pub struct NewJob {
     pub api_version: String,
     pub name: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// SHA-256 hash of the job secret, see `secret_hash`.
+    pub secret_hash: Option<String>,
+    pub result_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,6 +84,8 @@ pub struct WorkflowState {
     pub error_message: Option<String>,
     /// The `origin` label. A missing label keeps the recorded origin.
     pub origin: Option<String>,
+    /// Argo uid of the workflow, for the logs of archived workflows.
+    pub argo_uid: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +127,16 @@ pub enum StatsEvent {
     },
 }
 
+/// Hex SHA-256 hash of a job secret. Only this hash is stored. The secrets
+/// are 32 random characters, so a hash without salt is enough.
+pub fn secret_hash(secret: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(secret.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 pub fn is_terminal_status(status: &str) -> bool {
     matches!(status, "succeeded" | "failed" | "error")
 }
@@ -147,8 +162,9 @@ impl StatsDb {
 
     async fn insert_job(&self, job: &NewJob, status: &str) -> Result<()> {
         sqlx::query(
-            "INSERT INTO jobs (id, environment, workflow_kind, api_version, status, name, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+            "INSERT INTO jobs (id, environment, workflow_kind, api_version, status, name, created_at,
+                               secret_hash, result_kind, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(job.id)
@@ -158,6 +174,8 @@ impl StatsDb {
         .bind(status)
         .bind(&job.name)
         .bind(job.created_at)
+        .bind(&job.secret_hash)
+        .bind(&job.result_kind)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -236,13 +254,16 @@ impl StatsDb {
             "WITH polled AS (
                  SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::timestamptz[],
                                       $5::timestamptz[], $6::timestamptz[], $7::text[], $8::text[],
-                                      $9::text[])
+                                      $9::text[], $10::text[], $11::text[], $12::uuid[])
                      AS polled(id, workflow_name, status, created_at, started_at, finished_at, error_message,
-                               environment, origin)
+                               environment, origin, secret_hash, result_kind, argo_uid)
              ), target AS (
                  SELECT jobs.id, polled.workflow_name, polled.status, polled.started_at,
                      polled.finished_at, polled.error_message, polled.environment,
                      COALESCE(polled.origin, jobs.origin) AS origin,
+                     COALESCE(jobs.secret_hash, polled.secret_hash) AS secret_hash,
+                     COALESCE(jobs.result_kind, polled.result_kind) AS result_kind,
+                     COALESCE(polled.argo_uid, jobs.argo_uid) AS argo_uid,
                      COALESCE(jobs.submitted_at, polled.created_at) AS submitted_at,
                      CASE WHEN polled.status IN ('succeeded', 'failed', 'error')
                          THEN polled.status ELSE jobs.outcome END AS outcome
@@ -264,16 +285,19 @@ impl StatsDb {
                  started_at = wanted.started_at, finished_at = wanted.finished_at,
                  runtime_seconds = wanted.runtime_seconds, queue_seconds = wanted.queue_seconds,
                  error_message = wanted.error_message, environment = wanted.environment,
-                 origin = wanted.origin, updated_at = now()
+                 origin = wanted.origin, secret_hash = wanted.secret_hash,
+                 result_kind = wanted.result_kind, argo_uid = wanted.argo_uid, updated_at = now()
              FROM wanted
              WHERE jobs.id = wanted.id
                  AND (jobs.workflow_name, jobs.status, jobs.outcome, jobs.submitted_at,
                       jobs.started_at, jobs.finished_at, jobs.runtime_seconds,
-                      jobs.queue_seconds, jobs.error_message, jobs.environment, jobs.origin)
+                      jobs.queue_seconds, jobs.error_message, jobs.environment, jobs.origin,
+                      jobs.secret_hash, jobs.result_kind, jobs.argo_uid)
                  IS DISTINCT FROM
                      (wanted.workflow_name, wanted.status, wanted.outcome, wanted.submitted_at,
                       wanted.started_at, wanted.finished_at, wanted.runtime_seconds,
-                      wanted.queue_seconds, wanted.error_message, wanted.environment, wanted.origin)",
+                      wanted.queue_seconds, wanted.error_message, wanted.environment, wanted.origin,
+                      wanted.secret_hash, wanted.result_kind, wanted.argo_uid)",
         )
         .bind(&ids)
         .bind(column(|state| Some(state.workflow_name.clone())))
@@ -284,6 +308,9 @@ impl StatsDb {
         .bind(column(|state| state.error_message.clone()))
         .bind(column(|state| Some(state.job.environment.clone())))
         .bind(column(|state| state.origin.clone()))
+        .bind(column(|state| state.job.secret_hash.clone()))
+        .bind(column(|state| state.job.result_kind.clone()))
+        .bind(states.iter().map(|state| state.argo_uid).collect::<Vec<_>>())
         .execute(&self.pool)
         .await?;
         let metadata: Vec<_> = states
@@ -621,6 +648,8 @@ mod tests {
             api_version: "v2".to_string(),
             name: Some("sample".to_string()),
             created_at,
+            secret_hash: None,
+            result_kind: None,
         }
     }
 
@@ -649,6 +678,7 @@ mod tests {
             finished_at,
             error_message: None,
             origin: None,
+            argo_uid: None,
         }])
     }
 
@@ -696,6 +726,70 @@ mod tests {
             .unwrap();
         assert_eq!(summary.runtime_seconds.avg, Some(100.0));
         assert_eq!(summary.runtime_seconds.p50, Some(100.0));
+    }
+
+    #[test]
+    fn test_secret_hash_is_sha256_and_never_contains_the_secret() {
+        let hash = secret_hash("abc");
+        assert_eq!(
+            hash,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let secret = "Q2xhdWRlU2VjcmV0MTIzNDU2Nzg5MDEy";
+        assert_ne!(secret_hash(secret), secret);
+        assert!(!secret_hash(secret).contains(secret));
+    }
+
+    #[tokio::test]
+    async fn test_secret_hash_result_kind_and_uid_are_recorded() {
+        let Some(db) = test_db("test_secret_hash_result_kind_and_uid_are_recorded").await else {
+            return;
+        };
+        let job = new_job(&unique_environment(), Utc::now());
+        db.apply(&StatsEvent::Created(NewJob {
+            secret_hash: Some(secret_hash("first")),
+            result_kind: Some("baktfold".to_string()),
+            ..job.clone()
+        }))
+        .await
+        .unwrap();
+        let record = row(&db, job.id).await;
+        assert_eq!(
+            record.get::<Option<String>, _>("secret_hash"),
+            Some(secret_hash("first"))
+        );
+        // A poll fills empty columns only and sets the workflow uid.
+        let uid = Uuid::new_v4();
+        let StatsEvent::Polled(mut states) = polled(&job, "wf-1", "running", None, None) else {
+            unreachable!()
+        };
+        states[0].job.secret_hash = Some(secret_hash("other"));
+        states[0].job.result_kind = Some("bakta".to_string());
+        states[0].argo_uid = Some(uid);
+        db.apply(&StatsEvent::Polled(states)).await.unwrap();
+        let record = row(&db, job.id).await;
+        assert_eq!(
+            record.get::<Option<String>, _>("secret_hash"),
+            Some(secret_hash("first"))
+        );
+        assert_eq!(
+            record.get::<Option<String>, _>("result_kind").as_deref(),
+            Some("baktfold")
+        );
+        assert_eq!(record.get::<Option<Uuid>, _>("argo_uid"), Some(uid));
+        // A job polled without a record gets the hash of its workflow label.
+        let other = new_job(&unique_environment(), Utc::now());
+        let StatsEvent::Polled(mut states) = polled(&other, "wf-2", "running", None, None) else {
+            unreachable!()
+        };
+        states[0].job.secret_hash = Some(secret_hash("label"));
+        db.apply(&StatsEvent::Polled(states)).await.unwrap();
+        assert_eq!(
+            row(&db, other.id)
+                .await
+                .get::<Option<String>, _>("secret_hash"),
+            Some(secret_hash("label"))
+        );
     }
 
     #[tokio::test]
@@ -809,6 +903,7 @@ mod tests {
             finished_at: Some(t0 + ChronoDuration::seconds(5)),
             error_message: Some("OOMKilled".to_string()),
             origin: Some("bakta.computational.bio".to_string()),
+            argo_uid: None,
         }]))
         .await
         .unwrap();
@@ -1124,6 +1219,7 @@ mod tests {
                 finished_at: None,
                 error_message: None,
                 origin: origin.map(str::to_string),
+                argo_uid: None,
             }])
         };
         db.apply(&poll(Some("bakta.computational.bio")))

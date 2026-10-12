@@ -94,6 +94,8 @@ fn new_job(environment: &str, kind: &str, created_minutes_ago: i64) -> NewJob {
         api_version: "v2".to_string(),
         name: Some("sample".to_string()),
         created_at: Utc::now() - Duration::minutes(created_minutes_ago),
+        secret_hash: None,
+        result_kind: None,
     }
 }
 
@@ -129,6 +131,7 @@ async fn finished_job(db: &StatsDb, environment: &str, kind: &str, status: &'sta
         finished_at: Some(job.created_at + Duration::seconds(110)),
         error_message: None,
         origin: None,
+        argo_uid: None,
     }]))
     .await
     .unwrap();
@@ -162,6 +165,7 @@ pub async fn aged_job(
         finished_at,
         error_message: None,
         origin: None,
+        argo_uid: None,
     }]))
     .await
     .unwrap();

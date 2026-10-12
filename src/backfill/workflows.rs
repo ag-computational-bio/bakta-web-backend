@@ -10,6 +10,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::{db::BackfillJob, parse};
+use crate::stats::NewJob;
 use crate::{
     argo::structs::{
         ArgoWorkflowSpec, SimpleStatus, SimpleStatusStatus, StatusMetadata, WorkflowTemplateRef,
@@ -34,6 +35,8 @@ pub struct Workflow {
     pub template: String,
     /// The `parameter` argument: the Bakta command line.
     pub parameter: String,
+    /// Hash of the `secret` label. The secret itself is not kept.
+    pub secret_hash: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -161,8 +164,13 @@ fn parse_workflow(value: serde_json::Value) -> Result<Workflow> {
         .map(|parameter| parameter.value)
         .unwrap_or_default();
     let mut item = workflow.into_simple_status();
-    // The job secret grants access to the results and is never needed here.
-    item.metadata.labels.remove("secret");
+    // The job secret grants access to the results: only its hash is kept.
+    let secret_hash = item
+        .metadata
+        .labels
+        .remove("secret")
+        .filter(|secret| !secret.is_empty())
+        .map(|secret| crate::stats::secret_hash(&secret));
     let template = item
         .spec
         .workflow_template_ref
@@ -173,6 +181,7 @@ fn parse_workflow(value: serde_json::Value) -> Result<Workflow> {
         item,
         template,
         parameter,
+        secret_hash,
     })
 }
 
@@ -317,7 +326,10 @@ pub fn backfill_job(workflow: &Workflow, now: DateTime<Utc>) -> Option<BackfillJ
         .map(|(_, versions)| versions)
         .unwrap_or_default();
     Some(BackfillJob {
-        job: polled.job,
+        job: NewJob {
+            secret_hash: workflow.secret_hash.clone(),
+            ..polled.job
+        },
         status: status.to_string(),
         outcome: terminal.then(|| polled.status.to_string()),
         origin: polled.origin,
@@ -335,6 +347,7 @@ pub fn backfill_job(workflow: &Workflow, now: DateTime<Utc>) -> Option<BackfillJ
         versions,
         sequence_count: None,
         total_length: None,
+        argo_uid: polled.argo_uid,
     })
 }
 
@@ -407,6 +420,9 @@ mod tests {
         assert_eq!(workflow.item.status.phase, "Succeeded");
         assert_eq!(workflow.item.metadata.labels["jobid"], JOB);
         assert!(!workflow.item.metadata.labels.contains_key("secret"));
+        let hash = workflow.secret_hash.as_deref().unwrap();
+        assert_eq!(hash, crate::stats::secret_hash("not-a-real-secret"));
+        assert!(!hash.contains("not-a-real-secret"));
         assert!(parse_workflow(json!({"metadata": {}})).is_err());
     }
 

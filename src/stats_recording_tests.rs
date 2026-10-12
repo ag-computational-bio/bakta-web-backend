@@ -423,6 +423,8 @@ async fn current_workflow_comes_from_the_database_after_a_restart() {
         api_version: "v2".to_string(),
         name: None,
         created_at: now,
+        secret_hash: None,
+        result_kind: None,
     }))
     .await
     .unwrap();
@@ -628,6 +630,8 @@ async fn late_resubmit_does_not_reset_a_finished_workflow_of_a_database_only_job
         api_version: "v2".to_string(),
         name: None,
         created_at: created,
+        secret_hash: None,
+        result_kind: None,
     };
     db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
     db.apply(&StatsEvent::Submitted(Box::new(
@@ -728,6 +732,8 @@ async fn resubmit_of_a_database_only_job_is_current_before_the_writer_catches_up
         api_version: "v2".to_string(),
         name: None,
         created_at: created,
+        secret_hash: None,
+        result_kind: None,
     }))
     .await
     .unwrap();
@@ -811,6 +817,8 @@ async fn staging_record(db: &StatsDb, id: Uuid, finished: chrono::DateTime<Utc>,
         api_version: "v2".to_string(),
         name: None,
         created_at: finished - Duration::hours(1),
+        secret_hash: None,
+        result_kind: None,
     };
     db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
     db.apply(&StatsEvent::Submitted(Box::new(
@@ -839,6 +847,7 @@ async fn staging_record(db: &StatsDb, id: Uuid, finished: chrono::DateTime<Utc>,
         finished_at: Some(finished),
         error_message: None,
         origin: None,
+        argo_uid: None,
     }]))
     .await
     .unwrap();
