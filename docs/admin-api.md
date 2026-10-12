@@ -15,7 +15,9 @@ Both sides implement exactly what is described here. Changes to the contract are
 | Variable | Example | Meaning |
 |---|---|---|
 | `ENVIRONMENT` | `production` | Environment name written to every job record and to the `bakta-environment` workflow label. Default `production`. |
-| `STATS_DATABASE_URL` | `postgres://bakta_stats:...@bakta-stats-postgres:5432/bakta_stats` | Statistics database. If unset, job recording and the statistics endpoints are disabled. |
+| `STATS_DATABASE_URL` | `postgres://bakta_stats:...@bakta-stats-postgres:5432/bakta_stats` | Statistics database. If unset, job recording and the statistics endpoints are disabled, and finished jobs are kept in memory for 35 days instead of being served from the database (see "Workflow watch"). |
+| `KUBERNETES_API_URL` | `https://127.0.0.1:6443` | Kubernetes API server for the workflow watch. Default in a pod: `https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT`. One of them must be set. The token is `ARGO_TOKEN`: its service account needs `get`, `list` and `watch` on `workflows.argoproj.io` in `ARGO_NAMESPACE`. |
+| `KUBERNETES_CA_FILE` | `/etc/kube/ca.crt` | CA certificate of the API server. Default: the service account CA of the pod when it exists, else the system certificates. |
 | `ADMIN_OIDC_ISSUER` | `https://auth.bakta.computational.bio/realms/bakta` | Keycloak realm issuer. If unset, the admin API is disabled. |
 | `ADMIN_OIDC_CLIENT_ID` | `bakta-admin` | Keycloak client used by the admin UI. Tokens must have this value in `azp` (or in `aud`). |
 | `ADMIN_GROUP` | `bakta-admin` | Group name that must appear in the token `groups` claim. Default `bakta-admin`. |
@@ -61,11 +63,14 @@ Migrations are embedded in the backend and run at startup. Table `jobs`, one row
 | `runtime_seconds` | double precision, null | `finished_at - started_at`, null when one of them is null |
 | `queue_seconds` | double precision, null | `started_at - submitted_at`, null when one of them is null or `started_at` is before `submitted_at` |
 | `error_message` | text, null | Short reason for failed jobs, if known |
+| `secret_hash` | text, null | Hex SHA-256 hash of the job secret. Set at job init, else from the `secret` label of the workflow. Never sent by any API. |
+| `result_kind` | text, null | `bakta`, `bakta_proteins` or `baktfold`, for the result files of a finished job |
+| `argo_uid` | uuid, null | Argo uid of the current workflow, for the logs of archived workflows |
 | `updated_at` | timestamptz | Last change |
 
 Rules:
 
-- The job secret, upload URLs and IP addresses are never stored.
+- The job secret, upload URLs and IP addresses are never stored. Only the SHA-256 hash of the job secret is stored (`secret_hash`), see "Workflow watch".
 - Writes never block or fail a user request. If the database is unreachable, the backend logs a warning and continues.
 - Records are kept forever. Expired or deleted jobs keep their row with status `expired` or `deleted`.
 - Statistics count finished, succeeded, failed and error jobs by `outcome`, so a job still counts after it was deleted or has expired.
@@ -75,9 +80,9 @@ Rules:
 
 The workflow state in a job record follows the job's current workflow in Argo:
 
-- On every poll (every 15 seconds), the backend takes the current workflow of each job: the workflow recorded for the job, else the one recorded in the database if it is listed, else the newest by creation time and then by name.
+- When a watched workflow changes or completes (see "Workflow watch"), the backend takes the current workflow of its job: the workflow recorded for the job, else the one recorded in the database if it is known, else the newest by creation time and then by name. The text below calls such an update a poll, as before.
 - From that workflow it sets `workflow_name`, `status` (`Pending` is `submitted`, `Running` is `running`, a final phase is `succeeded`, `failed` or `error`), `started_at` (null while `submitted`), `finished_at`, `runtime_seconds`, `queue_seconds`, `error_message` and, for a final phase, `outcome`.
-- A record is only written when it differs from this state. The comparison is made against the database, so a wrong or outdated record is corrected by the next poll.
+- A record is only written when it differs from this state. The comparison is made against the database, so a wrong or outdated record is corrected by the next update of the job, or at the latest by the reconcile after the next start (see "Workflow watch").
 - A poll also sets `environment` (see below) and `origin` (from the `origin` label; a workflow without this label keeps the stored value).
 - Records with status `deleted` or `expired` are not changed by polls, except `environment` and `origin`. A poll also sets these two columns on the existing records of deleted and expired jobs whose workflow Argo still lists, including workflows that finished more than 35 days ago. It never creates a record for such a job and changes no other column.
 - A resubmit records the new workflow for the job at once, also for a job that is only in the database (for example after a restart). So the next poll takes the new workflow as current, even before the database write of the resubmit is done.
@@ -104,21 +109,23 @@ Table `workflows` keeps the live Bakta Web workflows for `GET /workflows` and th
 
 How the table is written:
 
-- Every poll (every 15 seconds) writes the Bakta Web workflows of the list (see "Workflow labels" below). A row is only written when it differs. Workflows that the poll no longer lists get `gone_at`. The poll does not fetch the nodes of all workflows: running workflows are fetched a second time with their nodes, to find those that wait in a `Suspend` step. If that fails, the poll does not write the table.
+- The workflow watch (see "Workflow watch") writes every Bakta Web workflow (see "Workflow labels" below) that is added or changes, about one second after the change. A completed workflow is written once with its final state. A workflow that is deleted gets `gone_at`. A row is only written when it differs.
+- After each full list (at startup and after a re-list), the completed workflows are written once and all rows of workflows that Kubernetes no longer has get `gone_at`.
+- `suspended` comes from `spec.suspend`. No workflow template has a `Suspend` step, and Kubernetes objects have no nodes.
 - Admin actions (retry, resubmit, stop, resume, delete, bulk runs) write the workflow that Argo returns, or set `gone_at` for deleted workflows, right away.
-- A row is never set to a state that is older than the one it has, so a poll that fetched its list before an admin action does not undo the action's write.
-- So the data is at most one poll interval old, except rows changed by admin actions, which are current. A new or deployed backend fills the table with its first poll.
+- A row is never set to a state that is older than the one it has, so a change seen before an admin action does not undo the action's write.
+- So the data is about one second old while the watch is connected. The backfill fills the table with all Bakta Web workflows (see "Backfill").
 
 ### Environment of a workflow
 
-Production and staging backends watch the same Argo namespace. A poll takes the environment of a workflow from its labels:
+Production and staging backends watch the same Argo namespace. The backend takes the environment of a workflow from its labels:
 
 1. The `bakta-environment` label, when it is a valid environment name.
 2. Else `staging` when the workflow has an `api-version` label. Before workflows were labelled with their environment, only the staging backend set `api-version`.
 3. Else `staging` when the `origin` label starts with `staging.`, `http_localhost` or `http_127.0.0.1` (the staging and local development UIs).
 4. Else `production` (workflows of the old production backend).
 
-Polls correct the `environment` of existing records with this rule. The workflow list and the bulk actions use the same rule to filter workflows by environment.
+Workflow updates correct the `environment` of existing records with this rule. The workflow list and the bulk actions use the same rule to filter workflows by environment.
 
 ### Input statistics in the V2 start request
 
@@ -139,12 +146,39 @@ The web UI fills it from the parsed FASTA input. The backend stores it in `seque
 
 `bakta-web-backend backfill` imports the job history once and exits. The Argo server only lists recent workflows, so the backfill reads all `Workflow` objects from the Kubernetes API (in-cluster service account, `get` and `list` on `workflows.argoproj.io` in `ARGO_NAMESPACE`). It needs `STATS_DATABASE_URL` and the S3 variables. The GitOps repository has a Kubernetes Job for it.
 
-- Only Bakta Web workflows are used, and only the newest workflow of each job.
+- All Bakta Web workflows are written to the `workflows` table, with the state they had before the list. A row that the backend changed later is kept, also a gone one.
+- For the job records, only the newest workflow of each job is used.
+- The `secret` label is replaced by its hash (`secret_hash`) right after reading. The secret is never kept.
 - Missing jobs are inserted. Existing records only get columns that are still null. Existing values, the environment and the status are never changed.
 - Environment, origin, status, outcome, times, runtime, queue time and error message are derived like in the poll. A job past the 35 day job retention gets status `expired` with its `outcome`.
 - Organism and `config` come from the Bakta command line of the workflow, in the shape the start request of its API version is stored. Bakta and Baktfold versions come from the template name.
 - For succeeded `bakta` and `bakta_baktfold` jobs, `total_length`, `sequence_count` and `bakta_db_version` come from Bakta's summary `jobs/<id>/results/result.txt` in S3, if it still exists.
+- `secret_hash`, `result_kind` and `argo_uid` are filled like the other columns.
 - Running it again changes nothing that is already filled. Errors of single jobs are logged and skipped. It logs progress every 1000 jobs and a final summary (`inserted`, `filled`, `skipped`, `s3_missing`, `errors`).
+
+## Workflow watch
+
+The backend no longer polls the Argo server. It reads Workflow objects from the Kubernetes API (`/apis/argoproj.io/v1alpha1/namespaces/<ARGO_NAMESPACE>/workflows`) and keeps only workflows that are not completed in memory:
+
+- At startup it lists the workflows with the label selector `workflows.argoproj.io/completed!=true` in pages of 500, then watches them from the resource version of the list, with bookmarks. Changes are applied in batches, about one second after the first change.
+- A dropped watch is resumed from the last resource version (events and bookmarks) with a backoff of 1 to 60 seconds. Only when Kubernetes answers `410 Gone` (or sends an `ERROR` event with code 410) are the workflows listed again. Workflows missing from the new list count as deleted. Re-lists are logged (`workflow_watch_expired`).
+- A workflow that completes gets the label `workflows.argoproj.io/completed=true` and leaves the watched set. Kubernetes then sends a `DELETED` event that has the state before this change, not the final state. So the backend fetches this one workflow from the Kubernetes API: if it exists with the completed label, it completed, and its final state is applied and written once to the `jobs` and `workflows` tables. If it does not exist, it was deleted: its row gets `gone_at` and the job keeps its last known state, as before. A `MODIFIED` event that already has the completed label is taken as a completion without a fetch.
+- After each list, the completed workflows (`workflows.argoproj.io/completed=true`) are listed once, page by page. Records that the database does not have in this final state are written (the database compares, so unchanged records are not written). This covers workflows that completed while the backend was down. After that, no completed workflow is fetched again.
+- Every 15 seconds the backend drops expired jobs, checks unresolved start requests, applies jobs that were skipped (reserved, or a failed database lookup) and deletes `workflows` rows that are gone for an hour. While the watch is not connected, it only drops expired jobs, so the last known state stays.
+- Health: `workflow_watch_last_event_timestamp_seconds` (last event, bookmark or watch start), `workflow_last_list_timestamp_seconds` (last full list), `workflow_watch_errors_total` (failed lists, watches and fetches) and `workflow_relists_total` on the metrics endpoint. They replace `argo_poll_errors_total`.
+
+Finished jobs:
+
+- With the statistics database, a finished job leaves memory once its record has the final state (status and workflow name). Until then the final state is recorded again every 15 seconds. Memory only holds jobs with a watched workflow, jobs being started, deleted or resubmitted, and unresolved start requests.
+- Every hour, records of finished jobs (`succeeded`, `failed`, `error`) whose finish (or start) is older than 35 days get status `expired`, like jobs in memory before.
+- User requests (V1 and V2 job list, results, logs, delete and start) for a job that is not in memory read its record. Records with status `created`, `deleted` or `expired`, and finished records older than 35 days, are not found. The given secret is hashed and compared with `secret_hash` in constant time. A record without `secret_hash` denies every secret. Logs of finished jobs are read from the Argo archive with `argo_uid`.
+- Without the statistics database, the completed workflows of the list after startup are applied to memory, and finished jobs stay in memory for 35 days as before.
+
+What still calls Argo:
+
+- The Argo server: submit, single workflow actions (retry, resubmit, stop, resume, delete), logs and node details of one workflow (also the admin job page), the label lookup of a job's workflows after an unclear start or before a delete without a known workflow name, and the single workflow fetches of a real bulk run.
+- The Kubernetes API: the list and watch of workflows that are not completed, one fetch per workflow that leaves the watched set, and the list of completed workflows after each list.
+- Nothing lists all workflows from the Argo server.
 
 ## Data retention
 
@@ -162,7 +196,7 @@ For a job without a database record, the backend uses the time of its in-memory 
 
 A start request can fail in a way that leaves open whether Argo created the workflow (for example a timeout or an unreadable answer). The backend then looks for a workflow with the job's `jobid` label. If it finds one, the job uses it. If the lookup fails or finds nothing, the job is marked as unresolved, because Argo may still be creating the workflow.
 
-While a job is unresolved, start and delete requests for it are refused with `409` and `The result of an earlier start request is not known yet, try again later`. The polling loop resolves the job:
+While a job is unresolved, start and delete requests for it are refused with `409` and `The result of an earlier start request is not known yet, try again later`. The workflow updates resolve the job. Each update (after a change, and every 15 seconds while the watch is connected) counts as a poll:
 
 - A polled workflow list that contains a workflow with the job's `jobid` label resolves it at once. The job then uses that workflow. A poll that runs while the job is being started, deleted or resubmitted skips the job and keeps the mark. A later poll resolves it.
 - Otherwise it stays unresolved until at least 3 polls fetched after the mark found no such workflow and at least 10 minutes have passed since the mark. Then a new start is allowed.
@@ -320,7 +354,7 @@ Input statistics over jobs with a non-null `total_length`. `workflow_kind` is op
 ```
 
 `organism` joins genus, species and strain with spaces, or is null.
-`workflow_name` and `workflow_phase` come from the workflow list the backend polls from Argo (no Argo request per row). Both are null when no live workflow exists for the job.
+`workflow_name` and `workflow_phase` come from the backend's workflow state in memory for jobs with a watched workflow, else from the `workflows` table row of the job's recorded workflow (no Argo request per row). Both are null when no live workflow exists for the job.
 
 ### `GET /jobs/{id}`
 
@@ -376,16 +410,16 @@ A workflow is suspended when it is `Running` and has `spec.suspend` set to true 
 Deletes the Argo workflow (Argo removes its pods) and sets the job status to `deleted`. With `purge_data=true` the job's S3 objects are deleted too. Response: `{ "deleted_workflow": true, "purged_objects": 12 }`.
 A workflow can be live and archived at the same time. So every delete (admin or user) deletes the live workflow by name, and also the archive record when the job is archived. A workflow or archive record that Argo does not find counts as already deleted.
 When `data_available` is false, the S3 listing and purge are skipped and `purged_objects` is `0`. The workflow is still deleted and the job is still marked `deleted`.
-After a delete (admin or user) or an expiry, the polling loop never adds the job back, even when its workflow list was fetched before the delete or Argo still lists the workflow for a while. The backend keeps the IDs of deleted and expired jobs in memory for 35 days, the time it keeps job state. After that, a poll treats any finished workflow of the job as expired. The list is lost on a restart. With the statistics database, a poll checks the jobs that are not in memory in one query and does not add a job back whose record has status `deleted` (it goes back on the list instead). If that query fails, the poll adds no job that is not in memory, and a later poll adds them. Without the statistics database, a poll after a restart can add a deleted job back while Argo still lists one of its workflows. This is rare, because a delete removes the live workflow.
+After a delete (admin or user) or an expiry, the workflow updates never add the job back, even when its workflow list was fetched before the delete or Argo still lists the workflow for a while. The backend keeps the IDs of deleted and expired jobs in memory for 35 days, the time it keeps job state. After that, a poll treats any finished workflow of the job as expired. The list is lost on a restart. With the statistics database, a poll checks the jobs that are not in memory in one query and does not add a job back whose record has status `deleted` (it goes back on the list instead). If that query fails, the poll adds no job that is not in memory, and a later poll adds them. Without the statistics database, a poll after a restart can add a deleted job back while Argo still lists one of its workflows. This is rare, because a delete removes the live workflow.
 `409` while the job is being started or resubmitted. While the delete runs, a start request for the job is refused with `409`.
 `409` with `{ "error": "The result of an earlier start request is not known yet, try again later" }` while an earlier start request may have created a workflow that the backend has not found yet (see Unresolved start requests). The user delete endpoints (`DELETE /api/v1/job/delete`, `DELETE /api/v2/job/delete`) answer `409` in the same case.
-When the backend knows no workflow name for the job (for example a start request created a workflow, but the backend restarted before a poll found it), the delete first looks up live workflows with the job's `jobid` label in Argo and deletes them. If that lookup fails, the delete answers `503` and changes nothing: no workflow is deleted, no S3 data is purged and the job is not marked `deleted`. The user delete endpoints do the same lookup for jobs that are in memory and also answer `503` when it fails. A job that is not in memory, for example after a restart, is not looked up: the user delete answers `200` without contacting Argo.
+When the backend knows no workflow name for the job (for example a start request created a workflow, but the backend restarted before a poll found it), the delete first looks up live workflows with the job's `jobid` label in Argo and deletes them. If that lookup fails, the delete answers `503` and changes nothing: no workflow is deleted, no S3 data is purged and the job is not marked `deleted`. The user delete endpoints do the same lookup for jobs that are in memory and also answer `503` when it fails. A job that is not in memory and has a record (a finished job) is deleted like a job in memory after its secret was checked against `secret_hash`: its workflow by name and its archive record by `argo_uid`. A job that is neither in memory nor in the database is not looked up: the user delete answers `200` without contacting Argo.
 
 ### `GET /workflows?environment&phase&orphans`
 
 For this endpoint and for `POST /workflows/bulk`, `environment` defaults to the backend's own `ENVIRONMENT`. The backend keeps the Bakta Web workflows whose environment, derived as in "Environment of a workflow", matches. So workflows without a `bakta-environment` label are found too.
 
-With the statistics database, this endpoint and the bulk dry run read the `workflows` table (see "Live workflows"), newest first. Without it, they list all workflows from Argo. A real bulk run always lists the workflows from Argo again.
+With the statistics database, this endpoint and the bulk preview read the `workflows` table (see "Live workflows"), newest first. Without it, they read the workflows that the backend watches (only workflows that are not completed). A real bulk run takes the same workflows and fetches each one from Argo right before acting on it.
 
 Live Argo workflows of this backend, including ones without a job record. `phase`: comma separated (`Pending`, `Running`, `Succeeded`, `Failed`, `Error`).
 
@@ -418,7 +452,7 @@ Runs one action on all live workflows that match a filter.
 - `filter` fields are all optional and combine with AND. `q` matches the workflow name or job ID, case insensitive substring. `finished_before_hours` keeps only workflows that finished more than that many hours ago. `environment` defaults to the backend's own environment, `all` is allowed.
 - `action`: `delete`, `stop` (Argo terminate), `retry` (Argo retry), `resume` (Argo resume of suspended workflows), `resubmit` (Argo resubmit; the job record then points to the new workflow).
 - `dry_run` defaults to `true`: return the matching workflows and, per workflow, whether the action applies, without changing anything.
-- `workflow_names`: when given (a real run after a dry run), only workflows in this list that still match the filter are processed. A real run checks the filter and the applicability against the current workflow list from Argo, not against the `workflows` table.
+- `workflow_names`: when given (a real run after a dry run), only workflows in this list that still match the filter are processed. A real run fetches each of these workflows from Argo right before acting, and checks the filter and the applicability against that state. A workflow that Argo no longer has, or that no longer matches, is left out. A failed fetch gives an item with `result` `failed`.
 - Applicability: `stop` for `Pending` and `Running`, `retry` for `Failed` and `Error`, `resume` only for suspended workflows, `resubmit` for any finished workflow (`Succeeded`, `Failed`, `Error`), `delete` for any workflow that is not `Pending` or `Running`.
 - `delete` does not apply to `Pending` and `Running` workflows: `applicable` is false and `reason` is `Still running, stop it first`. A real run skips them.
 - `retry` and `resubmit` only apply to the job's current workflow. An older workflow of a job that was resubmitted is not applicable (`reason` names the current workflow).
