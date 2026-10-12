@@ -310,3 +310,243 @@ pub fn backfill_job(workflow: &Workflow, now: DateTime<Utc>) -> Option<BackfillJ
         total_length: None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, TimeZone};
+    use serde_json::json;
+
+    /// A workflow as the Kubernetes API returns it, reduced to the used fields.
+    fn workflow_json(
+        name: &str,
+        job_id: &str,
+        template: &str,
+        created: &str,
+        labels: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut all_labels = json!({
+            "jobid": job_id,
+            "name": "genome.fasta",
+            "origin": "bakta.computational.bio",
+            "secret": "not-a-real-secret",
+            "workflows.argoproj.io/phase": "Succeeded",
+        });
+        all_labels
+            .as_object_mut()
+            .unwrap()
+            .extend(labels.as_object().unwrap().clone());
+        json!({
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "Workflow",
+            "metadata": {
+                "name": name,
+                "uid": "7c1a4bf6-0d43-4f4c-9d4c-3f1f6b1f0a01",
+                "creationTimestamp": created,
+                "labels": all_labels,
+            },
+            "spec": {
+                "arguments": {"parameters": [
+                    {"name": "jobid", "value": job_id},
+                    {"name": "parameter", "value": "--replicons /data/replicons.tsv --complete --genus 'Pantoea' --strain 'LMG 2665' --gram ?"},
+                ]},
+                "workflowTemplateRef": {"name": template},
+            },
+            "status": {
+                "phase": "Succeeded",
+                "startedAt": created,
+                "finishedAt": "2026-06-01T10:05:00Z",
+                "nodes": {"ignored": {"phase": "Succeeded"}},
+            },
+        })
+    }
+
+    const JOB: &str = "e1adc3a8-7e08-403c-8582-53f99aa588df";
+
+    fn workflow(name: &str, job_id: &str, template: &str, created: &str) -> Workflow {
+        parse_workflow(workflow_json(name, job_id, template, created, json!({}))).unwrap()
+    }
+
+    #[test]
+    fn test_parse_workflow_reads_the_used_fields() {
+        let workflow = workflow(
+            "bakta-job-a",
+            JOB,
+            "bakta-job-1.12.0",
+            "2026-06-01T10:00:00Z",
+        );
+        assert_eq!(workflow.template, "bakta-job-1.12.0");
+        assert!(workflow.parameter.starts_with("--replicons"));
+        assert_eq!(workflow.item.status.phase, "Succeeded");
+        assert_eq!(workflow.item.metadata.labels["jobid"], JOB);
+        assert!(!workflow.item.metadata.labels.contains_key("secret"));
+        assert!(parse_workflow(json!({"metadata": {}})).is_err());
+    }
+
+    #[test]
+    fn test_newest_workflow_per_job_is_kept() {
+        let other_job = "0b6c1f3e-55a1-4c55-9a43-0c5b8a3d2f10";
+        let workflows = vec![
+            workflow("wf-b", JOB, "bakta-job-1.12.0", "2026-06-01T10:00:00Z"),
+            workflow("wf-c", JOB, "bakta-job-1.12.0", "2026-06-02T10:00:00Z"),
+            workflow("wf-a", JOB, "bakta-job-1.12.0", "2026-06-02T10:00:00Z"),
+            workflow(
+                "wf-d",
+                other_job,
+                "bakta-job-1.12.0",
+                "2026-05-01T10:00:00Z",
+            ),
+            workflow(
+                "wf-e",
+                "not-a-uuid",
+                "bakta-job-1.12.0",
+                "2026-07-01T10:00:00Z",
+            ),
+        ];
+        let names: Vec<_> = newest_per_job(workflows)
+            .into_iter()
+            .map(|workflow| workflow.item.metadata.name)
+            .collect();
+        // Same creation time: the last name wins, like in the poll.
+        assert_eq!(names, ["wf-d", "wf-c"]);
+    }
+
+    #[test]
+    fn test_only_bakta_web_workflows_are_kept() {
+        assert!(is_bakta_web(&workflow(
+            "a",
+            JOB,
+            "bakta-job-1.11.3",
+            "2026-06-01T10:00:00Z"
+        )));
+        assert!(!is_bakta_web(&workflow(
+            "b",
+            JOB,
+            "other-job",
+            "2026-06-01T10:00:00Z"
+        )));
+        let labelled = workflow_json(
+            "c",
+            JOB,
+            "other-job",
+            "2026-06-01T10:00:00Z",
+            json!({"bakta-environment": "staging"}),
+        );
+        assert!(is_bakta_web(&parse_workflow(labelled).unwrap()));
+    }
+
+    #[test]
+    fn test_backfill_job_of_an_old_production_workflow() {
+        let workflow = workflow(
+            "bakta-job-a",
+            JOB,
+            "bakta-job-1.12.0",
+            "2026-06-01T10:00:00Z",
+        );
+        let now = Utc.with_ymd_and_hms(2026, 10, 12, 0, 0, 0).unwrap();
+        let job = backfill_job(&workflow, now).unwrap();
+        let created = Utc.with_ymd_and_hms(2026, 6, 1, 10, 0, 0).unwrap();
+        assert_eq!(job.job.id.to_string(), JOB);
+        assert_eq!(job.job.environment, "production");
+        assert_eq!(job.job.workflow_kind, "bakta");
+        assert_eq!(job.job.api_version, "v1");
+        assert_eq!(job.job.name.as_deref(), Some("genome.fasta"));
+        assert_eq!(job.job.created_at, created);
+        assert_eq!(job.status, "expired");
+        assert_eq!(job.outcome.as_deref(), Some("succeeded"));
+        assert_eq!(job.origin.as_deref(), Some("bakta.computational.bio"));
+        assert_eq!(job.submitted_at, Some(created));
+        assert_eq!(job.started_at, Some(created));
+        assert_eq!(job.finished_at, Some(created + Duration::minutes(5)));
+        assert_eq!(job.runtime_seconds, Some(300.0));
+        assert_eq!(job.queue_seconds, Some(0.0));
+        assert_eq!(job.error_message, None);
+        assert_eq!(job.genus.as_deref(), Some("Pantoea"));
+        assert_eq!(job.species, None);
+        assert_eq!(job.strain.as_deref(), Some("LMG 2665"));
+        assert_eq!(job.config.unwrap()["completeGenome"], json!(true));
+        assert_eq!(job.versions.bakta_version.as_deref(), Some("1.12.0"));
+        assert_eq!(job.versions.baktfold_version, None);
+    }
+
+    #[test]
+    fn test_backfill_job_of_a_recent_failed_staging_workflow() {
+        let mut value = workflow_json(
+            "bakta-baktfold-job-a",
+            JOB,
+            "bakta-baktfold-job-1.12.1-0.3.0",
+            "2026-06-01T09:58:00Z",
+            json!({"api-version": "v2", "workflow-kind": "bakta_baktfold",
+                   "origin": "staging.bakta.computational.bio"}),
+        );
+        value["status"]["phase"] = json!("Failed");
+        value["status"]["startedAt"] = json!("2026-06-01T10:00:00Z");
+        value["status"]["message"] = json!("child failed");
+        let now = Utc.with_ymd_and_hms(2026, 6, 2, 0, 0, 0).unwrap();
+        let job = backfill_job(&parse_workflow(value).unwrap(), now).unwrap();
+        assert_eq!(job.job.environment, "staging");
+        assert_eq!(job.job.workflow_kind, "bakta_baktfold");
+        assert_eq!(job.job.api_version, "v2");
+        assert_eq!(job.status, "failed");
+        assert_eq!(job.outcome.as_deref(), Some("failed"));
+        assert_eq!(job.error_message.as_deref(), Some("child failed"));
+        assert_eq!(job.queue_seconds, Some(120.0));
+        assert_eq!(job.runtime_seconds, Some(300.0));
+        assert_eq!(job.config.unwrap()["genus"], json!("Pantoea"));
+        assert_eq!(job.versions.bakta_version.as_deref(), Some("1.12.1"));
+        assert_eq!(job.versions.baktfold_version.as_deref(), Some("0.3.0"));
+    }
+
+    #[tokio::test]
+    async fn test_list_workflows_reads_all_pages() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{header, method, path, query_param, query_param_is_missing},
+        };
+        let server = MockServer::start().await;
+        let url = "/apis/argoproj.io/v1alpha1/namespaces/bakta/workflows";
+        let first = workflow_json(
+            "wf-1",
+            JOB,
+            "bakta-job-1.12.0",
+            "2026-06-01T10:00:00Z",
+            json!({}),
+        );
+        let second = workflow_json(
+            "wf-2",
+            JOB,
+            "bakta-job-1.12.0",
+            "2026-06-02T10:00:00Z",
+            json!({}),
+        );
+        Mock::given(method("GET"))
+            .and(path(url))
+            .and(header("authorization", "Bearer token"))
+            .and(query_param("limit", "500"))
+            .and(query_param_is_missing("continue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "metadata": {"continue": "next-page"},
+                "items": [first, {"metadata": {}}],
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(url))
+            .and(query_param("continue", "next-page"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "metadata": {"continue": ""},
+                "items": [second],
+            })))
+            .mount(&server)
+            .await;
+
+        let client = KubeClient::new(reqwest::Client::new(), &server.uri(), "token");
+        let (workflows, unreadable) = client.list_workflows("bakta").await.unwrap();
+        let names: Vec<_> = workflows
+            .iter()
+            .map(|workflow| workflow.item.metadata.name.as_str())
+            .collect();
+        assert_eq!(names, ["wf-1", "wf-2"]);
+        assert_eq!(unreadable, 1);
+    }
+}
