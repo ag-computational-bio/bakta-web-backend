@@ -512,7 +512,8 @@ async fn admin_job_list_shows_live_workflows_from_the_poll() {
     let Some(db) = test_db("admin_job_list_shows_live_workflows").await else {
         return;
     };
-    let env = unique_environment();
+    // The backend manages the workflows of its own environment.
+    let env = "production".to_string();
     let running = finished_job(&db, &env, "bakta", "succeeded").await;
     let failed = finished_job(&db, &env, "bakta", "failed").await;
     let without = finished_job(&db, &env, "bakta", "succeeded").await;

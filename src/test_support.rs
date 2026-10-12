@@ -51,6 +51,18 @@ pub fn test_handler_full(
     stats: crate::stats::StatsRecorder,
     admin_auth: Option<Arc<crate::admin::auth::AdminAuth>>,
 ) -> Arc<BaktaHandler> {
+    test_handler_in("production", false, argo_url, s3_url, stats, admin_auth)
+}
+
+/// A handler of the backend of `environment`.
+pub fn test_handler_in(
+    environment: &str,
+    manage_legacy_production: bool,
+    argo_url: &str,
+    s3_url: &str,
+    stats: crate::stats::StatsRecorder,
+    admin_auth: Option<Arc<crate::admin::auth::AdminAuth>>,
+) -> Arc<BaktaHandler> {
     let state_handler = Arc::new(StateHandler {
         job_state: RwLock::new(HashMap::new()),
         argo_client: Arc::new(ArgoClient::new(
@@ -72,7 +84,8 @@ pub fn test_handler_full(
         lists: Default::default(),
         completions: Default::default(),
         unwritten: Default::default(),
-        environment: "production".to_string(),
+        environment: environment.to_string(),
+        manage_legacy_production,
         stats,
     });
     Arc::new(BaktaHandler {

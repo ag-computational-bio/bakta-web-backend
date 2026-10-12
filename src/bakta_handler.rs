@@ -77,6 +77,11 @@ pub struct StateHandler {
     pub(crate) unwritten: std::sync::Mutex<crate::informer::Unwritten>,
     /// Environment name for job records and the `bakta-environment` workflow label.
     pub environment: String,
+    /// Also manage workflows without a `bakta-environment` label whose
+    /// derived environment is `production`, from a backend of another
+    /// environment. Only for the time while production still runs a backend
+    /// that records nothing. Default off.
+    pub manage_legacy_production: bool,
     pub stats: StatsRecorder,
 }
 
@@ -1179,6 +1184,7 @@ impl BaktaHandler {
         baktfold_database_version: String,
         backend_version: String,
         environment: String,
+        manage_legacy_production: bool,
         stats: StatsRecorder,
         kube: crate::informer::KubeApi,
     ) -> Self {
@@ -1204,6 +1210,7 @@ impl BaktaHandler {
             completions: Default::default(),
             unwritten: Default::default(),
             environment,
+            manage_legacy_production,
             stats,
         });
 
@@ -1268,6 +1275,10 @@ impl StateHandler {
         now: DateTime<Utc>,
         deferred: Option<&mut HashMap<Uuid, SimpleStatus>>,
     ) -> Option<Vec<SimpleStatus>> {
+        let items: Vec<SimpleStatus> = items
+            .into_iter()
+            .filter(|item| self.manages(&item.metadata.labels))
+            .collect();
         let by_job = workflows_by_job(&items);
         let ids: Vec<Uuid> = by_job.keys().copied().collect();
         let recorded = match self.stats.db() {
@@ -1525,6 +1536,11 @@ impl StateHandler {
         scope: Option<&HashSet<Uuid>>,
         now: DateTime<Utc>,
     ) -> HashSet<Uuid> {
+        // Jobs of other environments are left to their backends.
+        let items: Vec<SimpleStatus> = items
+            .into_iter()
+            .filter(|item| self.manages(&item.metadata.labels))
+            .collect();
         let in_scope = |id: &Uuid| scope.is_none_or(|jobs| jobs.contains(id));
         let mut retry = HashSet::new();
         let recorded_in_db = self.recorded_workflow_names(&items).await;
@@ -1829,6 +1845,7 @@ impl StateHandler {
         let now = Utc::now();
         Ok(records
             .into_iter()
+            .filter(|record| self.manages_record(&record.environment))
             .filter_map(|record| recorded_job(record, now))
             .filter(|job| !is_state_expired(&job.state, now))
             .map(|job| (job.state.id, job))
@@ -2351,6 +2368,25 @@ impl StateHandler {
 
     /// True when the job was deleted or expired within the last
     /// `JOB_RETENTION_DAYS` while the backend ran.
+    /// True for workflows of this backend's environment (derived like in
+    /// `workflow_environment`). Workflows of other environments are left to
+    /// their backends. With `manage_legacy_production`, also workflows
+    /// without a `bakta-environment` label that count as `production`.
+    pub(crate) fn manages(&self, labels: &HashMap<String, String>) -> bool {
+        let environment = workflow_environment(labels);
+        environment == self.environment
+            || (self.manage_legacy_production
+                && environment == "production"
+                && !labels.contains_key("bakta-environment"))
+    }
+
+    /// True for job records of this backend's environment, and with
+    /// `manage_legacy_production` also for `production` records.
+    fn manages_record(&self, environment: &str) -> bool {
+        environment == self.environment
+            || (self.manage_legacy_production && environment == "production")
+    }
+
     pub(crate) fn is_deleted(&self, job_id: &Uuid) -> bool {
         self.deleted_jobs
             .lock()
@@ -3181,6 +3217,7 @@ mod tests {
             completions: Default::default(),
             unwritten: Default::default(),
             environment: "production".to_string(),
+            manage_legacy_production: false,
             stats: StatsRecorder::disabled(),
         };
 

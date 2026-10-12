@@ -137,7 +137,7 @@ async fn late_retry_reset_does_not_hide_a_finish_seen_by_the_poll() {
     let now = Utc::now();
     let finished: SimpleStatus = serde_json::from_value(json!({
         "metadata": {"name": "wf-1", "uid": Uuid::new_v4(),
-                     "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}},
+                     "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2", "bakta-environment": "production"}},
         "status": {"phase": "Succeeded", "startedAt": now.to_rfc3339(), "finishedAt": now.to_rfc3339()}
     }))
     .unwrap();
@@ -180,7 +180,7 @@ async fn resubmit_points_the_job_to_the_new_workflow() {
     let item = |name: &str, phase: &str, started: chrono::DateTime<Utc>| -> SimpleStatus {
         serde_json::from_value(json!({
             "metadata": {"name": name, "uid": Uuid::new_v4(),
-                         "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}},
+                         "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2", "bakta-environment": "production"}},
             "status": {"phase": phase, "startedAt": started.to_rfc3339()}
         }))
         .unwrap()
@@ -1904,7 +1904,7 @@ async fn a_poll_fetched_before_a_delete_does_not_add_the_job_back() {
     let listed = |id: Uuid, name: &str| {
         json!({
             "metadata": {"name": name, "uid": Uuid::new_v4(),
-                         "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}},
+                         "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2", "bakta-environment": "production"}},
             "status": {"phase": "Succeeded", "startedAt": now.to_rfc3339(), "finishedAt": now.to_rfc3339()}
         })
     };
@@ -2190,7 +2190,7 @@ fn polled_workflow(
     serde_json::from_value(json!({
         "metadata": {"name": name, "uid": Uuid::new_v4(),
                      "creationTimestamp": created.to_rfc3339(),
-                     "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}},
+                     "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2", "bakta-environment": "production"}},
         "status": {"phase": phase, "startedAt": created.to_rfc3339()}
     }))
     .unwrap()

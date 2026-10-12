@@ -292,6 +292,7 @@ pub struct JobList {
 #[derive(Debug, Clone, FromRow)]
 pub struct UserJob {
     pub id: Uuid,
+    pub environment: String,
     pub status: String,
     pub name: Option<String>,
     pub workflow_kind: String,
@@ -597,7 +598,7 @@ impl StatsDb {
     /// is not live: all but `created`, `deleted` and `expired` ones.
     pub async fn user_jobs(&self, ids: &[Uuid]) -> Result<Vec<UserJob>> {
         Ok(sqlx::query_as(
-            "SELECT id, status, name, workflow_kind, api_version, result_kind, workflow_name, argo_uid,
+            "SELECT id, environment, status, name, workflow_kind, api_version, result_kind, workflow_name, argo_uid,
                  created_at, submitted_at, started_at, finished_at, secret_hash
              FROM jobs
              WHERE id = ANY($1) AND status NOT IN ('created', 'deleted', 'expired')",

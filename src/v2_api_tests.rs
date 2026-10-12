@@ -589,7 +589,7 @@ async fn empty_submit_lookup_keeps_the_job_unknown_until_the_workflow_is_listed(
     // The next poll lists the workflow: the job knows it now.
     let listed: crate::argo::structs::SimpleStatus = serde_json::from_value(json!({
         "metadata": {"name": "wf-late", "uid": Uuid::new_v4(), "creationTimestamp": now.to_rfc3339(),
-                     "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}},
+                     "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2", "bakta-environment": "production"}},
         "status": {"phase": "Pending", "startedAt": now.to_rfc3339()}
     }))
     .unwrap();
@@ -693,7 +693,7 @@ async fn a_poll_keeps_the_unknown_submission_of_a_reserved_job() {
     let now = marked_at + chrono::Duration::seconds(15);
     let listed: crate::argo::structs::SimpleStatus = serde_json::from_value(json!({
         "metadata": {"name": "wf-late", "uid": Uuid::new_v4(), "creationTimestamp": now.to_rfc3339(),
-                     "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}},
+                     "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2", "bakta-environment": "production"}},
         "status": {"phase": "Pending", "startedAt": now.to_rfc3339()}
     }))
     .unwrap();

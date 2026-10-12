@@ -88,6 +88,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !regex::Regex::new(r"^[A-Za-z0-9._-]{1,63}$")?.is_match(&environment) {
         return Err(format!("Invalid ENVIRONMENT value: {environment}").into());
     }
+    // Off by default: see docs/admin-api.md, "Environment of a workflow".
+    let manage_legacy_production = match dotenvy::var("MANAGE_LEGACY_PRODUCTION_WORKFLOWS") {
+        Ok(value) if !value.is_empty() => value
+            .parse::<bool>()
+            .map_err(|_| format!("Invalid MANAGE_LEGACY_PRODUCTION_WORKFLOWS value: {value}"))?,
+        _ => false,
+    };
     let stats = match dotenvy::var("STATS_DATABASE_URL") {
         Ok(url) if !url.is_empty() => {
             let db = stats::StatsDb::connect_lazy(&url)?;
@@ -134,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         dotenvy::var("BAKTFOLD_DATABASE_VERSION").unwrap_or_default(),
         dotenvy::var("BACKEND_VERSION")?,
         environment,
+        manage_legacy_production,
         stats,
         kube,
     )

@@ -318,7 +318,7 @@ fn job_workflow(
             "name": name,
             "uid": Uuid::new_v4(),
             "creationTimestamp": started.to_rfc3339(),
-            "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}
+            "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2", "bakta-environment": "production"}
         },
         "status": {
             "phase": phase,
@@ -753,7 +753,7 @@ async fn resubmit_of_a_database_only_job_is_current_before_the_writer_catches_up
             "metadata": {
                 "name": "wf-b",
                 "creationTimestamp": now.to_rfc3339(),
-                "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}
+                "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2", "bakta-environment": "production"}
             },
             "status": {}
         })))
@@ -1190,4 +1190,119 @@ async fn a_finished_job_in_memory_adopts_a_newer_attempt() {
     let job = state.job_state.read().await[&id].clone();
     assert_eq!(job.workflowname.as_deref(), Some("wf-b"));
     assert!(matches!(job.status, Some(ArgoStatus::Running)));
+}
+
+#[tokio::test]
+async fn a_backend_manages_only_the_jobs_of_its_environment() {
+    let now = Utc::now();
+    let workflow = |name: &str, labels: Value| -> (Uuid, SimpleStatus) {
+        let id = Uuid::new_v4();
+        let mut all = json!({"jobid": id.to_string(), "secret": TEST_SECRET});
+        all.as_object_mut()
+            .unwrap()
+            .extend(labels.as_object().unwrap().clone());
+        let item = serde_json::from_value(json!({
+            "metadata": {"name": name, "uid": Uuid::new_v4(),
+                         "creationTimestamp": now.to_rfc3339(), "labels": all},
+            "status": {"phase": "Running", "startedAt": now.to_rfc3339()}
+        }))
+        .unwrap();
+        (id, item)
+    };
+    let (staging, staging_item) = workflow("wf-s", json!({"bakta-environment": "staging"}));
+    let (production, production_item) =
+        workflow("wf-p", json!({"bakta-environment": "production"}));
+    // An old workflow without environment label counts as production.
+    let (legacy, legacy_item) = workflow("wf-l", json!({"origin": "bakta.computational.bio"}));
+    let items = vec![staging_item, production_item, legacy_item];
+    for (environment, legacy_switch, managed) in [
+        ("production", false, vec![production, legacy]),
+        ("staging", false, vec![staging]),
+        ("staging", true, vec![staging, legacy]),
+    ] {
+        let (stats, mut events) = StatsRecorder::capturing();
+        let handler = crate::test_support::test_handler_in(
+            environment,
+            legacy_switch,
+            "http://127.0.0.1:1",
+            "https://s3.example.com",
+            stats,
+            None,
+        );
+        handler
+            .state_handler
+            .apply_workflow_statuses(items.clone(), now)
+            .await;
+        let mut in_memory: Vec<Uuid> = handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .keys()
+            .copied()
+            .collect();
+        in_memory.sort();
+        let mut expected = managed.clone();
+        expected.sort();
+        assert_eq!(in_memory, expected, "{environment} {legacy_switch}");
+        let mut recorded: Vec<Uuid> = drain(&mut events)
+            .into_iter()
+            .flat_map(|event| match event {
+                StatsEvent::Polled(states) => {
+                    states.into_iter().map(|state| state.job.id).collect()
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+        recorded.sort();
+        assert_eq!(recorded, expected, "{environment} {legacy_switch}");
+    }
+}
+
+#[tokio::test]
+async fn finished_jobs_of_another_environment_are_not_served() {
+    let Some(db) = test_db("finished_jobs_of_another_environment").await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    let job = crate::stats::NewJob {
+        id,
+        environment: "staging".to_string(),
+        workflow_kind: "bakta".to_string(),
+        api_version: "v2".to_string(),
+        name: Some("genome".to_string()),
+        created_at: Utc::now() - Duration::hours(1),
+        secret_hash: Some(crate::stats::secret_hash(TEST_SECRET)),
+        result_kind: Some("bakta".to_string()),
+    };
+    db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
+    db.apply(&StatsEvent::Polled(vec![crate::stats::WorkflowState {
+        job,
+        workflow_name: "wf-s".to_string(),
+        status: "succeeded",
+        created_at: Some(Utc::now() - Duration::hours(1)),
+        started_at: Some(Utc::now() - Duration::minutes(50)),
+        finished_at: Some(Utc::now() - Duration::minutes(40)),
+        error_message: None,
+        origin: None,
+        argo_uid: Some(Uuid::new_v4()),
+    }]))
+    .await
+    .unwrap();
+    for (environment, served) in [("production", false), ("staging", true)] {
+        let handler = crate::test_support::test_handler_in(
+            environment,
+            false,
+            "http://127.0.0.1:1",
+            "https://s3.example.com",
+            StatsRecorder::capturing_with_db((*db).clone()).0,
+            None,
+        );
+        let found = handler
+            .state_handler
+            .user_job_state(id, TEST_SECRET)
+            .await
+            .unwrap();
+        assert_eq!(found.is_some(), served, "{environment}");
+    }
 }

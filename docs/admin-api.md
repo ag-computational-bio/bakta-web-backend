@@ -16,6 +16,7 @@ Both sides implement exactly what is described here. Changes to the contract are
 |---|---|---|
 | `ENVIRONMENT` | `production` | Environment name written to every job record and to the `bakta-environment` workflow label. Default `production`. |
 | `STATS_DATABASE_URL` | `postgres://bakta_stats:...@bakta-stats-postgres:5432/bakta_stats` | Statistics database. If unset, job recording and the statistics endpoints are disabled, and finished jobs are kept in memory for 35 days instead of being served from the database (see "Workflow watch"). |
+| `MANAGE_LEGACY_PRODUCTION_WORKFLOWS` | `false` | Default `false`. When `true`, a backend whose `ENVIRONMENT` is not `production` also manages workflows without a `bakta-environment` label whose derived environment is `production` (see "Environment of a workflow"). Only for the time while production still runs the old backend, which records nothing. Turn it off when the production backend runs this version. |
 | `KUBERNETES_API_URL` | `https://127.0.0.1:6443` | Kubernetes API server for the workflow watch. Default in a pod: `https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT`. One of them must be set. The token is `ARGO_TOKEN`: its service account needs `get`, `list` and `watch` on `workflows.argoproj.io` in `ARGO_NAMESPACE`. |
 | `KUBERNETES_CA_FILE` | `/etc/kube/ca.crt` | CA certificate of the API server. Default: the service account CA of the pod when it exists, else the system certificates. |
 | `ADMIN_OIDC_ISSUER` | `https://auth.bakta.computational.bio/realms/bakta` | Keycloak realm issuer. If unset, the admin API is disabled. |
@@ -66,6 +67,7 @@ Migrations are embedded in the backend and run at startup. Table `jobs`, one row
 | `secret_hash` | text, null | Hex SHA-256 hash of the job secret. Set at job init, else from the `secret` label of the workflow. Never sent by any API. |
 | `result_kind` | text, null | `bakta`, `bakta_proteins` or `baktfold`, for the result files of a finished job |
 | `argo_uid` | uuid, null | Argo uid of the current workflow, for the logs of archived workflows |
+| `workflow_created_at` | timestamptz, null | Creation time of the recorded workflow. A workflow update never replaces the recorded workflow with an older one. |
 | `updated_at` | timestamptz | Last change |
 
 Rules:
@@ -126,7 +128,11 @@ Production and staging backends watch the same Argo namespace. The backend takes
 3. Else `staging` when the `origin` label starts with `staging.`, `http_localhost` or `http_127.0.0.1` (the staging and local development UIs).
 4. Else `production` (workflows of the old production backend).
 
-Workflow updates correct the `environment` of existing records with this rule. The workflow list and the bulk actions use the same rule to filter workflows by environment.
+Workflow updates correct the `environment` of existing records with this rule.
+
+Each backend manages only the jobs of its own environment: the job state in memory, the user API (also for finished jobs read from the database), and the job record writes after workflow changes, completions and the reconcile. Workflows and records of the other environment are left to the other backend, so two backends that watch the same namespace and write the same database never write the same job. The one exception is `MANAGE_LEGACY_PRODUCTION_WORKFLOWS` (default off): with it, a backend of another environment also manages unlabelled workflows that count as `production`. The `workflows` table and the admin API still cover all environments.
+
+Independently, a job record never switches from its recorded workflow to an older attempt: a workflow update only replaces the recorded workflow with one that was created at the same time or later (`workflow_created_at`). And a finished job in memory whose workflow is no longer watched takes a newer attempt of the job as current, when that attempt was created after the job finished. The workflow list and the bulk actions use the same rule to filter workflows by environment.
 
 ### Input statistics in the V2 start request
 

@@ -25,7 +25,7 @@ fn unlabeled_workflow(id: Uuid, name: &str, phase: &str) -> SimpleStatus {
         "metadata": {
             "name": name,
             "uid": Uuid::new_v4(),
-            "labels": {"jobid": id.to_string(), "api-version": "v2"}
+            "labels": {"jobid": id.to_string(), "api-version": "v2", "bakta-environment": "production"}
         },
         "status": {"phase": phase, "startedAt": now.to_rfc3339(), "finishedAt": now.to_rfc3339()}
     }))
@@ -234,7 +234,7 @@ async fn recorded_job(
     let uid = Uuid::new_v4();
     let job = NewJob {
         id,
-        environment: crate::stats::test_db::unique_environment(),
+        environment: "production".to_string(),
         workflow_kind: "bakta".to_string(),
         api_version: "v2".to_string(),
         name: Some("genome".to_string()),
