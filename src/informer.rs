@@ -919,8 +919,8 @@ impl StateHandler {
     /// Applies `items` and the completions of `jobs`, the `completed` ones
     /// and the pending ones. A completion that is skipped (for example while
     /// the job is reserved) stays pending and its job is returned for
-    /// another pass, until it is applied. An applied completion is kept in
-    /// `finished` until the job leaves memory.
+    /// another pass, until it is applied. With a database, an applied
+    /// completion is kept in `finished` until the job leaves memory.
     async fn apply_with_completions(
         &self,
         mut items: Vec<SimpleStatus>,
@@ -964,7 +964,7 @@ impl StateHandler {
             let current = job_state
                 .get(&id)
                 .is_some_and(|state| state.workflowname.as_deref() == Some(name.as_str()));
-            if current {
+            if current && self.stats.db().is_some() {
                 completions.finished.insert(id, item);
             }
         }
@@ -1008,6 +1008,7 @@ impl StateHandler {
                 .finished
                 .extend(finished);
         }
+        self.prune_completions().await;
         if !self.watch_connected.load(Ordering::Relaxed) {
             // Final states of completions do not get outdated, so they are
             // applied anyway. The other jobs wait for the watch.
@@ -1024,5 +1025,18 @@ impl StateHandler {
         let items = self.job_workflows(&jobs);
         self.apply_with_completions(items, &jobs, Vec::new(), now)
             .await
+    }
+
+    /// Drops kept completions of jobs that left memory, and pending ones of
+    /// deleted jobs.
+    async fn prune_completions(&self) {
+        let job_state = self.job_state.read().await;
+        let mut completions = self.completions.lock().expect("completions lock poisoned");
+        completions
+            .finished
+            .retain(|id, _| job_state.contains_key(id));
+        completions
+            .pending
+            .retain(|_, item| job_id_label(item).is_none_or(|id| !self.is_deleted(&id)));
     }
 }

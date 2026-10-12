@@ -820,4 +820,8 @@ async fn a_completion_of_a_reserved_job_is_applied_later() {
         )
     })
     .await;
+    // Without a database, no completion payload (with its secret) is kept.
+    let completions = state.completions.lock().unwrap();
+    assert!(completions.pending.is_empty());
+    assert!(completions.finished.is_empty());
 }
