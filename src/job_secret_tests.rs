@@ -417,3 +417,52 @@ async fn a_failed_record_lookup_is_a_temporary_error() {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}: {body}");
     }
 }
+
+#[tokio::test]
+async fn a_delete_succeeds_only_when_its_tombstone_is_written() {
+    let Some(db) = crate::stats::test_db::test_db("a_delete_succeeds_only_when").await else {
+        return;
+    };
+    let argo = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&argo)
+        .await;
+    let (by_user, _) = recorded_job(&db, Utc::now() - chrono::Duration::hours(1)).await;
+    let (by_admin, _) = recorded_job(&db, Utc::now() - chrono::Duration::hours(1)).await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some((*db).clone())).await;
+    let user_delete = format!("/api/v2/job/delete?job_id={by_user}&secret={TEST_SECRET}");
+    let admin_delete = format!("/api/admin/jobs/{by_admin}");
+
+    fail_job_writes(&db).await;
+    let (status, body) = call(&setup.router, "DELETE", &user_delete, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let (status, body) = admin_call(&setup, "DELETE", &admin_delete, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    allow_job_writes(&db).await;
+
+    // Repeated deletes succeed once the tombstones are written.
+    for (id, delete) in [(by_user, &user_delete), (by_admin, &admin_delete)] {
+        let mut deleted = false;
+        for _ in 0..40 {
+            let (status, _) = if *delete == admin_delete {
+                admin_call(&setup, "DELETE", delete, None).await
+            } else {
+                let (status, body) = call(&setup.router, "DELETE", delete, None).await;
+                (status, serde_json::Value::String(body))
+            };
+            if status == StatusCode::OK {
+                deleted = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        assert!(deleted, "{delete}");
+        let status: String = sqlx::query_scalar("SELECT status FROM jobs WHERE id = $1")
+            .bind(id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(status, "deleted", "{delete}");
+    }
+}

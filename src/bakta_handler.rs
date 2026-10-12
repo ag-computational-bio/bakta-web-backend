@@ -539,6 +539,8 @@ const MAX_ERROR_MESSAGE_LENGTH: usize = 500;
 
 /// Time the reconcile waits until the final states of jobs are written.
 const RECONCILE_WRITE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Time a delete waits until its tombstone is written.
+const TOMBSTONE_WRITE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Rows per write to the `workflows` table, and the time each write may take.
 const TABLE_WRITE_CHUNK: usize = 2000;
@@ -1031,7 +1033,7 @@ pub(crate) fn error_status(
     error: &anyhow::Error,
     default: axum::http::StatusCode,
 ) -> axum::http::StatusCode {
-    if error.is::<RecordLookupFailed>() {
+    if error.is::<RecordLookupFailed>() || error.is::<stats::RecordWriteFailed>() {
         axum::http::StatusCode::SERVICE_UNAVAILABLE
     } else {
         default
@@ -2080,6 +2082,10 @@ impl StateHandler {
         // The Argo calls run without the job state lock, so a slow Argo does
         // not block other jobs. The reservation keeps starts and polls of
         // this job out until the delete is done.
+        // A repeated delete writes a tombstone that could not be written.
+        if self.is_deleted(&job_id) {
+            return self.persist_deleted(job_id).await;
+        }
         let recorded = self.recorded_jobs(&[job_id]).await?;
         let (state, _reservation) = {
             let read_lock = self.job_state.read().await;
@@ -2104,12 +2110,22 @@ impl StateHandler {
         } else {
             self.delete_job_workflows(job_id).await?;
         }
-        let mut job_state = self.job_state.write().await;
-        self.record_deleted(job_id);
-        if job_state.remove(&job_id).is_some() || recorded.contains_key(&job_id) {
-            self.stats.record(StatsEvent::Deleted { id: job_id });
+        {
+            let mut job_state = self.job_state.write().await;
+            self.record_deleted(job_id);
+            job_state.remove(&job_id);
         }
-        Ok(())
+        self.persist_deleted(job_id).await
+    }
+
+    /// Writes the tombstone of a deleted job and waits until it is written,
+    /// so a finished job is not served from the database again. Fails with
+    /// `RecordWriteFailed` (answered with `503`) when it is not written in
+    /// time; it is still retried, and a repeated delete waits for it again.
+    pub(crate) async fn persist_deleted(&self, id: Uuid) -> Result<()> {
+        self.stats
+            .persist(StatsEvent::Deleted { id }, TOMBSTONE_WRITE_WAIT)
+            .await
     }
 
     pub async fn init_job(&self, name: String) -> (Uuid, String) {
