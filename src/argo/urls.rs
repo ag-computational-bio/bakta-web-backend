@@ -1,15 +1,5 @@
 use std::fmt::Display;
 
-pub fn get_status_url_bakta<T, U>(url: T, namespace: U) -> String
-where
-    T: Display,
-    U: Display,
-{
-    format!(
-        "{url}/api/v1/workflows/{namespace}?fields=items.status.finishedAt,items.status.startedAt,items.metadata.name,items.metadata.uid,items.metadata.resourceVersion,items.metadata.creationTimestamp,items.status.phase,items.status.message,items.metadata.labels,items.spec.workflowTemplateRef,items.spec.suspend"
-    )
-}
-
 pub fn get_submit_url<T, U>(url: T, namespace: U) -> String
 where
     T: Display,

@@ -59,6 +59,7 @@ pub fn test_handler_full(
         deleted_jobs: Default::default(),
         live_workflows: Default::default(),
         workflows: Default::default(),
+        watch_connected: Default::default(),
         environment: "production".to_string(),
         stats,
     });

@@ -68,7 +68,6 @@ pub struct AppMetrics {
     job_runtime_seconds: Family<WorkflowLabels, Histogram>,
     http_request_duration_seconds: Family<HttpRequestLabels, Histogram>,
     argo_submit_errors_total: Family<WorkflowLabels, Counter>,
-    argo_poll_errors_total: Counter,
     workflow_watch_errors_total: Counter,
     workflow_relists_total: Counter,
     workflow_watch_last_event: Gauge,
@@ -85,7 +84,6 @@ impl AppMetrics {
         let http_request_duration_seconds =
             Family::new_with_constructor(build_http_request_histogram as fn() -> Histogram);
         let argo_submit_errors_total = Family::default();
-        let argo_poll_errors_total = Counter::default();
         let workflow_watch_errors_total = Counter::default();
         let workflow_relists_total = Counter::default();
         let workflow_watch_last_event = Gauge::default();
@@ -123,11 +121,6 @@ impl AppMetrics {
             argo_submit_errors_total.clone(),
         );
         registry.register(
-            "argo_poll_errors",
-            "Number of Argo workflow status polling failures.",
-            argo_poll_errors_total.clone(),
-        );
-        registry.register(
             "workflow_watch_errors",
             "Number of failed workflow lists and watches of the Kubernetes API.",
             workflow_watch_errors_total.clone(),
@@ -156,7 +149,6 @@ impl AppMetrics {
             job_runtime_seconds,
             http_request_duration_seconds,
             argo_submit_errors_total,
-            argo_poll_errors_total,
             workflow_watch_errors_total,
             workflow_relists_total,
             workflow_watch_last_event,
@@ -201,10 +193,6 @@ impl AppMetrics {
                 workflow_kind: workflow_kind.to_string(),
             })
             .inc();
-    }
-
-    pub fn record_poll_error(&self) {
-        self.argo_poll_errors_total.inc();
     }
 
     pub fn record_watch_error(&self) {
@@ -273,7 +261,7 @@ impl AppMetrics {
     path = "/metrics",
     operation_id = "getPrometheusMetrics",
     summary = "Fetch Prometheus metrics",
-    description = "Returns Prometheus-formatted counters, gauges, and histograms for job submissions, active jobs, completions, runtimes, HTTP request durations, Argo polling or submission errors, and the health of the workflow watch.",
+    description = "Returns Prometheus-formatted counters, gauges, and histograms for job submissions, active jobs, completions, runtimes, HTTP request durations, Argo submission errors, and the health of the workflow watch.",
     responses(
         (status = 200, body = String, content_type = "text/plain", description = "Prometheus metrics output."),
         (status = 500, body = String, description = "Metrics could not be rendered.")
@@ -379,7 +367,6 @@ mod name_tests {
         metrics.record_job_submitted("v2", "bakta");
         metrics.record_job_completed("bakta", "succeeded", None);
         metrics.record_submit_error("bakta");
-        metrics.record_poll_error();
         metrics.record_watch_error();
         metrics.record_relist();
         let encoded = metrics.encode().unwrap();
@@ -392,7 +379,6 @@ mod name_tests {
         assert_eq!(
             names.into_iter().collect::<Vec<_>>(),
             [
-                "argo_poll_errors_total",
                 "argo_submit_errors_total",
                 "jobs_completed_total",
                 "jobs_submitted_total",

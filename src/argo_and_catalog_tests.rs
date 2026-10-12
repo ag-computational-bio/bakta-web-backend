@@ -94,51 +94,6 @@ fn argo_status_maps_to_public_statuses() {
 }
 
 #[tokio::test]
-async fn workflow_status_is_parsed_and_sends_bearer_token() {
-    let server = MockServer::start().await;
-    let uid = Uuid::new_v4();
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .and(header("authorization", "Bearer tok"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "items": [{
-                "metadata": {
-                    "name": "wf", "uid": uid, "resourceVersion": "7",
-                    "labels": {"jobid": Uuid::new_v4()}
-                },
-                "status": {
-                    "phase": "Running", "startedAt": "2026-01-01T00:00:00Z",
-                    "finishedAt": null
-                }
-            }]
-        })))
-        .mount(&server)
-        .await;
-    let list = client(&server).get_workflow_status().await.unwrap();
-    assert_eq!(list.items.len(), 1);
-    assert_eq!(list.items[0].metadata.uid, uid);
-    assert_eq!(list.items[0].status.phase, "Running");
-    assert!(list.items[0].status.finished_at.is_none());
-}
-
-#[tokio::test]
-async fn workflow_status_reports_http_and_parse_errors() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(401))
-        .mount(&server)
-        .await;
-    assert!(client(&server).get_workflow_status().await.is_err());
-
-    server.reset().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
-        .mount(&server)
-        .await;
-    assert!(client(&server).get_workflow_status().await.is_err());
-}
-
-#[tokio::test]
 async fn submit_reports_http_errors() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

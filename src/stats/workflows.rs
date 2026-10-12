@@ -1,5 +1,5 @@
 //! Live Bakta Web workflows in the `workflows` table, for the admin workflow
-//! list and the bulk preview. The polling loop and admin actions write it.
+//! list and the bulk preview. The workflow watch and admin actions write it.
 
 use std::collections::HashMap;
 
@@ -452,5 +452,62 @@ mod tests {
             .collect::<Vec<_>>();
         all.sort();
         assert_eq!(all, ["paused", "running"]);
+    }
+
+    #[tokio::test]
+    async fn changed_workflows_are_written_and_deleted_ones_marked_gone() {
+        let Some(db) = test_db("changed_workflows_are_written").await else {
+            return;
+        };
+        let (stats, _events) = StatsRecorder::capturing_with_db((*db).clone());
+        let handler =
+            test_handler_with_stats("http://127.0.0.1:1", "https://s3.example.com", stats);
+        let state = &handler.state_handler;
+        let item = |name: &str, phase: &str| -> SimpleStatus {
+            serde_json::from_value(listed(name, phase, "production")).unwrap()
+        };
+        let t0 = Utc::now() - chrono::Duration::minutes(5);
+        state
+            .record_workflows(&[item("a", "Running"), item("b", "Running")], t0)
+            .await;
+        // Only the changed workflow is written. Rows of others are kept.
+        state
+            .record_changed_workflows(
+                &[item("a", "Succeeded")],
+                &[],
+                t0 + chrono::Duration::seconds(1),
+            )
+            .await;
+        let live = db.live_workflows("bakta", None).await.unwrap();
+        let phase = |name: &str| {
+            live.iter()
+                .find(|workflow| workflow.metadata.name == name)
+                .map(|workflow| workflow.status.phase.clone())
+        };
+        assert_eq!(phase("a").as_deref(), Some("Succeeded"));
+        assert_eq!(phase("b").as_deref(), Some("Running"));
+        // A deleted workflow is marked gone.
+        state
+            .record_changed_workflows(&[], &["b".to_string()], t0 + chrono::Duration::seconds(2))
+            .await;
+        assert_eq!(
+            names(&db.live_workflows("bakta", None).await.unwrap()),
+            ["a"]
+        );
+        // Its rows are deleted an hour later.
+        db.prune_gone_workflows("bakta", t0 + chrono::Duration::minutes(59))
+            .await
+            .unwrap();
+        let count = || async {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM workflows WHERE name = 'b'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap()
+        };
+        assert_eq!(count().await, 1);
+        db.prune_gone_workflows("bakta", t0 + chrono::Duration::minutes(62))
+            .await
+            .unwrap();
+        assert_eq!(count().await, 0);
     }
 }

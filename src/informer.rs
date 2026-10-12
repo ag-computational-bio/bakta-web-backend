@@ -3,19 +3,29 @@
 //! watch from the resource version of the list then reports added, changed
 //! and deleted workflows. A dropped watch resumes from the last resource
 //! version. Only when Kubernetes no longer has that version (`410 Gone`) are
-//! all workflows listed again.
+//! all workflows listed again. The job state is updated from these
+//! workflows, so no request lists all workflows from Argo.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, anyhow};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::value::RawValue;
+use tokio::{
+    sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+    time::Instant,
+};
+use uuid::Uuid;
 
 use crate::{
     argo::structs::SimpleStatus,
     backfill::workflows::{KubeWorkflow, Page},
-    bakta_handler::StateHandler,
+    bakta_handler::{StateHandler, job_id_label},
 };
 
 const SERVICE_ACCOUNT_CA: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
@@ -28,6 +38,12 @@ const WATCH_SECONDS: &str = "300";
 const READ_TIMEOUT: Duration = Duration::from_secs(150);
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// Changed workflows are applied together this long after the first change.
+const BATCH_DELAY: Duration = Duration::from_secs(1);
+/// Interval of the time-based work: expiry, unresolved submissions, skipped
+/// jobs and old rows of gone workflows.
+const TICK: Duration = Duration::from_secs(15);
+
 /// Reads Workflow objects of one namespace from the Kubernetes API.
 pub struct KubeApi {
     client: reqwest::Client,
@@ -151,6 +167,21 @@ fn relevant(item: SimpleStatus) -> Option<SimpleStatus> {
     (labels.contains_key("jobid") || labels.contains_key("bakta-environment")).then_some(item)
 }
 
+/// A change of the workflows in `StateHandler::workflows`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum WorkflowChange {
+    /// A complete list replaced all workflows. `observed_at` is a time
+    /// before the list was requested.
+    Listed { observed_at: DateTime<Utc> },
+    /// A workflow was added, changed or deleted. `jobs` are the job IDs of
+    /// its old and new state.
+    Changed {
+        name: String,
+        jobs: Vec<Uuid>,
+        observed_at: DateTime<Utc>,
+    },
+}
+
 #[derive(Debug)]
 enum WatchEnd {
     /// The resource version is too old: all workflows must be listed again.
@@ -188,14 +219,24 @@ struct WatchStatus {
     message: String,
 }
 
-/// Starts the list and watch.
+/// Starts the list and watch and the task that applies the changes.
 pub fn start(state: Arc<StateHandler>, api: KubeApi) {
-    tokio::spawn(Watcher { api, state }.run());
+    let (changes, receiver) = unbounded_channel();
+    tokio::spawn(process(state.clone(), receiver));
+    tokio::spawn(
+        Watcher {
+            api,
+            state,
+            changes,
+        }
+        .run(),
+    );
 }
 
 struct Watcher {
     api: KubeApi,
     state: Arc<StateHandler>,
+    changes: UnboundedSender<WorkflowChange>,
 }
 
 impl Watcher {
@@ -245,6 +286,7 @@ impl Watcher {
     /// Lists all workflows, replaces the known ones and returns the resource
     /// version of the list. Workflows missing from the list count as deleted.
     async fn list(&self) -> Result<String> {
+        let observed_at = Utc::now();
         let (items, version) = self.api.list().await?;
         let count = items.len();
         *self
@@ -257,6 +299,7 @@ impl Watcher {
             .collect();
         self.state.metrics.record_workflow_list(Utc::now());
         tracing::info!(workflows = count, "workflow_list_finished");
+        let _ = self.changes.send(WorkflowChange::Listed { observed_at });
         Ok(version)
     }
 
@@ -268,6 +311,7 @@ impl Watcher {
             Ok(response) => response,
             Err(end) => return (end, false),
         };
+        self.state.watch_connected.store(true, Ordering::Relaxed);
         self.state.metrics.record_watch_event(Utc::now());
         let mut buffer = Vec::new();
         let mut received = false;
@@ -290,6 +334,7 @@ impl Watcher {
                 Err(error) => break WatchEnd::Failed(error.into()),
             }
         };
+        self.state.watch_connected.store(false, Ordering::Relaxed);
         (end, received)
     }
 
@@ -345,15 +390,165 @@ impl Watcher {
     }
 
     fn apply_workflow(&self, item: SimpleStatus, deleted: bool) {
+        let observed_at = Utc::now();
         let name = item.metadata.name.clone();
-        let mut workflows = self
-            .state
-            .workflows
-            .write()
-            .expect("workflows lock poisoned");
-        match relevant(item).filter(|_| !deleted) {
-            Some(item) => workflows.insert(name, item),
-            None => workflows.remove(&name),
+        let mut jobs: Vec<Uuid> = job_id_label(&item).into_iter().collect();
+        let new = relevant(item).filter(|_| !deleted);
+        let changed = new.is_some();
+        let previous = {
+            let mut workflows = self
+                .state
+                .workflows
+                .write()
+                .expect("workflows lock poisoned");
+            match new {
+                Some(item) => workflows.insert(name.clone(), item),
+                None => workflows.remove(&name),
+            }
         };
+        if !changed && previous.is_none() {
+            return;
+        }
+        jobs.extend(previous.as_ref().and_then(job_id_label));
+        let _ = self.changes.send(WorkflowChange::Changed {
+            name,
+            jobs,
+            observed_at,
+        });
+    }
+}
+
+/// Changes waiting to be applied together.
+#[derive(Default)]
+struct Batch {
+    names: HashSet<String>,
+    jobs: HashSet<Uuid>,
+    /// The earliest time a change of the batch was seen.
+    observed_at: Option<DateTime<Utc>>,
+    due: Option<Instant>,
+}
+
+/// Applies the workflow changes to the job state and the `workflows`
+/// table, and runs the time-based work.
+async fn process(state: Arc<StateHandler>, mut changes: UnboundedReceiver<WorkflowChange>) {
+    let mut batch = Batch::default();
+    // Jobs that were skipped and need another pass.
+    let mut retry = HashSet::new();
+    let mut tick = tokio::time::interval(TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let due = batch.due;
+        tokio::select! {
+            change = changes.recv() => match change {
+                None => return,
+                Some(WorkflowChange::Listed { observed_at }) => {
+                    // The list covers all changes before it.
+                    batch = Batch::default();
+                    retry = state.apply_listed_workflows(observed_at).await;
+                }
+                Some(WorkflowChange::Changed { name, jobs, observed_at }) => {
+                    batch.names.insert(name);
+                    batch.jobs.extend(jobs);
+                    batch.observed_at.get_or_insert(observed_at);
+                    batch.due.get_or_insert_with(|| Instant::now() + BATCH_DELAY);
+                }
+            },
+            () = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => {
+                let batch = std::mem::take(&mut batch);
+                retry = state.apply_changed_workflows(batch, std::mem::take(&mut retry)).await;
+            }
+            _ = tick.tick() => {
+                retry = state.run_timed_work(std::mem::take(&mut retry)).await;
+            }
+        }
+    }
+}
+
+impl StateHandler {
+    /// IDs of the jobs with an unresolved submission.
+    fn marked_jobs(&self) -> Vec<Uuid> {
+        self.unknown_submissions
+            .lock()
+            .expect("unknown submissions lock poisoned")
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    /// All known workflows of the jobs in `jobs`.
+    fn job_workflows(&self, jobs: &HashSet<Uuid>) -> Vec<SimpleStatus> {
+        self.workflows
+            .read()
+            .expect("workflows lock poisoned")
+            .values()
+            .filter(|item| job_id_label(item).is_some_and(|id| jobs.contains(&id)))
+            .cloned()
+            .collect()
+    }
+
+    /// Applies a complete list, like a poll did before.
+    async fn apply_listed_workflows(&self, observed_at: DateTime<Utc>) -> HashSet<Uuid> {
+        let items: Vec<SimpleStatus> = self
+            .workflows
+            .read()
+            .expect("workflows lock poisoned")
+            .values()
+            .cloned()
+            .collect();
+        self.record_workflows(&items, observed_at).await;
+        self.apply_workflow_statuses(items, observed_at).await
+    }
+
+    /// Writes the changed workflows and applies all workflows of their jobs,
+    /// of the `retry` jobs and of jobs with an unresolved submission.
+    async fn apply_changed_workflows(
+        &self,
+        batch: Batch,
+        mut jobs: HashSet<Uuid>,
+    ) -> HashSet<Uuid> {
+        jobs.extend(batch.jobs);
+        jobs.extend(self.marked_jobs());
+        let (changed, gone): (Vec<_>, Vec<_>) = {
+            let workflows = self.workflows.read().expect("workflows lock poisoned");
+            let mut changed = Vec::new();
+            let mut gone = Vec::new();
+            for name in batch.names {
+                match workflows.get(&name) {
+                    Some(item) => changed.push(item.clone()),
+                    None => gone.push(name),
+                }
+            }
+            (changed, gone)
+        };
+        let observed_at = batch.observed_at.unwrap_or_else(Utc::now);
+        self.record_changed_workflows(&changed, &gone, observed_at)
+            .await;
+        let items = self.job_workflows(&jobs);
+        self.apply_job_workflows(items, &jobs, Utc::now()).await
+    }
+
+    /// Drops expired jobs, counts checks for unresolved submissions, applies
+    /// skipped jobs again and deletes old rows of gone workflows. While the
+    /// watch is not connected, the workflows may be outdated: then only
+    /// expired jobs are dropped, like after a failed poll before.
+    async fn run_timed_work(&self, retry: HashSet<Uuid>) -> HashSet<Uuid> {
+        let now = Utc::now();
+        if let Some(db) = self.stats.db() {
+            let prune = db.prune_gone_workflows(self.argo_client.namespace(), now);
+            match tokio::time::timeout(Duration::from_secs(10), prune).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "workflow_table_prune_failed"),
+                Err(_) => tracing::warn!("workflow_table_prune_timed_out"),
+            }
+        }
+        if !self.watch_connected.load(Ordering::Relaxed) {
+            self.apply_job_workflows(Vec::new(), &HashSet::new(), now)
+                .await;
+            return retry;
+        }
+        let mut jobs = retry;
+        jobs.extend(self.marked_jobs());
+        let items = self.job_workflows(&jobs);
+        self.apply_job_workflows(items, &jobs, now).await
     }
 }

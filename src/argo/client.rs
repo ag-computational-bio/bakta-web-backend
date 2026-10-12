@@ -7,13 +7,12 @@ use crate::{api_structs::ArgoStatus, bakta_handler::FullJobState};
 
 use super::{
     structs::{
-        ArgoWorkflow, ArgoWorkflowList, Content, LogResult, SimpleStatusList, SubmitOptions,
-        SubmitResult, SubmitWorkflowTemplate, WorkflowDetails, WorkflowNodeStatus,
+        ArgoWorkflow, ArgoWorkflowList, Content, LogResult, SubmitOptions, SubmitResult,
+        SubmitWorkflowTemplate, WorkflowDetails, WorkflowNodeStatus,
     },
     urls::{
         get_archived_workflow_url, get_delete_url_archived, get_delete_url_running,
-        get_logs_archived_url, get_logs_running_url, get_status_url_bakta, get_submit_url,
-        get_workflow_url,
+        get_logs_archived_url, get_logs_running_url, get_submit_url, get_workflow_url,
     },
 };
 
@@ -201,19 +200,6 @@ impl ArgoClient {
         }
 
         Ok(log_entries)
-    }
-
-    pub async fn get_workflow_status(&self) -> Result<SimpleStatusList> {
-        let response = self
-            .client
-            .get(get_status_url_bakta(&self.url, &self.namespace))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<SimpleStatusList>()
-            .await?;
-        Ok(response)
     }
 
     /// Deletes the job's workflow and returns true when something was
@@ -500,17 +486,6 @@ impl ArgoClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_get_workflow_status() {
-        let client = ArgoClient::new("foo".to_string(), "bar".to_string(), "bakta".to_string());
-        let error = client
-            .get_workflow_status()
-            .await
-            .expect_err("relative URL should fail deterministically");
-
-        assert!(error.to_string().contains("builder error"));
-    }
 
     #[test]
     fn test_workflow_logs_url_uses_running_and_archived_paths() {

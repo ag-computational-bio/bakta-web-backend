@@ -1930,22 +1930,18 @@ async fn a_poll_fetched_before_a_delete_does_not_add_the_job_back() {
             "status": {"phase": "Succeeded", "startedAt": now.to_rfc3339(), "finishedAt": now.to_rfc3339()}
         })
     };
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
-            listed(by_user, "wf-user"),
-            listed(by_admin, "wf-admin"),
-        ]})))
-        .mount(&argo)
-        .await;
     Mock::given(method("DELETE"))
         .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
         .expect(2)
         .mount(&argo)
         .await;
 
-    // The poll fetches the workflow list before the deletes.
-    let fetched = state.argo_client.get_workflow_status().await.unwrap();
+    // The watch reports the workflows before the deletes.
+    let fetched: Vec<SimpleStatus> = serde_json::from_value(json!([
+        listed(by_user, "wf-user"),
+        listed(by_admin, "wf-admin"),
+    ]))
+    .unwrap();
     let (status, body) = call(
         &setup.router,
         "DELETE",
@@ -1964,9 +1960,7 @@ async fn a_poll_fetched_before_a_delete_does_not_add_the_job_back() {
     assert_eq!(status, StatusCode::OK, "{body}");
 
     // It is applied after the deletes. The jobs stay gone.
-    state
-        .apply_workflow_statuses(fetched.items, Utc::now())
-        .await;
+    state.apply_workflow_statuses(fetched, Utc::now()).await;
     let states = state.job_state.read().await;
     assert!(!states.contains_key(&by_user));
     assert!(!states.contains_key(&by_admin));

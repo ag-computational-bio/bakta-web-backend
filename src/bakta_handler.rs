@@ -56,11 +56,14 @@ pub struct StateHandler {
     /// for `JOB_RETENTION_DAYS`: after that, a poll treats a finished workflow
     /// of the job as expired anyway. Job IDs are random and never reused.
     pub deleted_jobs: std::sync::Mutex<HashMap<Uuid, DateTime<Utc>>>,
-    /// Live workflow per job from the last successful poll.
+    /// Live workflow per job, from the workflows of the informer.
     pub live_workflows: std::sync::RwLock<HashMap<Uuid, LiveWorkflow>>,
     /// Workflows with a `jobid` or `bakta-environment` label by name, as the
     /// Kubernetes list and watch last reported them.
     pub workflows: std::sync::RwLock<HashMap<String, SimpleStatus>>,
+    /// True while the workflow watch is connected. Time-based work that
+    /// needs current workflows waits for it.
+    pub watch_connected: std::sync::atomic::AtomicBool,
     /// Environment name for job records and the `bakta-environment` workflow label.
     pub environment: String,
     pub stats: StatsRecorder,
@@ -1049,14 +1052,12 @@ impl BaktaHandler {
             deleted_jobs: Default::default(),
             live_workflows: Default::default(),
             workflows: Default::default(),
+            watch_connected: Default::default(),
             environment,
             stats,
         });
 
         crate::informer::start(state_handler.clone(), kube);
-
-        let state_handler_clone = state_handler.clone();
-        state_handler_clone.run().await;
 
         BaktaHandler {
             s3_handler,
@@ -1085,32 +1086,6 @@ lazy_static::lazy_static! {
 }
 
 impl StateHandler {
-    async fn run(self: Arc<Self>) {
-        let argo_client = self.argo_client.clone();
-        tokio::spawn(async move {
-            loop {
-                let now = Utc::now();
-                let initial = match argo_client.get_workflow_status().await {
-                    Ok(status) => status,
-                    Err(e) => {
-                        self.metrics.record_poll_error();
-                        let expired = purge_expired_states(&mut *self.job_state.write().await, now);
-                        self.record_expired(expired);
-                        tracing::error!(?e, "Failed to query workflow_status");
-                        tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
-                        continue;
-                    }
-                };
-
-                self.record_workflows(&initial.items, now).await;
-                self.apply_workflow_statuses(initial.items, now).await;
-                tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
-            }
-            #[allow(unreachable_code)]
-            Ok::<(), anyhow::Error>(())
-        });
-    }
-
     /// Writes the complete list of workflows to the `workflows` table for
     /// the admin API, and marks all other rows as gone. `observed_at` is a
     /// time before the list was fetched. Does nothing without a database.
@@ -1129,6 +1104,25 @@ impl StateHandler {
         if self.upsert_workflows(items, observed_at).await {
             let namespace = self.argo_client.namespace();
             let remove = db.remove_missing_workflows(namespace, observed_at, &names);
+            log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, remove).await);
+        }
+    }
+
+    /// Writes changed workflows to the `workflows` table and marks the
+    /// `gone` ones as gone. `observed_at` is a time before the changes were
+    /// seen. Does nothing without a database.
+    pub(crate) async fn record_changed_workflows(
+        &self,
+        items: &[SimpleStatus],
+        gone: &[String],
+        observed_at: DateTime<Utc>,
+    ) {
+        let Some(db) = self.stats.db() else {
+            return;
+        };
+        if self.upsert_workflows(items, observed_at).await && !gone.is_empty() {
+            let namespace = self.argo_client.namespace();
+            let remove = db.remove_workflows(namespace, observed_at, gone);
             log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, remove).await);
         }
     }
@@ -1159,6 +1153,18 @@ impl StateHandler {
         now: DateTime<Utc>,
     ) -> HashSet<Uuid> {
         self.apply_workflows(items, None, now).await
+    }
+
+    /// Like `apply_workflow_statuses`, but `items` are all workflows of the
+    /// jobs in `jobs` only. Other jobs, their live workflows and their
+    /// unresolved submissions are not changed. Expired jobs are dropped.
+    pub(crate) async fn apply_job_workflows(
+        &self,
+        items: Vec<SimpleStatus>,
+        jobs: &HashSet<Uuid>,
+        now: DateTime<Utc>,
+    ) -> HashSet<Uuid> {
+        self.apply_workflows(items, Some(jobs), now).await
     }
 
     async fn apply_workflows(
@@ -2733,6 +2739,7 @@ mod tests {
             deleted_jobs: Default::default(),
             live_workflows: Default::default(),
             workflows: Default::default(),
+            watch_connected: Default::default(),
             environment: "production".to_string(),
             stats: StatsRecorder::disabled(),
         };
