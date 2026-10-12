@@ -31,6 +31,11 @@ Both sides implement exactly what is described here. Changes to the contract are
 - Missing or invalid token: `401`. Valid token without the admin group: `403`.
 - Admin actions are logged with the user name (`preferred_username`) and the job or workflow they affect.
 
+## Request durations
+
+- The private metrics endpoint (`METRICS_SOCKET_ADDR`, default port 9090, path `/metrics`) has the histogram `http_request_duration_seconds` for all API requests, including `/api/admin/*`. Labels: `route` (the route template, for example `/api/admin/jobs/{id}`, or `unmatched`), `method` and `status`.
+- Requests that take 500 ms or longer are logged as a warning `slow_request` with route, method, status and `duration_ms`.
+
 ## Statistics database
 
 Migrations are embedded in the backend and run at startup. Table `jobs`, one row per job:

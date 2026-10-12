@@ -25,6 +25,8 @@ use crate::bakta_handler::BaktaHandler;
 
 const ACTIVE_WORKFLOW_KINDS: [&str; 4] = ["bakta", "bakta_proteins", "bakta_baktfold", "baktfold"];
 const ACTIVE_JOB_STATUSES: [&str; 4] = ["created", "pending", "init", "running"];
+/// Requests that take at least this long are logged.
+const SLOW_REQUEST: Duration = Duration::from_millis(500);
 
 fn build_job_runtime_histogram() -> Histogram {
     Histogram::new(exponential_buckets(1.0, 2.0, 16))
@@ -271,12 +273,17 @@ pub async fn track_http_metrics(
 
     let response = next.run(request).await;
 
-    state.state_handler.metrics.observe_http_request(
-        route,
-        method,
-        response.status().as_u16().to_string(),
-        started_at.elapsed(),
-    );
+    let duration = started_at.elapsed();
+    let status = response.status().as_u16().to_string();
+    if duration >= SLOW_REQUEST {
+        tracing::warn!(
+            %route, %method, %status, duration_ms = duration.as_millis() as u64, "slow_request"
+        );
+    }
+    state
+        .state_handler
+        .metrics
+        .observe_http_request(route, method, status, duration);
 
     response
 }
@@ -366,5 +373,32 @@ mod middleware_tests {
         assert!(!encoded.contains("abc123"), "{encoded}");
         assert!(encoded.contains("method=\"other\""), "{encoded}");
         assert!(!encoded.contains("BREW"), "{encoded}");
+    }
+
+    #[tokio::test]
+    async fn test_track_http_metrics_uses_the_nested_route_template() {
+        let handler = test_handler("http://127.0.0.1:1", "https://s3.example.com");
+        let admin = Router::new().route("/jobs/{id}", get(|| async { "ok" }));
+        let router = Router::new()
+            .nest("/api/admin", admin)
+            .layer(middleware::from_fn_with_state(
+                handler.clone(),
+                super::track_http_metrics,
+            ));
+
+        call(
+            &router,
+            "GET",
+            "/api/admin/jobs/0b7c4c4e-1b51-4a8e-9d0e-6c0d4b1f2a3c",
+            None,
+        )
+        .await;
+
+        let encoded = handler.state_handler.metrics.encode().unwrap();
+        assert!(
+            encoded.contains("route=\"/api/admin/jobs/{id}\",method=\"GET\",status=\"200\""),
+            "{encoded}"
+        );
+        assert!(!encoded.contains("0b7c4c4e"), "{encoded}");
     }
 }
