@@ -89,6 +89,10 @@ pub enum StatsEvent {
     /// The current workflow state of every job in one poll. The records are
     /// set to it, so a wrong record is repaired by the next poll.
     Polled(Vec<WorkflowState>),
+    /// Job ID, environment and `origin` label of polled workflows whose jobs
+    /// are deleted or expired. Only these two columns of existing records
+    /// are corrected, for any status. A missing label keeps the origin.
+    PolledMetadata(Vec<(Uuid, String, Option<String>)>),
     /// Argo retry of `workflow_name`, requested at `retried_at`. Sets
     /// `submitted_at` when it is the job's workflow. The new attempt's state
     /// comes from the next poll.
@@ -158,9 +162,45 @@ impl StatsDb {
         Ok(())
     }
 
+    /// Sets only `environment` and `origin` of existing records, for any
+    /// status. A record is only written when one of them differs.
+    async fn apply_polled_metadata(
+        &self,
+        metadata: &[(Uuid, String, Option<String>)],
+    ) -> Result<()> {
+        if metadata.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE jobs SET environment = polled.environment,
+                 origin = COALESCE(polled.origin, jobs.origin)
+             FROM UNNEST($1::uuid[], $2::text[], $3::text[]) AS polled(id, environment, origin)
+             WHERE jobs.id = polled.id
+                 AND (jobs.environment, jobs.origin)
+                     IS DISTINCT FROM (polled.environment, COALESCE(polled.origin, jobs.origin))",
+        )
+        .bind(metadata.iter().map(|(id, _, _)| *id).collect::<Vec<_>>())
+        .bind(
+            metadata
+                .iter()
+                .map(|(_, environment, _)| environment.clone())
+                .collect::<Vec<_>>(),
+        )
+        .bind(
+            metadata
+                .iter()
+                .map(|(_, _, origin)| origin.clone())
+                .collect::<Vec<_>>(),
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Sets the records to the polled workflow states. Missing records are
     /// created. A record is only written when it differs from the polled
-    /// state, and records of deleted or expired jobs are never changed.
+    /// state. Records of deleted or expired jobs only get the environment
+    /// and origin.
     async fn apply_polled(&self, states: &[WorkflowState]) -> Result<()> {
         if states.is_empty() {
             return Ok(());
@@ -245,7 +285,17 @@ impl StatsDb {
         .bind(column(|state| state.origin.clone()))
         .execute(&self.pool)
         .await?;
-        Ok(())
+        let metadata: Vec<_> = states
+            .iter()
+            .map(|state| {
+                (
+                    state.job.id,
+                    state.job.environment.clone(),
+                    state.origin.clone(),
+                )
+            })
+            .collect();
+        self.apply_polled_metadata(&metadata).await
     }
 
     pub async fn apply(&self, event: &StatsEvent) -> Result<()> {
@@ -286,6 +336,7 @@ impl StatsDb {
                 .await?;
             }
             StatsEvent::Polled(states) => self.apply_polled(states).await?,
+            StatsEvent::PolledMetadata(metadata) => self.apply_polled_metadata(metadata).await?,
             StatsEvent::Retried {
                 id,
                 workflow_name,

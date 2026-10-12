@@ -570,6 +570,15 @@ fn stats_status_label(status: &ArgoStatus) -> &'static str {
     }
 }
 
+/// Job ID, environment and `origin` label of a polled workflow.
+fn polled_metadata(id: Uuid, item: &SimpleStatus) -> (Uuid, String, Option<String>) {
+    (
+        id,
+        workflow_environment(&item.metadata.labels).to_string(),
+        item.metadata.labels.get("origin").cloned(),
+    )
+}
+
 /// Statistics state of a job from its current workflow. Times come from the
 /// workflow, so they describe the current attempt (Argo resets `startedAt`
 /// and clears `finishedAt` on retry).
@@ -1151,14 +1160,24 @@ impl StateHandler {
 
         let mut expired = Vec::new();
         let mut polled = Vec::new();
+        // Environment and origin of the workflows of deleted and expired
+        // jobs, which only correct existing records.
+        let mut metadata = Vec::new();
         for item in items {
             // Superseded workflows of a job (after a resubmit) never change
             // or expire the job.
+            if !is_current(&item) {
+                continue;
+            }
+            let job_id = job_id_label(&item);
+            if job_id.is_some_and(|id| reserved.contains(&id)) {
+                continue;
+            }
             // Deleted jobs are never added back.
-            if !is_current(&item)
-                || job_id_label(&item)
-                    .is_some_and(|id| reserved.contains(&id) || deleted.contains_key(&id))
+            if let Some(id) = job_id
+                && deleted.contains_key(&id)
             {
+                metadata.push(polled_metadata(id, &item));
                 continue;
             }
             let Some(state) = state_from_simple_status(item.clone()) else {
@@ -1172,6 +1191,7 @@ impl StateHandler {
                     None => continue,
                     Some(deleted) if deleted.contains(&state.id) => {
                         self.record_deleted(state.id);
+                        metadata.push(polled_metadata(state.id, &item));
                         continue;
                     }
                     Some(_) => {}
@@ -1206,6 +1226,7 @@ impl StateHandler {
                 if write_lock.remove(&state.id).is_some() {
                     expired.push((state.id, state.workflowname.clone()));
                 }
+                metadata.push(polled_metadata(state.id, &item));
                 continue;
             }
             let environment = workflow_environment(&item.metadata.labels);
@@ -1236,6 +1257,9 @@ impl StateHandler {
         // of retries and resubmits.
         if !polled.is_empty() {
             self.stats.record(StatsEvent::Polled(polled));
+        }
+        if !metadata.is_empty() {
+            self.stats.record(StatsEvent::PolledMetadata(metadata));
         }
         drop(write_lock);
         self.record_expired(expired);

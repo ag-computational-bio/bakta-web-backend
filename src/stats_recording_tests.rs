@@ -800,3 +800,184 @@ async fn resubmit_of_a_database_only_job_is_current_before_the_writer_catches_up
         .collect();
     assert_eq!(polled, ["wf-b"]);
 }
+
+/// A record with environment `staging`, origin `Unknown` and status
+/// `succeeded`, then `status` when that is `deleted` or `expired`.
+async fn staging_record(db: &StatsDb, id: Uuid, finished: chrono::DateTime<Utc>, status: &str) {
+    let job = crate::stats::NewJob {
+        id,
+        environment: "staging".to_string(),
+        workflow_kind: "bakta".to_string(),
+        api_version: "v2".to_string(),
+        name: None,
+        created_at: finished - Duration::hours(1),
+    };
+    db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
+    db.apply(&StatsEvent::Submitted(Box::new(
+        crate::stats::SubmittedJob {
+            job: job.clone(),
+            genus: None,
+            species: None,
+            strain: None,
+            sequence_count: None,
+            total_length: None,
+            config: None,
+            versions: JobVersions::default(),
+            workflow_name: "wf-1".to_string(),
+            submitted_at: job.created_at,
+            origin: "Unknown".to_string(),
+        },
+    )))
+    .await
+    .unwrap();
+    db.apply(&StatsEvent::Polled(vec![crate::stats::WorkflowState {
+        job,
+        workflow_name: "wf-1".to_string(),
+        status: "succeeded",
+        created_at: Some(finished - Duration::hours(1)),
+        started_at: Some(finished - Duration::minutes(30)),
+        finished_at: Some(finished),
+        error_message: None,
+        origin: None,
+    }]))
+    .await
+    .unwrap();
+    let event = match status {
+        "deleted" => StatsEvent::Deleted { id },
+        _ => StatsEvent::Expired {
+            id,
+            workflow_name: None,
+        },
+    };
+    db.apply(&event).await.unwrap();
+}
+
+/// A finished production workflow without the `api-version` label, as
+/// started by an older backend.
+fn production_workflow(id: Uuid, finished: chrono::DateTime<Utc>) -> SimpleStatus {
+    let mut workflow = attempt(
+        id,
+        "wf-1",
+        "Succeeded",
+        finished - Duration::hours(1),
+        finished - Duration::minutes(30),
+        Some(finished),
+    );
+    workflow.metadata.labels.remove("api-version");
+    workflow
+        .metadata
+        .labels
+        .insert("origin".to_string(), "bakta.computational.bio".to_string());
+    workflow
+}
+
+const LIFECYCLE_COLUMNS: [&str; 5] = [
+    "submitted_at",
+    "started_at",
+    "finished_at",
+    "updated_at",
+    "created_at",
+];
+
+#[tokio::test]
+async fn poll_corrects_the_environment_of_expired_jobs_only() {
+    let Some(db) = test_db("poll_corrects_the_environment_of_expired_jobs").await else {
+        return;
+    };
+    let now = Utc::now();
+    let finished = now - Duration::days(40);
+    let id = Uuid::new_v4();
+    staging_record(&db, id, finished, "expired").await;
+    let before = wait_for_row(&db, id, |_| true).await;
+    let without_record = Uuid::new_v4();
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new(db.clone(), JobVersions::default()),
+    );
+    handler
+        .state_handler
+        .apply_workflow_statuses(
+            vec![
+                production_workflow(id, finished),
+                production_workflow(without_record, finished),
+            ],
+            now,
+        )
+        .await;
+
+    let row = wait_for_row(&db, id, |row| {
+        row.get::<String, _>("environment") == "production"
+    })
+    .await;
+    assert_eq!(
+        row.get::<Option<String>, _>("origin").as_deref(),
+        Some("bakta.computational.bio")
+    );
+    assert_eq!(status_of(&row), "expired");
+    assert_eq!(
+        row.get::<Option<String>, _>("outcome").as_deref(),
+        Some("succeeded")
+    );
+    for column in LIFECYCLE_COLUMNS {
+        assert_eq!(micros(&row, column), micros(&before, column), "{column}");
+    }
+    // Both workflows are written in the same statement.
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE id = $1")
+        .bind(without_record)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(
+        !handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&without_record)
+    );
+}
+
+#[tokio::test]
+async fn poll_corrects_the_environment_of_deleted_jobs() {
+    let Some(db) = test_db("poll_corrects_the_environment_of_deleted_jobs").await else {
+        return;
+    };
+    let now = Utc::now();
+    let finished = now - Duration::days(1);
+    let id = Uuid::new_v4();
+    staging_record(&db, id, finished, "deleted").await;
+    let before = wait_for_row(&db, id, |_| true).await;
+    // After a restart, the job is only in the database.
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new(db.clone(), JobVersions::default()),
+    );
+    handler
+        .state_handler
+        .apply_workflow_statuses(vec![production_workflow(id, finished)], now)
+        .await;
+
+    let row = wait_for_row(&db, id, |row| {
+        row.get::<String, _>("environment") == "production"
+    })
+    .await;
+    assert_eq!(status_of(&row), "deleted");
+    assert_eq!(
+        row.get::<Option<String>, _>("origin").as_deref(),
+        Some("bakta.computational.bio")
+    );
+    for column in LIFECYCLE_COLUMNS {
+        assert_eq!(micros(&row, column), micros(&before, column), "{column}");
+    }
+    assert!(
+        !handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
+}
