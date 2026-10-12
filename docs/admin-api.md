@@ -87,7 +87,7 @@ Production and staging backends watch the same Argo namespace. A poll takes the 
 3. Else `staging` when the `origin` label starts with `staging.`, `http_localhost` or `http_127.0.0.1` (the staging and local development UIs).
 4. Else `production` (workflows of the old production backend).
 
-Polls correct the `environment` of existing records with this rule.
+Polls correct the `environment` of existing records with this rule. The workflow list and the bulk actions use the same rule to filter workflows by environment.
 
 ### Input statistics in the V2 start request
 
@@ -341,7 +341,7 @@ When the backend knows no workflow name for the job (for example a start request
 
 ### `GET /workflows?environment&phase&orphans`
 
-For this endpoint and for `POST /workflows/bulk`, `environment` defaults to the backend's own `ENVIRONMENT`.
+For this endpoint and for `POST /workflows/bulk`, `environment` defaults to the backend's own `ENVIRONMENT`. The backend lists all workflows from Argo and keeps those whose environment, derived as in "Environment of a workflow", matches. So workflows without a `bakta-environment` label are found too.
 
 Live Argo workflows of this backend, including ones without a job record. `phase`: comma separated (`Pending`, `Running`, `Succeeded`, `Failed`, `Error`).
 
@@ -349,7 +349,7 @@ Live Argo workflows of this backend, including ones without a job record. `phase
 { "items": [ { "name": "...", "job_id": "...", "workflow_kind": "bakta", "phase": "Failed", "template": "bakta-job-1.12.2", "environment": "production", "started_at": "...", "finished_at": "...", "message": "...", "suspended": false } ] }
 ```
 
-`job_id` is null when the workflow has no `jobid` label. `workflow_kind` is null when the workflow has no `workflow-kind` label.
+`job_id` is null when the workflow has no `jobid` label. `workflow_kind` is null when the workflow has no `workflow-kind` label. `environment` is the derived environment.
 With `orphans=true`, only workflows without a matching job record are returned: no `jobid` label, or a job ID that is not in the statistics database. This needs the statistics database (`503` without it).
 
 ### `POST /workflows/bulk`
@@ -400,5 +400,5 @@ In a dry run `result` is null. In a real run `result` is `done`, `skipped` (not 
 
 ## Workflow labels
 
-Every submitted workflow gets the label `bakta-environment=<ENVIRONMENT>` in addition to the existing labels (`jobid`, `origin`, ...). The workflow list and bulk actions only act on workflows of the backend's own environment unless `environment=all` is given.
+Every submitted workflow gets the label `bakta-environment=<ENVIRONMENT>` in addition to the existing labels (`jobid`, `origin`, ...). The workflow list and bulk actions only act on workflows of the backend's own environment unless `environment=all` is given. Workflows without this label get their environment from the other labels (see "Environment of a workflow").
 They only ever act on Bakta Web workflows: workflows with a `bakta-environment` label, or, for workflows created before that label existed, workflows with a `jobid` label that were created from a Bakta Web workflow template (`bakta-job-*`, `bakta-proteins-job-*`, `bakta-baktfold-job-*`, `baktfold-job-*`). `environment=all` only widens the environment, never this rule. Other workflows in the shared Argo namespace are never listed or changed.

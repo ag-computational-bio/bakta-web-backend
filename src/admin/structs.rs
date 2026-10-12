@@ -140,7 +140,7 @@ pub struct DeleteJobResponse {
 #[derive(Debug, Clone, Default, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct WorkflowListParams {
-    /// Environment label, default the backend's own environment, or `all`.
+    /// Environment, default the backend's own environment, or `all`.
     pub environment: Option<String>,
     /// Comma separated phases: `Pending`, `Running`, `Succeeded`, `Failed`, `Error`.
     pub phase: Option<String>,
@@ -158,6 +158,8 @@ pub struct WorkflowSummary {
     pub workflow_kind: Option<String>,
     pub phase: String,
     pub template: Option<String>,
+    /// Environment from the `bakta-environment` label, or derived from the
+    /// other labels for workflows without it.
     pub environment: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,

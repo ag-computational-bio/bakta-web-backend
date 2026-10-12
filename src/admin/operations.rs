@@ -17,7 +17,7 @@ use crate::{
     argo::structs::ArgoWorkflow,
     bakta_handler::{
         BaktaHandler, FullJobState, SubmissionUnknown, WorkflowLookupFailed, resubmitted_job_state,
-        state_reference_time,
+        state_reference_time, workflow_environment,
     },
     retention::{data_expires_at, is_data_available, reference_time},
     stats::StatsEvent,
@@ -512,20 +512,26 @@ fn is_bakta_web_workflow(workflow: &ArgoWorkflow) -> bool {
 }
 
 /// Live Bakta Web workflows of one environment, or of all with `all`.
-/// Other workflows in the shared namespace are never returned.
+/// Other workflows in the shared namespace are never returned. The
+/// environment is derived like in the poll, so workflows from before the
+/// `bakta-environment` label are found too.
 async fn environment_workflows(
     state: &BaktaHandler,
     environment: Option<&str>,
 ) -> Result<Vec<ArgoWorkflow>, AdminError> {
     let environment = parse_environment(environment, &state.state_handler.environment)?;
-    let selector = environment.map(|environment| format!("bakta-environment={environment}"));
     let mut workflows = state
         .state_handler
         .argo_client
-        .list_workflows(selector.as_deref())
+        .list_workflows(None)
         .await
         .map_err(AdminError::argo)?;
-    workflows.retain(is_bakta_web_workflow);
+    workflows.retain(|workflow| {
+        is_bakta_web_workflow(workflow)
+            && environment.as_deref().is_none_or(|environment| {
+                workflow_environment(&workflow.metadata.labels) == environment
+            })
+    });
     Ok(workflows)
 }
 
@@ -587,7 +593,7 @@ pub async fn list_workflows(
             WorkflowSummary {
                 job_id: labels.get("jobid").cloned(),
                 workflow_kind: labels.get("workflow-kind").cloned(),
-                environment: labels.get("bakta-environment").cloned(),
+                environment: Some(workflow_environment(labels).to_string()),
                 template: workflow
                     .spec
                     .workflow_template_ref

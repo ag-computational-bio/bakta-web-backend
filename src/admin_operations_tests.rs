@@ -766,16 +766,7 @@ async fn workflow_list_argo() -> MockServer {
     ]});
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/bakta"))
-        .and(query_param(
-            "listOptions.labelSelector",
-            "bakta-environment=production",
-        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(items))
-        .mount(&argo)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
         .mount(&argo)
         .await;
     Mock::given(method("DELETE"))
@@ -831,6 +822,14 @@ async fn workflows_lists_live_workflows_of_the_environment() {
     .await;
     assert_eq!(body["items"].as_array().unwrap().len(), 3);
     let (_, body) = admin_call(&setup, "GET", "/api/admin/workflows?environment=all", None).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 6);
+    let (_, body) = admin_call(
+        &setup,
+        "GET",
+        "/api/admin/workflows?environment=staging",
+        None,
+    )
+    .await;
     assert!(body["items"].as_array().unwrap().is_empty());
     let (status, _) = admin_call(&setup, "GET", "/api/admin/workflows?environment=a,b", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -887,6 +886,73 @@ async fn workflows_and_bulk_actions_only_touch_bakta_web_workflows() {
             "DELETE /api/v1/workflows/bakta/owned",
             "DELETE /api/v1/workflows/bakta/legacy"
         ]
+    );
+}
+
+#[tokio::test]
+async fn workflows_without_environment_label_use_the_derived_environment() {
+    let argo = MockServer::start().await;
+    let unlabelled = |name: &str, labels: Value| {
+        let mut workflow = listed_workflow(name, "Failed", Some(name), Some(48));
+        let all = workflow["metadata"]["labels"].as_object_mut().unwrap();
+        all.remove("bakta-environment");
+        all.extend(labels.as_object().unwrap().clone());
+        workflow
+    };
+    let items = json!({"items": [
+        unlabelled("old-production", json!({"origin": "bakta.computational.bio"})),
+        unlabelled("old-staging", json!({"origin": "staging.bakta.computational.bio"})),
+        unlabelled("old-v2", json!({"origin": "Unknown", "api-version": "v2"})),
+    ]});
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(items))
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+
+    let (status, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), ["old-production"]);
+    assert_eq!(body["items"][0]["environment"], "production");
+    let (_, body) = admin_call(
+        &setup,
+        "GET",
+        "/api/admin/workflows?environment=staging",
+        None,
+    )
+    .await;
+    assert_eq!(names(&body), ["old-staging", "old-v2"]);
+    assert_eq!(body["items"][0]["environment"], "staging");
+    assert!(
+        argo.received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| !request.url.as_str().contains("labelSelector"))
+    );
+
+    // A bulk run only acts on the named workflows of the derived environment.
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        "/api/admin/workflows/bulk",
+        Some(json!({
+            "action": "delete", "dry_run": false,
+            "filter": {"environment": "staging"},
+            "workflow_names": ["old-production", "old-staging"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), ["old-staging"]);
+    assert_eq!(
+        argo_changes(argo.received_requests().await.unwrap()),
+        ["DELETE /api/v1/workflows/bakta/old-staging"]
     );
 }
 

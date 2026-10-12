@@ -536,7 +536,7 @@ fn stats_new_job(state: &FullJobState, environment: &str, created_at: DateTime<U
 /// before that label existed, only the staging backend set `api-version`, and
 /// the `origin` label shows the staging and local development UIs. All other
 /// workflows come from the old production backend.
-fn workflow_environment(labels: &HashMap<String, String>) -> &str {
+pub fn workflow_environment(labels: &HashMap<String, String>) -> &str {
     if let Some(environment) = labels.get("bakta-environment")
         && crate::admin::is_valid_environment(environment)
     {
