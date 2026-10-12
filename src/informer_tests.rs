@@ -1097,3 +1097,73 @@ async fn the_newest_completed_workflow_of_a_job_wins_across_pages() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn a_pending_completion_does_not_undo_a_newer_state_of_its_workflow() {
+    let id = Uuid::new_v4();
+    let events = [
+        event("DELETED", kube_workflow("wf-v", id, "Running", false, 101)),
+        // An admin retry: the same workflow is watched again.
+        event("ADDED", kube_workflow("wf-v", id, "Running", false, 120)),
+    ]
+    .concat();
+    let kube = watch_server(
+        vec![kube_workflow("wf-v", id, "Running", false, 90)],
+        events,
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{WORKFLOWS}/wf-v")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(kube_workflow("wf-v", id, "Failed", true, 101)),
+        )
+        .mount(&kube)
+        .await;
+    let handler = test_handler("http://127.0.0.1:1", "https://s3.example.com");
+    let state = handler.state_handler.clone();
+    insert_state(
+        &handler,
+        crate::bakta_handler::FullJobState {
+            id,
+            workflowname: Some("wf-v".to_string()),
+            ..job_state(
+                crate::bakta_handler::ApiVersion::V2,
+                crate::v2::api_structs::WorkflowKind::Bakta,
+                crate::v2::api_structs::ResultKind::Bakta,
+                Some(crate::api_structs::ArgoStatus::Running),
+            )
+        },
+    )
+    .await;
+    // The completion arrives while the job is reserved, so it stays pending.
+    let reservation = state.reserve_start(id).unwrap();
+    start(
+        state.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the retried workflow", || async {
+        state
+            .workflows
+            .read()
+            .unwrap()
+            .get("wf-v")
+            .is_some_and(|item| item.metadata.resource_version.as_deref() == Some("120"))
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    drop(reservation);
+    wait_for("no pending completion", || async {
+        state.completions.lock().unwrap().pending.is_empty()
+    })
+    .await;
+    assert!(matches!(
+        state.job_state.read().await[&id].status,
+        Some(crate::api_structs::ArgoStatus::Running)
+    ));
+}

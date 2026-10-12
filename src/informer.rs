@@ -240,6 +240,23 @@ fn relevant(item: SimpleStatus) -> Option<SimpleStatus> {
     (labels.contains_key("jobid") || labels.contains_key("bakta-environment")).then_some(item)
 }
 
+/// True when `item` is a later state of the same workflow than `than`, by
+/// the Kubernetes resource version. Versions that are not numbers count as
+/// later.
+fn is_newer(item: &SimpleStatus, than: &SimpleStatus) -> bool {
+    let version = |item: &SimpleStatus| {
+        item.metadata
+            .resource_version
+            .as_deref()?
+            .parse::<u64>()
+            .ok()
+    };
+    match (version(item), version(than)) {
+        (Some(item), Some(than)) => item > than,
+        _ => true,
+    }
+}
+
 fn is_completed(item: &SimpleStatus) -> bool {
     item.metadata
         .labels
@@ -1063,10 +1080,19 @@ impl StateHandler {
         let in_scope =
             |item: &SimpleStatus| job_id_label(item).is_some_and(|id| jobs.contains(&id));
         {
+            let workflows = self.workflows.read().expect("workflows lock poisoned");
             let mut completions = self.completions.lock().expect("completions lock poisoned");
             for item in completed.into_iter().filter(in_scope) {
                 completions.pending.insert(item.metadata.name.clone(), item);
             }
+            // A workflow that is watched again after its completion (for
+            // example after an Argo retry) has a newer state: the completion
+            // is outdated.
+            completions.pending.retain(|name, item| {
+                workflows
+                    .get(name)
+                    .is_none_or(|watched| !is_newer(watched, item))
+            });
             items.extend(
                 completions
                     .pending
