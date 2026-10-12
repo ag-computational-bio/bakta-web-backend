@@ -173,7 +173,7 @@ Finished jobs:
 
 - With the statistics database, a finished job leaves memory once its record has the final state (status and workflow name). Until then the final state is recorded again every 15 seconds. Memory only holds jobs with a watched workflow, jobs being started, deleted or resubmitted, and unresolved start requests.
 - Every hour, records of finished jobs (`succeeded`, `failed`, `error`) whose finish (or start) is older than 35 days get status `expired`, like jobs in memory before.
-- User requests (V1 and V2 job list, results, logs, delete and start) for a job that is not in memory read its record. Records with status `created`, `deleted` or `expired`, and finished records older than 35 days, are not found. The given secret is hashed and compared with `secret_hash` in constant time. A record without `secret_hash` denies every secret. Logs of finished jobs are read from the Argo archive with `argo_uid`.
+- User requests (V1 and V2 job list, results, logs, delete and start) for a job that is not in memory read its record. Records with status `created`, `deleted` or `expired`, and finished records older than 35 days, are not found. The given secret is hashed and compared with `secret_hash` in constant time. A record without `secret_hash` denies every secret. When the database lookup fails, these requests answer `503` (`The job database is not available, try again later`) instead of reporting the job as missing or deleted. Logs of finished jobs are read from the Argo archive with `argo_uid`.
 - Without the statistics database, the completed workflows of the list after startup are applied to memory, and finished jobs stay in memory for 35 days as before.
 
 What still calls Argo:

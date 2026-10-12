@@ -1050,13 +1050,18 @@ async fn finished_jobs_leave_memory_once_the_database_has_their_final_state() {
     assert!(!state.live_workflows.read().unwrap().contains_key(&id));
 
     // The finished job is served from the database.
-    let served = state.user_job_state(id, TEST_SECRET).await.unwrap();
+    let served = state
+        .user_job_state(id, TEST_SECRET)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(served.secret_matches(TEST_SECRET));
     assert!(matches!(served.status, Some(ArgoStatus::Succeeded)));
     assert!(
         !state
             .user_job_state(id, "Unknown")
             .await
+            .unwrap()
             .unwrap()
             .secret_matches("Unknown")
     );

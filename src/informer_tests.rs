@@ -424,7 +424,11 @@ async fn the_watch_follows_live_workflows_and_records_completions_once() {
     // A job that the database had in its final state is not written again.
     assert_eq!(updated_at(&db, recorded).await, recorded_at);
     // The finished jobs are served from the database.
-    let served = state.user_job_state(done, TEST_SECRET).await.unwrap();
+    let served = state
+        .user_job_state(done, TEST_SECRET)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(served.secret_matches(TEST_SECRET));
     assert!(
         state

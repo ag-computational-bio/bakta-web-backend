@@ -55,10 +55,10 @@ async fn assert_denied(handler: &BaktaHandler, id: Uuid, secret: &str) {
         assert_eq!(error.to_string(), "Unauthorized", "{what}");
     };
 
-    let list = state.get_job_states(vec![job()]).await;
+    let list = state.get_job_states(vec![job()]).await.unwrap();
     assert!(list.jobs.is_empty(), "v1 list");
     assert_eq!(list.failed.len(), 1, "v1 list");
-    let list = state.get_job_states_v2(vec![reference()]).await;
+    let list = state.get_job_states_v2(vec![reference()]).await.unwrap();
     assert!(list.jobs.is_empty(), "v2 list");
     assert_eq!(list.failed_jobs.len(), 1, "v2 list");
     unauthorized(
@@ -100,7 +100,7 @@ async fn assert_denied(handler: &BaktaHandler, id: Uuid, secret: &str) {
     .unwrap();
     unauthorized(state.start_job_v2(start, None).await, "v2 start");
     unauthorized(state.delete_job((id, secret.to_string())).await, "delete");
-    assert!(state.user_job_state(id, secret).await.is_some());
+    assert!(state.user_job_state(id, secret).await.unwrap().is_some());
 }
 
 async fn assert_allowed(handler: &BaktaHandler, id: Uuid) {
@@ -110,7 +110,8 @@ async fn assert_allowed(handler: &BaktaHandler, id: Uuid) {
             job_id: id,
             secret: TEST_SECRET.to_string(),
         }])
-        .await;
+        .await
+        .unwrap();
     assert!(list.failed_jobs.is_empty(), "owner secret was denied");
     assert_eq!(list.jobs.len(), 1);
 }
@@ -297,7 +298,8 @@ async fn finished_jobs_are_served_from_the_database_with_their_secret() {
             id,
             secret: TEST_SECRET.to_string(),
         }])
-        .await;
+        .await
+        .unwrap();
     assert_eq!(list.jobs.len(), 1);
     assert!(matches!(
         list.jobs[0].status,
@@ -327,7 +329,8 @@ async fn finished_jobs_are_served_from_the_database_with_their_secret() {
             job_id: expired,
             secret: TEST_SECRET.to_string(),
         }])
-        .await;
+        .await
+        .unwrap();
     assert!(list.jobs.is_empty());
     assert!(matches!(
         list.failed_jobs[0].status,
@@ -351,5 +354,66 @@ async fn finished_jobs_are_served_from_the_database_with_their_secret() {
         .delete_job((id, TEST_SECRET.to_string()))
         .await
         .unwrap();
-    assert!(state.user_job_state(id, TEST_SECRET).await.is_none());
+    assert!(
+        state
+            .user_job_state(id, TEST_SECRET)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_failed_record_lookup_is_a_temporary_error() {
+    let unreachable =
+        crate::stats::StatsDb::connect_lazy("postgres://bakta@127.0.0.1:1/bakta").unwrap();
+    let argo = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let handler = test_handler_with_stats(
+        &argo.uri(),
+        "https://s3.example.com",
+        crate::stats::StatsRecorder::capturing_with_db(unreachable).0,
+    );
+    let router = test_router(handler);
+    let id = Uuid::new_v4();
+    let reference = json!({"job_id": id, "secret": TEST_SECRET});
+    for (method, uri, body) in [
+        (
+            "POST",
+            "/api/v1/job/list".to_string(),
+            Some(json!({"jobs": [{"jobID": id, "secret": TEST_SECRET}]})),
+        ),
+        (
+            "POST",
+            "/api/v2/job/list".to_string(),
+            Some(json!({"jobs": [reference]})),
+        ),
+        (
+            "POST",
+            "/api/v2/job/result".to_string(),
+            Some(reference.clone()),
+        ),
+        (
+            "GET",
+            format!("/api/v2/job/logs?job_id={id}&secret={TEST_SECRET}"),
+            None,
+        ),
+        (
+            "DELETE",
+            format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+            None,
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/job/delete?jobID={id}&secret={TEST_SECRET}"),
+            None,
+        ),
+    ] {
+        let (status, body) = call(&router, method, &uri, body).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}: {body}");
+    }
 }

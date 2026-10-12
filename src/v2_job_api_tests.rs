@@ -397,7 +397,8 @@ async fn a_slow_delete_does_not_block_other_jobs() {
                 job_id: other,
                 secret: TEST_SECRET.to_string(),
             }])
-            .await;
+            .await
+            .unwrap();
         assert!(list.failed_jobs.is_empty());
         new_job
     };

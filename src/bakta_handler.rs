@@ -1001,6 +1001,31 @@ fn into_v2_failed_status(id: Uuid, status: FailedJobStatusEnum) -> V2FailedJobSt
     }
 }
 
+/// The statistics database failed while looking up jobs that are not in
+/// memory. Answered with `503`.
+#[derive(Debug)]
+pub struct RecordLookupFailed;
+
+impl std::fmt::Display for RecordLookupFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "The job database is not available, try again later")
+    }
+}
+
+impl std::error::Error for RecordLookupFailed {}
+
+/// `503` for a failed job record lookup, else `default`.
+pub(crate) fn error_status(
+    error: &anyhow::Error,
+    default: axum::http::StatusCode,
+) -> axum::http::StatusCode {
+    if error.is::<RecordLookupFailed>() {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        default
+    }
+}
+
 /// A job that is not live, from the statistics database. The secret is
 /// only known as a hash.
 pub(crate) struct RecordedJob {
@@ -1695,11 +1720,11 @@ impl StateHandler {
     }
 
     /// Jobs in `ids` that are not live, from the statistics database.
-    /// Deleted and expired jobs are missing. Empty without a database or
-    /// when it fails.
-    pub(crate) async fn recorded_jobs(&self, ids: &[Uuid]) -> HashMap<Uuid, RecordedJob> {
+    /// Deleted and expired jobs are missing. Empty without a database. Fails
+    /// with `RecordLookupFailed` when the database fails.
+    pub(crate) async fn recorded_jobs(&self, ids: &[Uuid]) -> Result<HashMap<Uuid, RecordedJob>> {
         let Some(db) = self.stats.db() else {
-            return HashMap::new();
+            return Ok(HashMap::new());
         };
         let ids: Vec<Uuid> = {
             let job_state = self.job_state.read().await;
@@ -1709,7 +1734,7 @@ impl StateHandler {
                 .collect()
         };
         if ids.is_empty() {
-            return HashMap::new();
+            return Ok(HashMap::new());
         }
         let records =
             match tokio::time::timeout(std::time::Duration::from_secs(5), db.user_jobs(&ids)).await
@@ -1717,37 +1742,42 @@ impl StateHandler {
                 Ok(Ok(records)) => records,
                 Ok(Err(error)) => {
                     tracing::warn!(%error, "recorded_jobs_lookup_failed");
-                    return HashMap::new();
+                    return Err(RecordLookupFailed.into());
                 }
                 Err(_) => {
                     tracing::warn!("recorded_jobs_lookup_timed_out");
-                    return HashMap::new();
+                    return Err(RecordLookupFailed.into());
                 }
             };
         let now = Utc::now();
-        records
+        Ok(records
             .into_iter()
             .filter_map(|record| recorded_job(record, now))
             .filter(|job| !is_state_expired(&job.state, now))
             .map(|job| (job.state.id, job))
-            .collect()
+            .collect())
     }
 
     /// The state of a job for a user request with `secret`: the live state,
     /// or else the database record. `None` when the job is not found.
-    pub(crate) async fn user_job_state(&self, id: Uuid, secret: &str) -> Option<FullJobState> {
+    pub(crate) async fn user_job_state(
+        &self,
+        id: Uuid,
+        secret: &str,
+    ) -> Result<Option<FullJobState>> {
         if let Some(state) = self.job_state.read().await.get(&id) {
-            return Some(state.clone());
+            return Ok(Some(state.clone()));
         }
-        self.recorded_jobs(&[id])
-            .await
+        Ok(self
+            .recorded_jobs(&[id])
+            .await?
             .get(&id)
-            .map(|job| job.for_secret(secret))
+            .map(|job| job.for_secret(secret)))
     }
 
-    pub async fn get_job_states(&self, request_jobs: Vec<Job>) -> ListResponse {
+    pub async fn get_job_states(&self, request_jobs: Vec<Job>) -> Result<ListResponse> {
         let ids: Vec<Uuid> = request_jobs.iter().map(|job| job.id).collect();
-        let recorded = self.recorded_jobs(&ids).await;
+        let recorded = self.recorded_jobs(&ids).await?;
         let read_lock = self.job_state.read().await;
         let mut jobs = vec![];
         let mut failed = vec![];
@@ -1774,7 +1804,7 @@ impl StateHandler {
             }
         }
 
-        ListResponse { jobs, failed }
+        Ok(ListResponse { jobs, failed })
     }
 
     pub async fn render_metrics(&self) -> Result<String> {
@@ -1800,9 +1830,12 @@ impl StateHandler {
         self.metrics.encode().map_err(|e| anyhow!(e.to_string()))
     }
 
-    pub async fn get_job_states_v2(&self, request_jobs: Vec<JobReference>) -> V2ListResponse {
+    pub async fn get_job_states_v2(
+        &self,
+        request_jobs: Vec<JobReference>,
+    ) -> Result<V2ListResponse> {
         let ids: Vec<Uuid> = request_jobs.iter().map(|job| job.job_id).collect();
-        let recorded = self.recorded_jobs(&ids).await;
+        let recorded = self.recorded_jobs(&ids).await?;
         let read_lock = self.job_state.read().await;
         let mut jobs = vec![];
         let mut failed_jobs = vec![];
@@ -1826,11 +1859,11 @@ impl StateHandler {
             }
         }
 
-        V2ListResponse { jobs, failed_jobs }
+        Ok(V2ListResponse { jobs, failed_jobs })
     }
 
     pub async fn get_logs(&self, (job_id, secret): (Uuid, String)) -> Result<String> {
-        let Some(state) = self.user_job_state(job_id, &secret).await else {
+        let Some(state) = self.user_job_state(job_id, &secret).await? else {
             return Err(anyhow!("Job not found"));
         };
         if !state.secret_matches(&secret) {
@@ -1868,7 +1901,7 @@ impl StateHandler {
         JobReference { job_id, secret }: JobReference,
     ) -> Result<V2LogsResponse> {
         let (workflow_kind, workflow_name, overall_status, archived, argo_uid) = {
-            let Some(state) = self.user_job_state(job_id, &secret).await else {
+            let Some(state) = self.user_job_state(job_id, &secret).await? else {
                 return Err(anyhow!("Job not found"));
             };
 
@@ -1992,7 +2025,7 @@ impl StateHandler {
         // The Argo calls run without the job state lock, so a slow Argo does
         // not block other jobs. The reservation keeps starts and polls of
         // this job out until the delete is done.
-        let recorded = self.recorded_jobs(&[job_id]).await;
+        let recorded = self.recorded_jobs(&[job_id]).await?;
         let (state, _reservation) = {
             let read_lock = self.job_state.read().await;
             let recorded = recorded.get(&job_id).map(|job| job.for_secret(&secret));
@@ -2307,7 +2340,7 @@ impl StateHandler {
         let parameters = start_settings.config.into_parameters();
         let template_name = format!("bakta-job-{}", bakta_version);
 
-        let recorded = self.recorded_jobs(&[id]).await;
+        let recorded = self.recorded_jobs(&[id]).await?;
         let (labels, api_version, workflow_kind, _reservation) = {
             let read_lock = self.job_state.read().await;
             let Some(state) = read_lock.get(&id) else {
@@ -2416,7 +2449,7 @@ impl StateHandler {
         let template_name =
             workflow_template_name(workflow_kind, &self.bakta_version, &self.baktfold_version)?;
 
-        let recorded = self.recorded_jobs(&[job_id]).await;
+        let recorded = self.recorded_jobs(&[job_id]).await?;
         let (labels, api_version, _reservation) = {
             let read_lock = self.job_state.read().await;
             let Some(state) = read_lock.get(&job_id) else {
@@ -2526,7 +2559,7 @@ impl StateHandler {
         s3_handler: &S3Handler,
     ) -> Result<V2ResultResponse> {
         let (workflow_kind, result_kind, started, updated, name) = {
-            let Some(state) = self.user_job_state(job_id, &secret).await else {
+            let Some(state) = self.user_job_state(job_id, &secret).await? else {
                 return Err(anyhow!("Job not found"));
             };
 
@@ -2566,7 +2599,7 @@ impl StateHandler {
         Job { id, secret }: Job,
         s3_handler: &S3Handler,
     ) -> Result<ResultResponse> {
-        if let Some(state) = self.user_job_state(id, &secret).await {
+        if let Some(state) = self.user_job_state(id, &secret).await? {
             if !state.secret_matches(&secret) {
                 return Err(anyhow!("Unauthorized"));
             }

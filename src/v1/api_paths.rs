@@ -13,6 +13,7 @@ use crate::{
         InitRequest, InitResponse, Job, ListRequest, ListResponse, ResultResponse, StartRequest,
         VersionResponse,
     },
+    bakta_handler::error_status,
     bakta_handler::{
         BaktaHandler, JobAlreadyStarted, REGEX, SubmissionUnknown, WorkflowLookupFailed,
     },
@@ -48,7 +49,7 @@ pub async fn delete_job(
             } else if e.is::<WorkflowLookupFailed>() {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
-                StatusCode::BAD_REQUEST
+                error_status(&e, StatusCode::BAD_REQUEST)
             };
             (status, e.to_string())
         })
@@ -76,7 +77,7 @@ pub async fn job_logs(
         .state_handler
         .get_logs((job.id, job.secret))
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+        .map_err(|e| (error_status(&e, StatusCode::BAD_REQUEST), e.to_string()))
 }
 
 /// Create a new V1 Bakta job and return upload URLs.
@@ -149,7 +150,14 @@ pub async fn list_jobs(
     State(state): State<Arc<BaktaHandler>>,
     Json(list_request): Json<ListRequest>,
 ) -> impl IntoResponse {
-    Json(state.state_handler.get_job_states(list_request.jobs).await)
+    match state.state_handler.get_job_states(list_request.jobs).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => (
+            error_status(&e, StatusCode::INTERNAL_SERVER_ERROR),
+            Json(e.to_string()),
+        )
+            .into_response(),
+    }
 }
 
 /// Fetch the signed result artifact URLs for a finished V1 job.
@@ -176,7 +184,11 @@ pub async fn query_result(
         .await
     {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(e.to_string())).into_response(),
+        Err(e) => (
+            error_status(&e, StatusCode::BAD_REQUEST),
+            Json(e.to_string()),
+        )
+            .into_response(),
     }
 }
 
@@ -219,7 +231,11 @@ pub async fn start_job(
         Err(e) if e.is::<JobAlreadyStarted>() || e.is::<SubmissionUnknown>() => {
             (StatusCode::CONFLICT, Json(e.to_string())).into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(e.to_string())).into_response(),
+        Err(e) => (
+            error_status(&e, StatusCode::BAD_REQUEST),
+            Json(e.to_string()),
+        )
+            .into_response(),
     }
 }
 
