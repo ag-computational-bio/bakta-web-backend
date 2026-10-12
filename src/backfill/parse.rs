@@ -197,10 +197,9 @@ pub fn template_versions(name: &str) -> Option<(WorkflowKind, JobVersions)> {
         (WorkflowKind::BaktaProteins, version(rest), None)
     } else if let Some(rest) = name.strip_prefix("bakta-job-") {
         (WorkflowKind::Bakta, version(rest), None)
-    } else if let Some(rest) = name.strip_prefix("baktfold-job-") {
-        (WorkflowKind::Baktfold, None, version(rest))
     } else {
-        return None;
+        let rest = name.strip_prefix("baktfold-job-")?;
+        (WorkflowKind::Baktfold, None, version(rest))
     };
     if bakta.is_none() && baktfold.is_none() {
         return None;
