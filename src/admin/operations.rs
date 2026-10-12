@@ -151,9 +151,14 @@ fn log_table_write(result: Result<anyhow::Result<()>, tokio::time::error::Elapse
 }
 
 /// Writes a workflow as Argo returned it after an admin action to the
-/// `workflows` table, so the next workflow list shows the change. Failures
-/// are only logged.
-async fn store_workflow(state: &BaktaHandler, workflow: &ArgoWorkflow) {
+/// `workflows` table, so the next workflow list shows the change.
+/// `requested_at` is a time before the Argo request, so a newer state that
+/// the watch wrote meanwhile is kept. Failures are only logged.
+async fn store_workflow(
+    state: &BaktaHandler,
+    workflow: &ArgoWorkflow,
+    requested_at: chrono::DateTime<Utc>,
+) {
     let handler = &state.state_handler;
     let Some(db) = handler.stats.db() else {
         return;
@@ -162,7 +167,7 @@ async fn store_workflow(state: &BaktaHandler, workflow: &ArgoWorkflow) {
         return;
     }
     let namespace = handler.argo_client.namespace();
-    let write = db.upsert_workflows(namespace, Utc::now(), std::slice::from_ref(workflow));
+    let write = db.upsert_workflows(namespace, requested_at, std::slice::from_ref(workflow));
     log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, write).await);
 }
 
@@ -306,7 +311,7 @@ pub async fn retry_job(
         .map_err(AdminError::argo)?;
     tracing::info!(user = %user.username, job_id = %id, workflow_name = %workflow_name, "admin_retry");
     after_retry(&state, id, &workflow_name, retried_at).await;
-    store_workflow(&state, &workflow).await;
+    store_workflow(&state, &workflow, retried_at).await;
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Running"),
         workflow_name,
@@ -373,7 +378,7 @@ pub async fn resubmit_job(
         new_workflow_name = %new_name, "admin_resubmit"
     );
     after_resubmit(&state, id, &old_name, &workflow).await;
-    store_workflow(&state, &workflow).await;
+    store_workflow(&state, &workflow, requested_at).await;
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Pending"),
         workflow_name: new_name,
@@ -409,6 +414,7 @@ pub async fn stop_job(
             "Workflow is {phase}, only running workflows can be stopped"
         )));
     }
+    let requested_at = Utc::now();
     let workflow = state
         .state_handler
         .argo_client
@@ -416,7 +422,7 @@ pub async fn stop_job(
         .await
         .map_err(AdminError::argo)?;
     tracing::info!(user = %user.username, job_id = %id, workflow_name = %workflow_name, "admin_stop");
-    store_workflow(&state, &workflow).await;
+    store_workflow(&state, &workflow, requested_at).await;
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Failed"),
         workflow_name,
@@ -456,12 +462,13 @@ pub async fn resume_job(
             "Workflow is not suspended".to_string(),
         ));
     }
+    let requested_at = Utc::now();
     let workflow = argo
         .resume_workflow(&workflow_name)
         .await
         .map_err(AdminError::argo)?;
     tracing::info!(user = %user.username, job_id = %id, workflow_name = %workflow_name, "admin_resume");
-    store_workflow(&state, &workflow).await;
+    store_workflow(&state, &workflow, requested_at).await;
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Running"),
         workflow_name,
@@ -849,6 +856,7 @@ async fn run_bulk_action(
         .labels
         .get("jobid")
         .and_then(|value| value.parse::<Uuid>().ok());
+    let requested_at = Utc::now();
     let changed = match action {
         BulkAction::Delete => {
             argo.delete_workflow_by_name(name).await?;
@@ -885,7 +893,7 @@ async fn run_bulk_action(
             new_workflow
         }
     };
-    store_workflow(state, &changed).await;
+    store_workflow(state, &changed, requested_at).await;
     Ok(())
 }
 

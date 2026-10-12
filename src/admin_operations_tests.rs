@@ -2725,3 +2725,47 @@ async fn a_stalled_workflow_table_does_not_hold_admin_actions() {
     assert!(setup.handler.state_handler.reserve_start(id).is_ok());
     assert!(setup.handler.state_handler.is_deleted(&id));
 }
+
+#[tokio::test]
+async fn a_delayed_admin_response_does_not_overwrite_a_newer_state() {
+    let Some(db) = test_db("a_delayed_admin_response_does_not_overwrite").await else {
+        return;
+    };
+    let argo = MockServer::start().await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+    let id = job_with_workflow(&setup.handler, "wf-1", ArgoStatus::Failed).await;
+    let job = id.to_string();
+    let failed = listed_workflow("wf-1", "Failed", Some(&job), Some(1));
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(failed))
+        .mount(&argo)
+        .await;
+    // Argo answers the retry late, with the state at the time of the retry.
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-1/retry"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(listed_workflow("wf-1", "Running", Some(&job), None))
+                .set_delay(std::time::Duration::from_millis(1000)),
+        )
+        .mount(&argo)
+        .await;
+
+    let uri = format!("/api/admin/jobs/{id}/retry");
+    let retry = admin_call(&setup, "POST", &uri, None);
+    let watch = async {
+        // Meanwhile the watch writes the completed retry.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let done: crate::argo::structs::ArgoWorkflow =
+            serde_json::from_value(listed_workflow("wf-1", "Succeeded", Some(&job), Some(0)))
+                .unwrap();
+        db.upsert_workflows("bakta", Utc::now(), &[done])
+            .await
+            .unwrap();
+    };
+    let ((status, body), ()) = tokio::join!(retry, watch);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
+    assert_eq!(body["items"][0]["phase"], "Succeeded", "{body}");
+}
