@@ -1558,11 +1558,12 @@ impl StateHandler {
         scope: Option<&HashSet<Uuid>>,
         now: DateTime<Utc>,
     ) -> HashSet<Uuid> {
-        // Jobs of other environments are left to their backends.
-        let items: Vec<SimpleStatus> = items
+        // Jobs of other environments are left to their backends. Their
+        // workflows only resolve marked submissions, for example of an admin
+        // resubmit of such a job.
+        let (items, others): (Vec<SimpleStatus>, Vec<SimpleStatus>) = items
             .into_iter()
-            .filter(|item| self.manages(&item.metadata.labels))
-            .collect();
+            .partition(|item| self.manages(&item.metadata.labels));
         let in_scope = |id: &Uuid| scope.is_none_or(|jobs| jobs.contains(id));
         let mut retry = HashSet::new();
         let recorded_in_db = self.recorded_workflow_names(&items).await;
@@ -1584,7 +1585,11 @@ impl StateHandler {
         // old workflow, which never resolves the mark. The newest workflow
         // that the resubmit may have created becomes current instead.
         let by_job = workflows_by_job(&items);
+        let others_by_job = workflows_by_job(&others);
         let mut resolved = HashSet::new();
+        // Marks resolved by a workflow of another environment: there is no
+        // job state to update here.
+        let mut resolved_elsewhere = HashSet::new();
         {
             let mut markers = self
                 .unknown_submissions
@@ -1598,6 +1603,12 @@ impl StateHandler {
                         .max_by_key(|item| (item.metadata.creation_timestamp, &item.metadata.name))
                 });
                 let Some(created) = created else {
+                    let elsewhere = others_by_job.get(id).is_some_and(|workflows| {
+                        workflows.iter().any(|item| marker.resolved_by(item))
+                    });
+                    if elsewhere {
+                        resolved_elsewhere.insert(*id);
+                    }
                     continue;
                 };
                 if marker.resubmit.is_some() {
@@ -1610,8 +1621,8 @@ impl StateHandler {
             markers.retain(|id, marker| {
                 !in_scope(id)
                     || reserved.contains(id)
-                    || resolved.contains(id)
-                    || marker.still_unknown(now)
+                    || (!resolved_elsewhere.contains(id)
+                        && (resolved.contains(id) || marker.still_unknown(now)))
             });
         }
         let deleted = {

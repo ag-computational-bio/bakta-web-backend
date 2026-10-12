@@ -2907,3 +2907,56 @@ async fn an_admin_resubmit_of_another_environment_keeps_no_local_state() {
     }
     panic!("the record was not updated");
 }
+
+#[tokio::test]
+async fn an_unknown_resubmit_of_another_environment_is_resolved_by_its_workflow() {
+    let Some(db) = test_db("an_unknown_resubmit_of_another_environment").await else {
+        return;
+    };
+    let id = finished_record(&db, Uuid::new_v4()).await;
+    sqlx::query("UPDATE jobs SET environment = 'staging' WHERE id = $1")
+        .bind(id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let argo = MockServer::start().await;
+    // Argo creates the new workflow, but its answer cannot be read.
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-done/resubmit"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+    let state = &setup.handler.state_handler;
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        &format!("/api/admin/jobs/{id}/resubmit"),
+        None,
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert!(state.is_submission_unknown(&id));
+
+    // The watch reports the new workflow of the staging job.
+    let created = Utc::now() + Duration::seconds(1);
+    let new_workflow: SimpleStatus = serde_json::from_value(json!({
+        "metadata": {"name": "wf-new", "uid": Uuid::new_v4(),
+                     "creationTimestamp": created.to_rfc3339(),
+                     "labels": {"jobid": id.to_string(), "bakta-environment": "staging",
+                                "secret": TEST_SECRET}},
+        "status": {"phase": "Pending", "startedAt": created.to_rfc3339()}
+    }))
+    .unwrap();
+    state
+        .apply_job_workflows(
+            vec![new_workflow],
+            &std::collections::HashSet::from([id]),
+            Utc::now(),
+        )
+        .await;
+    assert!(!state.is_submission_unknown(&id));
+    // The job stays with its own backend.
+    assert!(!state.job_state.read().await.contains_key(&id));
+}
