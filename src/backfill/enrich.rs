@@ -77,7 +77,84 @@ async fn enrich(db: &StatsDb, s3: &S3Handler, workflow: Workflow) -> Result<()> 
         return Ok(());
     }
     read_sizes(s3, &mut job, read_summary, read_input).await;
-    tokio::time::timeout(WRITE_TIMEOUT, db.backfill_job(&job)).await??;
+    tokio::time::timeout(WRITE_TIMEOUT, db.fill_details(&job)).await??;
     tracing::debug!(job_id = %job.job.id, "job_enriched");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{argo::structs::SimpleStatus, stats::test_db::test_db};
+    use serde_json::json;
+    use sqlx::Row;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn test_enrichment_writes_details_but_never_attempt_fields() {
+        let Some(db) = test_db("test_enrichment_writes_details_but_never_attempt_fields").await
+        else {
+            return;
+        };
+        let id = Uuid::new_v4();
+        let started = Utc::now() - chrono::Duration::minutes(1);
+        // An Argo retry runs the same workflow again: the record has the new
+        // attempt without finish, error or runtime.
+        sqlx::query(
+            "INSERT INTO jobs (id, environment, workflow_kind, api_version, status, outcome,
+                               created_at, workflow_name, submitted_at, started_at)
+             VALUES ($1, 'production', 'bakta', 'v1', 'running', 'failed', now(), 'wf-1', $2, $2)",
+        )
+        .bind(id)
+        .bind(started)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        // A late request with the earlier failed completion.
+        let earlier = Utc::now() - chrono::Duration::hours(1);
+        let item: SimpleStatus = serde_json::from_value(json!({
+            "metadata": {"name": "wf-1", "uid": Uuid::new_v4(),
+                         "creationTimestamp": (earlier - chrono::Duration::minutes(5)).to_rfc3339(),
+                         "labels": {"jobid": id.to_string(), "bakta-environment": "production"}},
+            "status": {"phase": "Failed", "startedAt": earlier.to_rfc3339(),
+                       "finishedAt": (earlier + chrono::Duration::minutes(2)).to_rfc3339(),
+                       "message": "old error"}
+        }))
+        .unwrap();
+        let workflow = Workflow {
+            item,
+            template: "bakta-job-1.12.0".to_string(),
+            parameter: "--complete --genus 'Escherichia'".to_string(),
+            secret_hash: None,
+        };
+        let s3_server = wiremock::MockServer::start().await;
+        let s3 = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            format!("http://s3.test:{}", s3_server.address().port()),
+        )
+        .with_bucket_host_address(*s3_server.address());
+        enrich(&db, &s3, workflow).await.unwrap();
+        let record = sqlx::query("SELECT * FROM jobs WHERE id = $1")
+            .bind(id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            record.get::<Option<String>, _>("genus").as_deref(),
+            Some("Escherichia")
+        );
+        assert_eq!(
+            record.get::<Option<String>, _>("bakta_version").as_deref(),
+            Some("1.12.0")
+        );
+        assert_eq!(
+            record.get::<Option<chrono::DateTime<Utc>>, _>("finished_at"),
+            None
+        );
+        assert_eq!(record.get::<Option<f64>, _>("runtime_seconds"), None);
+        assert_eq!(record.get::<Option<String>, _>("error_message"), None);
+        assert_eq!(record.get::<Option<Uuid>, _>("argo_uid"), None);
+    }
 }

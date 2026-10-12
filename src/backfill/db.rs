@@ -170,6 +170,42 @@ impl StatsDb {
         })
     }
 
+    /// Fills the empty detail columns of an existing record from `job`:
+    /// name, origin, organism, input options, versions and sizes. The
+    /// columns of a workflow attempt are never written, because the record
+    /// may already describe a newer attempt (for example after an Argo
+    /// retry of the same workflow).
+    pub async fn fill_details(&self, job: &BackfillJob) -> Result<()> {
+        sqlx::query(
+            "UPDATE jobs SET name = COALESCE(name, $2), origin = COALESCE(origin, $3),
+                 genus = COALESCE(genus, $4), species = COALESCE(species, $5),
+                 strain = COALESCE(strain, $6), config = COALESCE(config, $7),
+                 bakta_version = COALESCE(bakta_version, $8),
+                 bakta_db_version = COALESCE(bakta_db_version, $9),
+                 baktfold_version = COALESCE(baktfold_version, $10),
+                 baktfold_db_version = COALESCE(baktfold_db_version, $11),
+                 sequence_count = COALESCE(sequence_count, $12),
+                 total_length = COALESCE(total_length, $13), updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(job.job.id)
+        .bind(&job.job.name)
+        .bind(&job.origin)
+        .bind(&job.genus)
+        .bind(&job.species)
+        .bind(&job.strain)
+        .bind(&job.config)
+        .bind(&job.versions.bakta_version)
+        .bind(&job.versions.bakta_db_version)
+        .bind(&job.versions.baktfold_version)
+        .bind(&job.versions.baktfold_db_version)
+        .bind(job.sequence_count)
+        .bind(job.total_length)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     /// Which details the record of job `id` lacks, `None` without a record.
     pub async fn missing_details(&self, id: Uuid) -> Result<Option<MissingDetails>> {
         Ok(sqlx::query_as(
