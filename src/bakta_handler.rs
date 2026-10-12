@@ -1183,9 +1183,9 @@ impl StateHandler {
 
     /// Final states of completed workflows, from the list after startup.
     /// Writes the statistics of jobs that are not in memory, in the same way
-    /// as a completion. Returns the workflows of jobs in memory, which are
-    /// applied like a completion. `hashes` are the secret hashes by
-    /// workflow name.
+    /// as a completion. Returns the workflows of jobs in memory, or of all
+    /// jobs without a database, which are applied like a completion.
+    /// `hashes` are the secret hashes by workflow name.
     pub(crate) async fn reconcile_jobs(
         &self,
         items: Vec<SimpleStatus>,
@@ -1232,7 +1232,8 @@ impl StateHandler {
             let Some(item) = current else {
                 continue;
             };
-            if in_memory.contains(&id) {
+            // Without a database, finished jobs stay in memory.
+            if in_memory.contains(&id) || self.stats.db().is_none() {
                 for_memory.push(item.clone());
                 continue;
             }

@@ -427,3 +427,53 @@ async fn the_watch_follows_live_workflows_and_records_completions_once() {
         .count();
     assert_eq!(completed_lists, 2);
 }
+
+#[tokio::test]
+async fn without_a_database_finished_jobs_stay_in_memory() {
+    let kube = MockServer::start().await;
+    let id = Uuid::new_v4();
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", LIVE))
+        .and(query_param_is_missing("watch"))
+        .respond_with(page(Vec::new(), "", "10"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .respond_with(page(
+            vec![kube_workflow("wf-done", id, "Succeeded", true, 5)],
+            "",
+            "10",
+        ))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("watch", "true"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+        .mount(&kube)
+        .await;
+    let handler = test_handler("http://127.0.0.1:1", "https://s3.example.com");
+    let state = handler.state_handler.clone();
+    start(
+        state.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the finished job", || async {
+        state.job_state.read().await.contains_key(&id)
+    })
+    .await;
+    let job = state.job_state.read().await[&id].clone();
+    assert!(job.secret_matches(TEST_SECRET));
+    assert!(matches!(
+        job.status,
+        Some(crate::api_structs::ArgoStatus::Succeeded)
+    ));
+}

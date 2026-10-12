@@ -626,16 +626,14 @@ fn take_secret_hashes(items: &mut [SimpleStatus]) -> HashMap<String, String> {
 /// Lists the completed workflows once, page by page, and writes those that
 /// the database does not have in this state yet. Jobs in memory get the
 /// final state of their workflow like after a completion. Then all rows of
-/// workflows that Kubernetes no longer has are marked as gone.
+/// workflows that Kubernetes no longer has are marked as gone. Without a
+/// database, all finished jobs are kept in memory instead, as before.
 async fn reconcile_completed(
     api: Arc<KubeApi>,
     state: Arc<StateHandler>,
     changes: UnboundedSender<WorkflowChange>,
     observed_at: DateTime<Utc>,
 ) {
-    if state.stats.db().is_none() {
-        return;
-    }
     let mut names: Vec<String> = Vec::new();
     let mut next: Option<String> = None;
     let mut count = 0;
@@ -652,7 +650,11 @@ async fn reconcile_completed(
             }
         };
         let mut page = page;
-        let hashes = take_secret_hashes(&mut page);
+        // Without a database, the jobs are kept in memory with their secret.
+        let hashes = match state.stats.db() {
+            Some(_) => take_secret_hashes(&mut page),
+            None => HashMap::new(),
+        };
         count += page.len();
         names.extend(page.iter().map(|item| item.metadata.name.clone()));
         state.upsert_workflows(&page, observed_at).await;
