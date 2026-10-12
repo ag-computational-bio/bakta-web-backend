@@ -398,11 +398,13 @@ impl Watcher {
         self.state.metrics.record_workflow_list(Utc::now());
         tracing::info!(workflows = count, "workflow_list_finished");
         let _ = self.changes.send(WorkflowChange::Listed { observed_at });
-        tokio::spawn(reconcile_completed(
+        let generation = self.state.lists.fetch_add(1, Ordering::Relaxed) + 1;
+        tokio::spawn(reconcile_until_done(
             self.api.clone(),
             self.state.clone(),
             self.changes.clone(),
             observed_at,
+            generation,
         ));
         Ok(version)
     }
@@ -606,6 +608,15 @@ pub(crate) struct Completions {
     pub(crate) finished: HashMap<Uuid, SimpleStatus>,
 }
 
+/// Writes to the `workflows` table that failed and are repeated.
+#[derive(Default)]
+pub(crate) struct Unwritten {
+    items: HashMap<String, SimpleStatus>,
+    gone: HashSet<String>,
+    /// The earliest observation time of the kept writes.
+    observed_at: Option<DateTime<Utc>>,
+}
+
 /// Changes waiting to be applied together.
 #[derive(Default)]
 struct Batch {
@@ -700,13 +711,15 @@ fn take_secret_hashes(items: &mut [SimpleStatus]) -> HashMap<String, String> {
 /// marked as gone. Without a database, all completed workflows are fetched
 /// and their finished jobs kept in memory instead, as before.
 async fn reconcile_completed(
-    api: Arc<KubeApi>,
-    state: Arc<StateHandler>,
-    changes: UnboundedSender<WorkflowChange>,
+    api: &KubeApi,
+    state: &StateHandler,
+    changes: &UnboundedSender<WorkflowChange>,
     observed_at: DateTime<Utc>,
-) {
+) -> bool {
     let mut metadata_only = state.stats.db().is_some();
     let mut names: Vec<String> = Vec::new();
+    // False when a single workflow could not be fetched.
+    let mut complete = true;
     let mut next: Option<String> = None;
     let (mut count, mut fetched) = (0, 0);
     loop {
@@ -726,18 +739,21 @@ async fn reconcile_completed(
                     error = format!("{error:#}"),
                     "completed_workflows_list_failed"
                 );
-                return;
+                return false;
             }
         };
         count += listed.len();
         names.extend(listed.iter().map(|item| item.metadata.name.clone()));
         let page = if metadata_only {
             match state
-                .changed_completed_workflows(&api, listed, next.as_deref())
+                .changed_completed_workflows(api, listed, next.as_deref())
                 .await
             {
-                Some(page) => page,
-                None => return,
+                Some((page, all)) => {
+                    complete &= all;
+                    page
+                }
+                None => return false,
             }
         } else {
             listed
@@ -749,8 +765,13 @@ async fn reconcile_completed(
             Some(_) => take_secret_hashes(&mut page),
             None => HashMap::new(),
         };
-        state.upsert_workflows(&page, observed_at).await;
-        for item in state.reconcile_jobs(page, &hashes, observed_at).await {
+        if state.stats.db().is_some() && !state.upsert_workflows(&page, observed_at).await {
+            return false;
+        }
+        let Some(for_memory) = state.reconcile_jobs(page, &hashes, observed_at).await else {
+            return false;
+        };
+        for item in for_memory {
             let jobs = job_id_label(&item).into_iter().collect();
             let _ = changes.send(WorkflowChange::Completed {
                 item: Box::new(item),
@@ -771,20 +792,56 @@ async fn reconcile_completed(
             .keys()
             .cloned(),
     );
-    state.remove_missing_workflows(&names, observed_at).await;
-    tracing::info!(workflows = count, fetched, "completed_workflows_reconciled");
+    if !state.remove_missing_workflows(&names, observed_at).await {
+        return false;
+    }
+    tracing::info!(
+        workflows = count,
+        fetched,
+        complete,
+        "completed_workflows_reconciled"
+    );
+    complete
+}
+
+/// Repeats the reconcile of the completed workflows with a pause of 1 to 60
+/// seconds until it is complete, or until a newer list started another one.
+/// Rows and records written by a failed run are not written again: their
+/// workflows are unchanged at the next run.
+async fn reconcile_until_done(
+    api: Arc<KubeApi>,
+    state: Arc<StateHandler>,
+    changes: UnboundedSender<WorkflowChange>,
+    observed_at: DateTime<Utc>,
+    generation: u64,
+) {
+    let mut backoff = MIN_BACKOFF;
+    while state.lists.load(Ordering::Relaxed) == generation {
+        if reconcile_completed(&api, &state, &changes, observed_at).await {
+            state.reconciled.store(true, Ordering::Relaxed);
+            return;
+        }
+        state.metrics.record_watch_error();
+        tracing::warn!(
+            retry_in_seconds = backoff.as_secs(),
+            "completed_workflows_reconcile_incomplete"
+        );
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
 }
 
 impl StateHandler {
     /// The full completed workflows of a metadata page (listed with the
     /// continue token `next`) whose row is missing or has another resource
-    /// version. `None` when the lookup fails.
+    /// version, and whether all of them could be fetched. `None` when the
+    /// lookup fails.
     async fn changed_completed_workflows(
         &self,
         api: &KubeApi,
         listed: Vec<SimpleStatus>,
         next: Option<&str>,
-    ) -> Option<Vec<SimpleStatus>> {
+    ) -> Option<(Vec<SimpleStatus>, bool)> {
         let db = self.stats.db()?;
         let names: Vec<String> = listed
             .iter()
@@ -812,11 +869,11 @@ impl StateHandler {
             .map(|item| item.metadata.name)
             .collect();
         if changed.is_empty() {
-            return Some(Vec::new());
+            return Some((Vec::new(), true));
         }
         if changed.len() > FULL_PAGE_THRESHOLD {
             return match api.list_page(COMPLETED_SELECTOR, next).await {
-                Ok((page, _, _)) => Some(page),
+                Ok((page, _, _)) => Some((page, true)),
                 Err(error) => {
                     self.metrics.record_watch_error();
                     tracing::warn!(
@@ -828,16 +885,18 @@ impl StateHandler {
             };
         }
         let mut page = Vec::new();
+        let mut all = true;
         for name in changed {
             match api.get(&name).await {
                 Ok(item) => page.extend(item.filter(is_completed).and_then(relevant)),
                 Err(error) => {
+                    all = false;
                     self.metrics.record_watch_error();
                     tracing::warn!(workflow_name = name, %error, "workflow_fetch_failed");
                 }
             }
         }
-        Some(page)
+        Some((page, all))
     }
 
     /// IDs of the jobs with an unresolved submission.
@@ -870,8 +929,53 @@ impl StateHandler {
             .values()
             .cloned()
             .collect();
-        self.upsert_workflows(&items, observed_at).await;
+        if self.stats.db().is_some() && !self.upsert_workflows(&items, observed_at).await {
+            self.keep_unwritten(items.clone(), Vec::new(), observed_at);
+        }
         self.apply_workflow_statuses(items, observed_at).await
+    }
+
+    /// Keeps workflow table writes that failed, to repeat them later.
+    fn keep_unwritten(
+        &self,
+        items: Vec<SimpleStatus>,
+        gone: Vec<String>,
+        observed_at: DateTime<Utc>,
+    ) {
+        let mut unwritten = self.unwritten.lock().expect("unwritten lock poisoned");
+        for item in items {
+            unwritten.gone.remove(&item.metadata.name);
+            unwritten.items.insert(item.metadata.name.clone(), item);
+        }
+        for name in gone {
+            unwritten.items.remove(&name);
+            unwritten.gone.insert(name);
+        }
+        let earliest = unwritten
+            .observed_at
+            .map_or(observed_at, |at| at.min(observed_at));
+        unwritten.observed_at = Some(earliest);
+    }
+
+    /// Repeats the workflow table writes that failed. A row that was written
+    /// later with a newer state is kept.
+    async fn write_unwritten(&self) {
+        let (items, gone, observed_at) = {
+            let mut unwritten = self.unwritten.lock().expect("unwritten lock poisoned");
+            let Some(observed_at) = unwritten.observed_at.take() else {
+                return;
+            };
+            let items: Vec<SimpleStatus> =
+                std::mem::take(&mut unwritten.items).into_values().collect();
+            let gone: Vec<String> = std::mem::take(&mut unwritten.gone).into_iter().collect();
+            (items, gone, observed_at)
+        };
+        if !self
+            .record_changed_workflows(&items, &gone, observed_at)
+            .await
+        {
+            self.keep_unwritten(items, gone, observed_at);
+        }
     }
 
     /// Writes the changed workflows and applies all workflows of their jobs,
@@ -897,8 +1001,12 @@ impl StateHandler {
             (changed, gone)
         };
         let observed_at = batch.observed_at.unwrap_or_else(Utc::now);
-        self.record_changed_workflows(&changed, &gone, observed_at)
-            .await;
+        if !self
+            .record_changed_workflows(&changed, &gone, observed_at)
+            .await
+        {
+            self.keep_unwritten(changed, gone, observed_at);
+        }
         let items = self.job_workflows(&jobs);
         let completed = batch.completed.into_values().collect();
         self.apply_with_completions(items, &jobs, completed, Utc::now())
@@ -1009,6 +1117,7 @@ impl StateHandler {
                 .extend(finished);
         }
         self.prune_completions().await;
+        self.write_unwritten().await;
         if !self.watch_connected.load(Ordering::Relaxed) {
             // Final states of completions do not get outdated, so they are
             // applied anyway. The other jobs wait for the watch.

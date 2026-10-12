@@ -66,8 +66,15 @@ pub struct StateHandler {
     pub watch_connected: std::sync::atomic::AtomicBool,
     /// True once the first list of workflows was applied.
     pub ready: std::sync::atomic::AtomicBool,
+    /// True once a reconcile of the completed workflows was complete.
+    pub reconciled: std::sync::atomic::AtomicBool,
+    /// Number of lists of the watched workflows so far. A reconcile stops
+    /// retrying when a newer list started another one.
+    pub lists: std::sync::atomic::AtomicU64,
     /// Completed workflows that are not applied yet or kept for the database.
     pub(crate) completions: std::sync::Mutex<crate::informer::Completions>,
+    /// Writes to the `workflows` table that failed and are repeated.
+    pub(crate) unwritten: std::sync::Mutex<crate::informer::Unwritten>,
     /// Environment name for job records and the `bakta-environment` workflow label.
     pub environment: String,
     pub stats: StatsRecorder,
@@ -1167,7 +1174,10 @@ impl BaktaHandler {
             workflows: Default::default(),
             watch_connected: Default::default(),
             ready: Default::default(),
+            reconciled: Default::default(),
+            lists: Default::default(),
             completions: Default::default(),
+            unwritten: Default::default(),
             environment,
             stats,
         });
@@ -1204,20 +1214,22 @@ impl StateHandler {
     /// Takes `names` as all workflows that Kubernetes has at `observed_at`
     /// and marks all other rows of the `workflows` table as gone. Does
     /// nothing without a database.
+    /// Returns false when the write failed.
     pub(crate) async fn remove_missing_workflows(
         &self,
         names: &[String],
         observed_at: DateTime<Utc>,
-    ) {
+    ) -> bool {
         let Some(db) = self.stats.db() else {
-            return;
+            return true;
         };
         let namespace = self.argo_client.namespace();
         let remove = db.remove_missing_workflows(namespace, observed_at, names);
-        log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, remove).await);
+        log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, remove).await)
     }
 
     /// Final states of completed workflows, from the list after startup.
+    /// `None` when the lookup of the recorded workflows fails.
     /// Writes the statistics of jobs that are not in memory, in the same way
     /// as a completion. Returns the workflows of jobs in memory, or of all
     /// jobs without a database, which are applied like a completion.
@@ -1227,7 +1239,7 @@ impl StateHandler {
         items: Vec<SimpleStatus>,
         hashes: &HashMap<String, String>,
         now: DateTime<Utc>,
-    ) -> Vec<SimpleStatus> {
+    ) -> Option<Vec<SimpleStatus>> {
         let by_job = workflows_by_job(&items);
         let ids: Vec<Uuid> = by_job.keys().copied().collect();
         let recorded = match self.stats.db() {
@@ -1236,7 +1248,7 @@ impl StateHandler {
                     Ok(Ok(names)) => names,
                     _ => {
                         tracing::warn!("recorded_workflow_names_failed");
-                        return Vec::new();
+                        return None;
                     }
                 }
             }
@@ -1293,7 +1305,7 @@ impl StateHandler {
             self.stats
                 .record(StatsEvent::PolledMetadata(chunk.to_vec()));
         }
-        for_memory
+        Some(for_memory)
     }
 
     /// Drops finished jobs from memory once the database has their final
@@ -1385,20 +1397,25 @@ impl StateHandler {
     /// Writes changed workflows to the `workflows` table and marks the
     /// `gone` ones as gone. `observed_at` is a time before the changes were
     /// seen. Does nothing without a database.
+    /// Returns false when a write failed, so it can be repeated.
     pub(crate) async fn record_changed_workflows(
         &self,
         items: &[SimpleStatus],
         gone: &[String],
         observed_at: DateTime<Utc>,
-    ) {
+    ) -> bool {
         let Some(db) = self.stats.db() else {
-            return;
+            return true;
         };
-        if self.upsert_workflows(items, observed_at).await && !gone.is_empty() {
-            let namespace = self.argo_client.namespace();
-            let remove = db.remove_workflows(namespace, observed_at, gone);
-            log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, remove).await);
+        if !self.upsert_workflows(items, observed_at).await {
+            return false;
         }
+        if gone.is_empty() {
+            return true;
+        }
+        let namespace = self.argo_client.namespace();
+        let remove = db.remove_workflows(namespace, observed_at, gone);
+        log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, remove).await)
     }
 
     /// Writes the Bakta Web workflows of `items` in chunks and returns true
@@ -3088,7 +3105,10 @@ mod tests {
             workflows: Default::default(),
             watch_connected: Default::default(),
             ready: Default::default(),
+            reconciled: Default::default(),
+            lists: Default::default(),
             completions: Default::default(),
+            unwritten: Default::default(),
             environment: "production".to_string(),
             stats: StatsRecorder::disabled(),
         };

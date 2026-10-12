@@ -280,11 +280,13 @@ pub async fn metrics(State(state): State<Arc<BaktaHandler>>) -> impl IntoRespons
     }
 }
 
-/// Readiness: `503` until the first list of workflows was applied and while
-/// the statistics database (when configured) does not answer, else `200`.
+/// Readiness: `503` until the first list of workflows was applied and the
+/// completed workflows were reconciled once, and while the statistics
+/// database (when configured) does not answer, else `200`.
 pub async fn ready(State(state): State<Arc<BaktaHandler>>) -> StatusCode {
     let handler = &state.state_handler;
-    if !handler.ready.load(std::sync::atomic::Ordering::Relaxed) {
+    let ordering = std::sync::atomic::Ordering::Relaxed;
+    if !handler.ready.load(ordering) || !handler.reconciled.load(ordering) {
         return StatusCode::SERVICE_UNAVAILABLE;
     }
     if let Some(db) = handler.stats.db() {

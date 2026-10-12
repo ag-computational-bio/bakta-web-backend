@@ -825,3 +825,133 @@ async fn a_completion_of_a_reserved_job_is_applied_later() {
     assert!(completions.pending.is_empty());
     assert!(completions.finished.is_empty());
 }
+
+#[tokio::test]
+async fn a_failed_reconcile_is_repeated_and_ready_waits_for_it() {
+    let Some(db) = test_db("a_failed_reconcile_is_repeated").await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    let done = kube_workflow("wf-r", id, "Succeeded", true, 7);
+    let kube = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", LIVE))
+        .and(query_param_is_missing("watch"))
+        .respond_with(page(Vec::new(), "", "10"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("watch", "true"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+        .mount(&kube)
+        .await;
+    // The completed list fails once, then works.
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .respond_with(page(vec![json!({"metadata": done["metadata"]})], "", "10"))
+        .with_priority(2)
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{WORKFLOWS}/wf-r")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(done.clone()))
+        .mount(&kube)
+        .await;
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new((*db).clone(), JobVersions::default()),
+    );
+    let router = test_router(handler.clone());
+    start(
+        handler.state_handler.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the list", || async {
+        handler
+            .state_handler
+            .ready
+            .load(std::sync::atomic::Ordering::Relaxed)
+    })
+    .await;
+    if job_status(&db, id).await.is_none() {
+        assert_eq!(
+            call(&router, "GET", "/ready", None).await.0,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+    wait_for("the repeated reconcile", || async {
+        job_status(&db, id).await.as_deref() == Some("succeeded")
+    })
+    .await;
+    wait_for("readiness", || async {
+        call(&router, "GET", "/ready", None).await.0 == axum::http::StatusCode::OK
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_failed_workflow_table_write_is_repeated() {
+    let Some(db) = test_db("a_failed_workflow_table_write_is_repeated").await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    let kube = watch_server(
+        Vec::new(),
+        event("ADDED", kube_workflow("wf-t", id, "Running", false, 101)),
+    )
+    .await;
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new((*db).clone(), JobVersions::default()),
+    );
+    let state = handler.state_handler.clone();
+    start(
+        state.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the list", || async {
+        state.ready.load(std::sync::atomic::Ordering::Relaxed)
+    })
+    .await;
+    // The table is missing while the change is written.
+    sqlx::query("ALTER TABLE workflows RENAME TO workflows_away")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    wait_for("the change", || async {
+        state.job_state.read().await.contains_key(&id)
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    sqlx::query("ALTER TABLE workflows_away RENAME TO workflows")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    wait_for("the repeated write", || async {
+        live_names(&db).await == ["wf-t"]
+    })
+    .await;
+}
