@@ -587,11 +587,7 @@ async fn admin_workflows_can_list_orphans_only() {
         item("no-label", None),
         item("bad-label", Some("not-a-uuid".to_string())),
     ]});
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(items.clone()))
-        .mount(&argo)
-        .await;
+    store_listed_workflows(&setup_without_db.handler, &items).await;
     let (status, _) = admin_call(
         &setup_without_db,
         "GET",
@@ -618,6 +614,7 @@ async fn admin_workflows_can_list_orphans_only() {
     assert_eq!(body["items"].as_array().unwrap().len(), 4);
     // Both lists come from the table, not from Argo.
     assert_eq!(argo.received_requests().await.unwrap().len(), argo_requests);
+    assert_eq!(argo_requests, 0);
 }
 
 fn time(value: &Value) -> chrono::DateTime<Utc> {

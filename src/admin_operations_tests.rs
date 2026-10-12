@@ -750,25 +750,24 @@ fn listed_workflow(
 
 fn suspended_workflow() -> Value {
     let mut workflow = listed_workflow("paused", "Running", Some("job-5"), None);
-    workflow["status"]["nodes"] = json!({"s": {"id": "s", "name": "paused[0].approve", "type": "Suspend", "phase": "Running"}});
+    workflow["spec"]["suspend"] = json!(true);
     workflow
 }
 
-async fn workflow_list_argo() -> MockServer {
-    let argo = MockServer::start().await;
-    let items = json!({"items": [
+fn workflow_list() -> Value {
+    json!({"items": [
         listed_workflow("old-failed", "Failed", Some("job-1"), Some(48)),
         listed_workflow("old-error", "Error", None, Some(30)),
         listed_workflow("new-failed", "Failed", Some("job-3"), Some(1)),
         listed_workflow("running", "Running", Some("job-4"), None),
         suspended_workflow(),
         listed_workflow("pending", "Pending", Some("job-6"), None),
-    ]});
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(items))
-        .mount(&argo)
-        .await;
+    ]})
+}
+
+async fn workflow_list_argo() -> MockServer {
+    let argo = MockServer::start().await;
+    mount_workflow_gets(&argo, &workflow_list()).await;
     Mock::given(method("DELETE"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .mount(&argo)
@@ -798,6 +797,7 @@ async fn workflow_list_argo() -> MockServer {
 async fn workflows_lists_live_workflows_of_the_environment() {
     let argo = workflow_list_argo().await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    store_listed_workflows(&setup.handler, &workflow_list()).await;
     let (status, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let items = body["items"].as_array().unwrap();
@@ -855,16 +855,13 @@ async fn workflows_and_bulk_actions_only_touch_bakta_web_workflows() {
         listed_workflow("owned", "Failed", Some("job-2"), Some(48)),
         legacy, foreign_job, foreign,
     ]});
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(items))
-        .mount(&argo)
-        .await;
+    mount_workflow_gets(&argo, &items).await;
     Mock::given(method("DELETE"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .mount(&argo)
         .await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    store_listed_workflows(&setup.handler, &items).await;
 
     let (status, body) =
         admin_call(&setup, "GET", "/api/admin/workflows?environment=all", None).await;
@@ -904,16 +901,13 @@ async fn workflows_without_environment_label_use_the_derived_environment() {
         unlabelled("old-staging", json!({"origin": "staging.bakta.computational.bio"})),
         unlabelled("old-v2", json!({"origin": "Unknown", "api-version": "v2"})),
     ]});
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(items))
-        .mount(&argo)
-        .await;
+    mount_workflow_gets(&argo, &items).await;
     Mock::given(method("DELETE"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .mount(&argo)
         .await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    store_listed_workflows(&setup.handler, &items).await;
 
     let (status, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -977,6 +971,7 @@ fn argo_changes(requests: Vec<wiremock::Request>) -> Vec<String> {
 async fn bulk_dry_run_lists_matches_without_changes() {
     let argo = workflow_list_argo().await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    store_listed_workflows(&setup.handler, &workflow_list()).await;
     let (status, body) = admin_call(
         &setup,
         "POST",
@@ -1044,6 +1039,7 @@ async fn bulk_dry_run_lists_matches_without_changes() {
 async fn bulk_run_processes_listed_workflows_one_by_one() {
     let argo = workflow_list_argo().await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    store_listed_workflows(&setup.handler, &workflow_list()).await;
     let (status, body) = admin_call(
         &setup,
         "POST",
@@ -1099,6 +1095,7 @@ async fn bulk_run_processes_listed_workflows_one_by_one() {
 async fn bulk_delete_skips_pending_and_running_workflows() {
     let argo = workflow_list_argo().await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    store_listed_workflows(&setup.handler, &workflow_list()).await;
     for dry_run in [true, false] {
         let (status, body) = admin_call(
             &setup,
@@ -1132,16 +1129,15 @@ async fn bulk_delete_skips_pending_and_running_workflows() {
 async fn bulk_retry_and_resubmit_update_the_job_state() {
     let argo = workflow_list_argo().await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    store_listed_workflows(&setup.handler, &workflow_list()).await;
     let id = job_with_workflow(&setup.handler, "new-failed", ArgoStatus::Failed).await;
     // Point the listed workflow at the job.
     argo.reset().await;
     let mut listed = listed_workflow("new-failed", "Failed", Some(&id.to_string()), Some(1));
     listed["metadata"]["labels"]["jobid"] = id.to_string().into();
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [listed]})))
-        .mount(&argo)
-        .await;
+    let items = json!({"items": [listed]});
+    store_listed_workflows(&setup.handler, &items).await;
+    mount_workflow_gets(&argo, &items).await;
     Mock::given(method("PUT"))
         .and(path("/api/v1/workflows/bakta/new-failed/retry"))
         .respond_with(workflow("new-failed", "Running"))
@@ -1189,11 +1185,8 @@ async fn bulk_retry_and_resubmit_skip_superseded_workflows() {
         listed_workflow("wf-a", "Failed", Some(&id.to_string()), Some(48)),
         listed_workflow("wf-b", "Running", Some(&id.to_string()), None),
     ]});
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(items))
-        .mount(&argo)
-        .await;
+    mount_workflow_gets(&argo, &items).await;
+    store_listed_workflows(&setup.handler, &items).await;
     Mock::given(method("PUT"))
         .respond_with(workflow("any", "Running"))
         .mount(&argo)
@@ -1246,11 +1239,7 @@ async fn retry_and_resubmit_are_refused_when_the_current_workflow_is_unknown() {
         listed_workflow("wf-unrecorded", "Failed", Some(&unrecorded.to_string()), Some(48)),
     ]});
     store_listed_workflows(&setup.handler, &items).await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(items))
-        .mount(&argo)
-        .await;
+    mount_workflow_gets(&argo, &items).await;
     Mock::given(method("PUT"))
         .respond_with(workflow("any", "Running"))
         .mount(&argo)
@@ -1299,11 +1288,8 @@ async fn bulk_retry_and_resubmit_wait_for_the_first_poll_without_a_database() {
     let items = json!({"items": [
         listed_workflow("wf-a", "Failed", Some(&id.to_string()), Some(1)),
     ]});
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(items))
-        .mount(&argo)
-        .await;
+    mount_workflow_gets(&argo, &items).await;
+    store_listed_workflows(&setup.handler, &items).await;
     Mock::given(method("PUT"))
         .respond_with(workflow("any", "Running"))
         .mount(&argo)
@@ -1694,12 +1680,9 @@ async fn bulk_retry_and_resubmit_skip_workflows_without_input_data() {
         listed_workflow("kept", "Failed", None, Some(29 * 24)),
         unfinished,
     ]});
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(items))
-        .mount(&argo)
-        .await;
+    mount_workflow_gets(&argo, &items).await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    store_listed_workflows(&setup.handler, &items).await;
 
     for action in ["retry", "resubmit"] {
         let body = bulk_dry_run(&setup, action).await;
@@ -1730,11 +1713,7 @@ async fn bulk_real_run_does_not_touch_workflows_without_input_data() {
         listed_workflow("gone", "Failed", None, Some(31 * 24)),
         listed_workflow("kept", "Failed", None, Some(29 * 24)),
     ]});
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(items))
-        .mount(&argo)
-        .await;
+    mount_workflow_gets(&argo, &items).await;
     Mock::given(method("PUT"))
         .and(path("/api/v1/workflows/bakta/kept/retry"))
         .respond_with(workflow("kept", "Running"))
@@ -1747,6 +1726,7 @@ async fn bulk_real_run_does_not_touch_workflows_without_input_data() {
         .mount(&argo)
         .await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    store_listed_workflows(&setup.handler, &items).await;
     let (status, body) = admin_call(
         &setup,
         "POST",
@@ -1786,11 +1766,7 @@ async fn bulk_uses_the_job_record_for_the_retention_time() {
         listed_workflow("wf-kept", "Failed", Some(&kept.to_string()), Some(1)),
     ]});
     let argo = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(items.clone()))
-        .mount(&argo)
-        .await;
+    mount_workflow_gets(&argo, &items).await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
     store_listed_workflows(&setup.handler, &items).await;
     // The records point to these workflows, so they are the current ones.
@@ -1883,11 +1859,9 @@ async fn bulk_resubmit_skips_a_job_while_a_user_delete_runs() {
     let setup = std::sync::Arc::new(admin_setup(&argo.uri(), "https://s3.example.com", None).await);
     let id = job_with_workflow(&setup.handler, "wf-old", ArgoStatus::Failed).await;
     let listed = listed_workflow("wf-old", "Failed", Some(&id.to_string()), Some(1));
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [listed]})))
-        .mount(&argo)
-        .await;
+    let items = json!({"items": [listed]});
+    store_listed_workflows(&setup.handler, &items).await;
+    mount_workflow_gets(&argo, &items).await;
     Mock::given(method("PUT"))
         .and(path("/api/v1/workflows/bakta/wf-old/resubmit"))
         .respond_with(workflow("wf-new", "Pending"))
@@ -2135,11 +2109,9 @@ async fn resubmit_is_refused_while_a_bulk_resubmit_checks_the_job() {
     );
     let id = job_with_workflow(&setup.handler, "wf-old", ArgoStatus::Failed).await;
     let listed = listed_workflow("wf-old", "Failed", Some(&id.to_string()), Some(1));
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [listed]})))
-        .mount(&argo)
-        .await;
+    let items = json!({"items": [listed]});
+    store_listed_workflows(&setup.handler, &items).await;
+    mount_workflow_gets(&argo, &items).await;
     // Only the bulk resubmit runs.
     Mock::given(method("PUT"))
         .and(path("/api/v1/workflows/bakta/wf-old/resubmit"))
@@ -2310,11 +2282,9 @@ async fn an_unknown_bulk_resubmit_blocks_the_job_until_enough_polls_found_nothin
     let state = &setup.handler.state_handler;
     let id = job_with_workflow(&setup.handler, "wf-old", ArgoStatus::Failed).await;
     let listed = listed_workflow("wf-old", "Failed", Some(&id.to_string()), Some(1));
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [listed]})))
-        .mount(&argo)
-        .await;
+    let items = json!({"items": [listed]});
+    store_listed_workflows(&setup.handler, &items).await;
+    mount_workflow_gets(&argo, &items).await;
     mount_unreadable_resubmit(&argo, "wf-old").await;
     let bulk = json!({"action": "resubmit", "dry_run": false});
     let (status, body) = admin_call(
@@ -2363,11 +2333,7 @@ async fn assert_resubmit_refuses_deleted_job(
     let listed =
         json!({"items": [listed_workflow(name, "Failed", Some(&id.to_string()), Some(1))]});
     store_listed_workflows(&setup.handler, &listed).await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(listed))
-        .mount(argo)
-        .await;
+    mount_workflow_gets(argo, &listed).await;
     Mock::given(method("PUT"))
         .respond_with(workflow("wf-new", "Pending"))
         .expect(0)
@@ -2508,13 +2474,11 @@ async fn workflow_list_and_bulk_preview_read_the_table() {
         return;
     };
     let argo = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"items": [listed_workflow("argo-only", "Failed", None, Some(48))]}),
-        ))
-        .mount(&argo)
-        .await;
+    mount_workflow_gets(
+        &argo,
+        &json!({"items": [listed_workflow("argo-only", "Failed", None, Some(48))]}),
+    )
+    .await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
     let stored = json!({"items": [listed_workflow("table-only", "Failed", None, Some(48))]});
     store_listed_workflows(&setup.handler, &stored).await;
@@ -2538,17 +2502,17 @@ async fn bulk_run_checks_the_workflows_in_argo() {
     let stored = json!({"items": [
         listed_workflow("wf-started", "Failed", None, Some(48)),
         listed_workflow("wf-done", "Failed", None, Some(48)),
+        listed_workflow("wf-gone", "Failed", None, Some(48)),
+        listed_workflow("wf-other", "Failed", None, Some(48)),
     ]});
+    // Argo no longer has wf-gone.
     let current = json!({"items": [
         listed_workflow("wf-started", "Running", None, None),
         listed_workflow("wf-done", "Failed", None, Some(48)),
+        listed_workflow("wf-other", "Failed", None, Some(48)),
         listed_workflow("wf-new", "Failed", None, Some(48)),
     ]});
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(current))
-        .mount(&argo)
-        .await;
+    mount_workflow_gets(&argo, &current).await;
     Mock::given(method("DELETE"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .mount(&argo)
@@ -2564,7 +2528,7 @@ async fn bulk_run_checks_the_workflows_in_argo() {
         "/api/admin/workflows/bulk",
         Some(json!({
             "action": "delete", "dry_run": false,
-            "workflow_names": ["wf-started", "wf-done"]
+            "workflow_names": ["wf-started", "wf-done", "wf-gone"]
         })),
     )
     .await;
@@ -2572,12 +2536,32 @@ async fn bulk_run_checks_the_workflows_in_argo() {
     assert_eq!(names(&body), ["wf-started", "wf-done"]);
     assert_eq!(bulk_item(&body, "wf-started")["result"], "skipped");
     assert_eq!(bulk_item(&body, "wf-done")["result"], "done");
+    let requests = argo.received_requests().await.unwrap();
+    // Only the named workflows are fetched, one by one. Nothing is listed.
+    let fetched: Vec<_> = requests
+        .iter()
+        .filter(|request| request.method.as_str() == "GET")
+        .map(|request| request.url.path().to_string())
+        .collect();
     assert_eq!(
-        argo_changes(argo.received_requests().await.unwrap()),
+        fetched,
+        [
+            "/api/v1/workflows/bakta/wf-started",
+            "/api/v1/workflows/bakta/wf-done",
+            "/api/v1/workflows/bakta/wf-gone"
+        ]
+    );
+    assert!(requests.iter().all(|request| request.url.query().is_none()));
+    assert_eq!(
+        argo_changes(requests),
         ["DELETE /api/v1/workflows/bakta/wf-done"]
     );
-    // The deleted workflow is gone from the table at once.
-    assert_eq!(table_names(&db).await, ["wf-started"]);
+    // The deleted workflow is gone from the table at once. The watch
+    // removes wf-gone.
+    assert_eq!(
+        table_names(&db).await,
+        ["wf-gone", "wf-other", "wf-started"]
+    );
 }
 
 #[tokio::test]

@@ -558,35 +558,47 @@ pub(crate) fn is_bakta_web_workflow(workflow: &ArgoWorkflow) -> bool {
                 .is_some_and(|template| is_bakta_web_template(&template.name)))
 }
 
+/// True for Bakta Web workflows of `environment`, or of all with `None`.
+fn in_environment(environment: Option<&str>, workflow: &ArgoWorkflow) -> bool {
+    is_bakta_web_workflow(workflow)
+        && environment.is_none_or(|environment| {
+            workflow_environment(&workflow.metadata.labels) == environment
+        })
+}
+
 /// Live Bakta Web workflows of one environment, or of all with `all`.
 /// Other workflows in the shared namespace are never returned. The
-/// environment is derived like in the poll, so workflows from before the
-/// `bakta-environment` label are found too. They come from the `workflows`
-/// table, or with `fresh` (or without a database) from Argo.
+/// environment is derived like for the job records, so workflows from
+/// before the `bakta-environment` label are found too. They come from the
+/// `workflows` table, or without a database from the workflow watch, newest
+/// first.
 async fn environment_workflows(
     state: &BaktaHandler,
     environment: Option<&str>,
-    fresh: bool,
 ) -> Result<Vec<ArgoWorkflow>, AdminError> {
     let handler = &state.state_handler;
     let environment = parse_environment(environment, &handler.environment)?;
     let mut workflows = match handler.stats.db() {
-        Some(db) if !fresh => db
+        Some(db) => db
             .live_workflows(handler.argo_client.namespace(), environment.as_deref())
             .await
             .map_err(AdminError::database)?,
-        _ => handler
-            .argo_client
-            .list_workflows(None)
-            .await
-            .map_err(AdminError::argo)?,
+        None => {
+            let mut workflows: Vec<_> = handler
+                .workflows
+                .read()
+                .expect("workflows lock poisoned")
+                .values()
+                .map(ArgoWorkflow::from)
+                .collect();
+            workflows.sort_by(|a, b| {
+                (b.metadata.creation_timestamp, &a.metadata.name)
+                    .cmp(&(a.metadata.creation_timestamp, &b.metadata.name))
+            });
+            workflows
+        }
     };
-    workflows.retain(|workflow| {
-        is_bakta_web_workflow(workflow)
-            && environment.as_deref().is_none_or(|environment| {
-                workflow_environment(&workflow.metadata.labels) == environment
-            })
-    });
+    workflows.retain(|workflow| in_environment(environment.as_deref(), workflow));
     Ok(workflows)
 }
 
@@ -620,7 +632,7 @@ pub async fn list_workflows(
         .filter(|phase| !phase.is_empty())
         .map(str::to_string)
         .collect();
-    let mut workflows: Vec<_> = environment_workflows(&state, params.environment.as_deref(), false)
+    let mut workflows: Vec<_> = environment_workflows(&state, params.environment.as_deref())
         .await?
         .into_iter()
         .filter(|workflow| phases.is_empty() || phases.contains(&workflow.status.phase))
@@ -889,23 +901,73 @@ pub async fn bulk_workflows(
     };
     let dry_run = request.dry_run.unwrap_or(true);
     let action = request.action;
+    let environment = parse_environment(
+        request.filter.environment.as_deref(),
+        &state.state_handler.environment,
+    )?;
 
-    // A real run checks the filter against the current state in Argo.
-    let workflows: Vec<_> =
-        environment_workflows(&state, request.filter.environment.as_deref(), !dry_run)
-            .await?
-            .into_iter()
-            .filter(|workflow| bulk_matches(&request.filter, cutoff, workflow))
-            .filter(|workflow| {
-                request
-                    .workflow_names
-                    .as_ref()
-                    .is_none_or(|names| names.contains(&workflow.metadata.name))
-            })
-            .collect();
+    let workflows: Vec<_> = environment_workflows(&state, request.filter.environment.as_deref())
+        .await?
+        .into_iter()
+        .filter(|workflow| bulk_matches(&request.filter, cutoff, workflow))
+        .filter(|workflow| {
+            request
+                .workflow_names
+                .as_ref()
+                .is_none_or(|names| names.contains(&workflow.metadata.name))
+        })
+        .collect();
 
     let mut items = Vec::with_capacity(workflows.len());
     for workflow in workflows {
+        // A real run fetches each workflow from Argo right before acting,
+        // and checks the filter against that state.
+        let workflow = if dry_run {
+            workflow
+        } else {
+            match state
+                .state_handler
+                .argo_client
+                .get_workflow(&workflow.metadata.name)
+                .await
+            {
+                Ok(current)
+                    if in_environment(environment.as_deref(), &current)
+                        && bulk_matches(&request.filter, cutoff, &current) =>
+                {
+                    current
+                }
+                // Gone or no longer matching.
+                Ok(_) => continue,
+                Err(error)
+                    if error
+                        .downcast_ref::<reqwest::Error>()
+                        .and_then(reqwest::Error::status)
+                        == Some(reqwest::StatusCode::NOT_FOUND) =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        user = %user.username, ?action, workflow_name = %workflow.metadata.name,
+                        %error, "admin_bulk_lookup_failed"
+                    );
+                    let labels = &workflow.metadata.labels;
+                    items.push(BulkItem {
+                        job_id: labels.get("jobid").cloned(),
+                        workflow_kind: labels.get("workflow-kind").cloned(),
+                        name: workflow.metadata.name,
+                        phase: workflow.status.phase,
+                        finished_at: workflow.status.finished_at,
+                        applicable: false,
+                        result: Some(BulkResult::Failed),
+                        error: Some(format!("Argo request failed: {error}")),
+                        reason: None,
+                    });
+                    continue;
+                }
+            }
+        };
         let mut reason = bulk_phase_reason(action, &workflow);
         // A real resubmit takes the job's reservation, like a start or
         // delete. It is taken before deciding which workflow is current and

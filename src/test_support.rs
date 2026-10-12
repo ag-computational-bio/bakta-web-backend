@@ -3,7 +3,10 @@
 
 use crate::{
     api_structs::ArgoStatus,
-    argo::client::ArgoClient,
+    argo::{
+        client::ArgoClient,
+        structs::{SimpleStatus, SimpleStatusStatus, StatusMetadata},
+    },
     bakta_handler::{ApiVersion, BaktaHandler, FullJobState, StateHandler},
     metrics::AppMetrics,
     s3_handler::S3Handler,
@@ -23,6 +26,10 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 use uuid::Uuid;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
+};
 
 pub const TEST_SECRET: &str = "s3cret";
 
@@ -206,15 +213,70 @@ pub async fn v2_state(
     .await
 }
 
-/// Writes an Argo workflow list (`{"items": [...]}`) to the `workflows`
-/// table, like a poll. Does nothing without a database.
+/// Makes the workflows of an Argo list (`{"items": [...]}`) known like the
+/// workflow watch does: in memory and, with a database, in the `workflows`
+/// table. The job state is not changed.
 pub async fn store_listed_workflows(handler: &BaktaHandler, list: &Value) {
+    let mut workflows: Vec<crate::argo::structs::ArgoWorkflow> =
+        serde_json::from_value(list["items"].clone()).unwrap();
+    // Without creation times, the list order is kept: newest first.
+    let now = Utc::now();
+    for (index, workflow) in workflows.iter_mut().enumerate() {
+        workflow
+            .metadata
+            .creation_timestamp
+            .get_or_insert(now - chrono::Duration::seconds(index as i64));
+    }
+    handler
+        .state_handler
+        .workflows
+        .write()
+        .unwrap()
+        .extend(workflows.iter().map(|workflow| {
+            let item = simple_status(workflow);
+            (item.metadata.name.clone(), item)
+        }));
     let Some(db) = handler.state_handler.stats.db() else {
         return;
     };
-    let workflows: Vec<crate::argo::structs::ArgoWorkflow> =
-        serde_json::from_value(list["items"].clone()).unwrap();
     db.upsert_workflows("bakta", Utc::now(), &workflows)
         .await
         .unwrap();
+}
+
+/// A workflow in the form the watch keeps it.
+pub fn simple_status(workflow: &crate::argo::structs::ArgoWorkflow) -> SimpleStatus {
+    SimpleStatus {
+        metadata: StatusMetadata {
+            name: workflow.metadata.name.clone(),
+            uid: Uuid::new_v4(),
+            resource_version: None,
+            creation_timestamp: workflow.metadata.creation_timestamp,
+            labels: workflow.metadata.labels.clone(),
+        },
+        spec: workflow.spec.clone(),
+        status: SimpleStatusStatus {
+            phase: workflow.status.phase.clone(),
+            started_at: workflow
+                .status
+                .started_at
+                .or(workflow.metadata.creation_timestamp)
+                .unwrap_or_default(),
+            finished_at: workflow.status.finished_at,
+            message: workflow.status.message.clone(),
+        },
+    }
+}
+
+/// Answers the single workflow requests of a real bulk run with the
+/// workflows of an Argo list (`{"items": [...]}`).
+pub async fn mount_workflow_gets(argo: &MockServer, list: &Value) {
+    for item in list["items"].as_array().unwrap() {
+        let name = item["metadata"]["name"].as_str().unwrap();
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/workflows/bakta/{name}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(item))
+            .mount(argo)
+            .await;
+    }
 }
