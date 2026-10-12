@@ -2373,3 +2373,54 @@ async fn resubmit_refuses_a_job_deleted_in_the_database() {
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
     assert_resubmit_refuses_deleted_job(&setup, &argo, id, &format!("wf-{id}")).await;
 }
+
+#[tokio::test]
+async fn a_poll_after_a_restart_does_not_add_jobs_deleted_in_the_database_back() {
+    let Some(db) = test_db("a_poll_after_a_restart_does_not_add_jobs_deleted").await else {
+        return;
+    };
+    let env = unique_environment();
+    let now = Utc::now();
+    let created = now - Duration::days(1);
+    let finished = Some(now - Duration::hours(1));
+    let deleted = aged_job(&db, &env, created, finished).await;
+    db.apply(&StatsEvent::Deleted { id: deleted })
+        .await
+        .unwrap();
+    let recorded = aged_job(&db, &env, created, finished).await;
+    let unrecorded = Uuid::new_v4();
+    // After a restart nothing is in memory, and Argo still lists all three.
+    let setup = admin_setup(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        Some(db.clone()),
+    )
+    .await;
+    let state = &setup.handler.state_handler;
+    let items = vec![
+        polled_workflow(deleted, &format!("wf-{deleted}"), "Failed", created),
+        polled_workflow(recorded, &format!("wf-{recorded}"), "Failed", created),
+        polled_workflow(unrecorded, "wf-unrecorded", "Failed", created),
+    ];
+    state.apply_workflow_statuses(items.clone(), now).await;
+    let states = state.job_state.read().await;
+    assert!(!states.contains_key(&deleted));
+    assert!(states.contains_key(&recorded));
+    assert!(states.contains_key(&unrecorded));
+    drop(states);
+    assert!(state.is_deleted(&deleted));
+
+    // While the database fails, unknown jobs are not added. Known jobs are
+    // still updated.
+    state.job_state.write().await.remove(&unrecorded);
+    sqlx::query("DROP TABLE jobs")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let mut changed = items.clone();
+    changed[1] = polled_workflow(recorded, &format!("wf-{recorded}"), "Error", created);
+    state.apply_workflow_statuses(changed, now).await;
+    let states = state.job_state.read().await;
+    assert!(!states.contains_key(&unrecorded));
+    assert!(matches!(states[&recorded].status, Some(ArgoStatus::Error)));
+}

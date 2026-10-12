@@ -531,6 +531,16 @@ impl StatsDb {
         Ok(found.into_iter().collect())
     }
 
+    /// The jobs in `ids` whose record has status `deleted`.
+    pub async fn deleted_job_ids(&self, ids: &[Uuid]) -> Result<std::collections::HashSet<Uuid>> {
+        let found: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM jobs WHERE id = ANY($1) AND status = 'deleted'")
+                .bind(ids.to_vec())
+                .fetch_all(self.pool())
+                .await?;
+        Ok(found.into_iter().collect())
+    }
+
     /// Recorded workflow names of the jobs in `ids`.
     pub async fn workflow_names(
         &self,

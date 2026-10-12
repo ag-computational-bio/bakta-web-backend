@@ -1043,6 +1043,7 @@ impl StateHandler {
         now: DateTime<Utc>,
     ) {
         let recorded_in_db = self.recorded_workflow_names(&items).await;
+        let deleted_in_db = self.deleted_in_db(&items).await;
         let mut write_lock = self.job_state.write().await;
         let mut current = current_workflows(&write_lock, &recorded_in_db, &items);
         // Jobs that are being started, deleted or resubmitted keep their
@@ -1133,6 +1134,19 @@ impl StateHandler {
             let Some(state) = state_from_simple_status(item.clone()) else {
                 continue;
             };
+            // After a restart, the list of deleted jobs is empty. A job that
+            // is not in memory is only added when the database does not
+            // list it as deleted.
+            if !write_lock.contains_key(&state.id) {
+                match &deleted_in_db {
+                    None => continue,
+                    Some(deleted) if deleted.contains(&state.id) => {
+                        self.record_deleted(state.id);
+                        continue;
+                    }
+                    Some(_) => {}
+                }
+            }
             // The workflow is applied (or the job expires) in this step, so
             // the job state now knows whether a workflow exists.
             let marker = resolved
@@ -1230,6 +1244,39 @@ impl StateHandler {
             Err(_) => {
                 tracing::warn!("recorded_workflow_names_timed_out");
                 HashMap::new()
+            }
+        }
+    }
+
+    /// Jobs in the workflow list that are not in memory and have status
+    /// `deleted` in the database, with one query per poll. Empty without a
+    /// database. `None` when the lookup fails: the poll then adds no job
+    /// that is not in memory, and a later poll adds them.
+    async fn deleted_in_db(&self, items: &[SimpleStatus]) -> Option<HashSet<Uuid>> {
+        let Some(db) = self.stats.db() else {
+            return Some(HashSet::new());
+        };
+        let ids: Vec<Uuid> = {
+            let job_state = self.job_state.read().await;
+            workflows_by_job(items)
+                .into_keys()
+                .filter(|id| !job_state.contains_key(id))
+                .collect()
+        };
+        if ids.is_empty() {
+            return Some(HashSet::new());
+        }
+        match tokio::time::timeout(std::time::Duration::from_secs(5), db.deleted_job_ids(&ids))
+            .await
+        {
+            Ok(Ok(deleted)) => Some(deleted),
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "deleted_jobs_lookup_failed");
+                None
+            }
+            Err(_) => {
+                tracing::warn!("deleted_jobs_lookup_timed_out");
+                None
             }
         }
     }
