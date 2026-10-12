@@ -395,10 +395,14 @@ impl StatsDb {
                 workflow_name,
                 retried_at,
             } => {
-                // The polled columns are left to the next poll, which also
-                // computes `queue_seconds` from this `submitted_at`.
+                // The polled columns are left to the next poll. A finished
+                // workflow gets no further poll, so `queue_seconds` is set
+                // from the start that was seen already (NULL while it is the
+                // start of the earlier attempt).
                 sqlx::query(
-                    "UPDATE jobs SET submitted_at = $3, updated_at = now()
+                    "UPDATE jobs SET submitted_at = $3, updated_at = now(),
+                         queue_seconds = CASE WHEN started_at >= $3
+                             THEN EXTRACT(EPOCH FROM (started_at - $3))::double precision END
                      WHERE id = $1 AND (workflow_name IS NULL OR workflow_name = $2)",
                 )
                 .bind(id)
@@ -423,7 +427,9 @@ impl StatsDb {
                          started_at = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL ELSE started_at END,
                          finished_at = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL ELSE finished_at END,
                          runtime_seconds = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL ELSE runtime_seconds END,
-                         queue_seconds = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL ELSE queue_seconds END,
+                         queue_seconds = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL
+                             WHEN started_at >= $3
+                             THEN EXTRACT(EPOCH FROM (started_at - $3))::double precision END,
                          error_message = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL ELSE error_message END
                      WHERE id = $1
                          AND (workflow_name IS NULL OR workflow_name = $4 OR workflow_name = $2)",
@@ -1875,5 +1881,61 @@ mod tests {
             "succeeded"
         );
         assert_eq!(recorder.parked_events(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_a_late_retry_or_resubmit_request_sets_the_queue_time() {
+        let Some(db) = test_db("test_a_late_retry_or_resubmit_request_sets_the_queue_time").await
+        else {
+            return;
+        };
+        let t0 = Utc::now() - ChronoDuration::hours(1);
+        let request = t0 + ChronoDuration::minutes(50);
+        let started = request + ChronoDuration::seconds(5);
+        for resubmit in [false, true] {
+            let job = new_job(&unique_environment(), t0);
+            db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
+            sqlx::query("UPDATE jobs SET submitted_at = $2 WHERE id = $1")
+                .bind(job.id)
+                .bind(t0)
+                .execute(db.pool())
+                .await
+                .unwrap();
+            // The watch saw the new attempt finish before the answer of Argo
+            // arrived: the record still has the time of the first request.
+            db.apply(&polled(&job, "wf-1", "running", Some(t0), None))
+                .await
+                .unwrap();
+            db.apply(&polled(
+                &job,
+                "wf-1",
+                "succeeded",
+                Some(started),
+                Some(started),
+            ))
+            .await
+            .unwrap();
+            let event = if resubmit {
+                StatsEvent::Resubmitted {
+                    id: job.id,
+                    previous_workflow_name: "wf-0".to_string(),
+                    workflow_name: "wf-1".to_string(),
+                    submitted_at: request,
+                }
+            } else {
+                StatsEvent::Retried {
+                    id: job.id,
+                    workflow_name: "wf-1".to_string(),
+                    retried_at: request,
+                }
+            };
+            db.apply(&event).await.unwrap();
+            let record = row(&db, job.id).await;
+            assert_eq!(
+                record.get::<Option<f64>, _>("queue_seconds"),
+                Some(5.0),
+                "resubmit: {resubmit}"
+            );
+        }
     }
 }
