@@ -13,7 +13,8 @@ use super::{db::BackfillJob, parse};
 use crate::stats::NewJob;
 use crate::{
     argo::structs::{
-        ArgoWorkflowSpec, SimpleStatus, SimpleStatusStatus, StatusMetadata, WorkflowTemplateRef,
+        ArgoWorkflow, ArgoWorkflowSpec, SimpleStatus, SimpleStatusStatus, StatusMetadata,
+        WorkflowTemplateRef,
     },
     bakta_handler::{
         is_state_expired, job_id_label, polled_workflow_state, state_from_simple_status,
@@ -262,6 +263,16 @@ pub fn is_bakta_web(workflow: &Workflow) -> bool {
         || (labels.contains_key("jobid") && is_bakta_web_template(&workflow.template))
 }
 
+/// The Bakta Web workflows in the form of the `workflows` table, without
+/// the job secret.
+pub fn table_workflows(workflows: &[Workflow]) -> Vec<ArgoWorkflow> {
+    workflows
+        .iter()
+        .filter(|workflow| is_bakta_web(workflow))
+        .map(|workflow| ArgoWorkflow::from(&workflow.item))
+        .collect()
+}
+
 /// The newest workflow of each job, by creation time and then by name, like
 /// the poll picks the current workflow after a resubmit. Sorted by creation time.
 pub fn newest_per_job(workflows: Vec<Workflow>) -> Vec<Workflow> {
@@ -452,6 +463,23 @@ mod tests {
             .collect();
         // Same creation time: the last name wins, like in the poll.
         assert_eq!(names, ["wf-d", "wf-c"]);
+    }
+
+    #[test]
+    fn test_table_workflows_are_bakta_web_workflows_without_secret() {
+        let workflows = vec![
+            workflow("a", JOB, "bakta-job-1.11.3", "2026-06-01T10:00:00Z"),
+            workflow("b", JOB, "other-job", "2026-06-01T10:00:00Z"),
+        ];
+        let table = table_workflows(&workflows);
+        assert_eq!(table.len(), 1);
+        assert_eq!(table[0].metadata.name, "a");
+        assert_eq!(
+            table[0].spec.workflow_template_ref.as_ref().unwrap().name,
+            "bakta-job-1.11.3"
+        );
+        assert_eq!(table[0].status.phase, "Succeeded");
+        assert!(!table[0].metadata.labels.contains_key("secret"));
     }
 
     #[test]

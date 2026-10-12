@@ -20,6 +20,8 @@ use db::{BackfillJob, Fill};
 const CONCURRENCY: usize = 4;
 /// Progress is logged after this many jobs.
 const PROGRESS_EVERY: usize = 1000;
+/// Rows per write to the `workflows` table.
+const TABLE_CHUNK: usize = 2000;
 
 #[derive(Debug, Default)]
 struct Counts {
@@ -109,10 +111,18 @@ pub async fn run() -> Result<()> {
     ));
     let namespace = dotenvy::var("ARGO_NAMESPACE").unwrap_or_else(|_| "bakta".to_string());
 
+    let observed_at = Utc::now();
     let (listed, unreadable) = workflows::KubeClient::in_cluster()?
         .list_workflows(&namespace)
         .await?;
     let workflow_count = listed.len();
+    // All Bakta Web workflows go to the `workflows` table. A row that the
+    // backend changed after `observed_at` is kept, also when it is gone.
+    let table = workflows::table_workflows(&listed);
+    for chunk in table.chunks(TABLE_CHUNK) {
+        db.upsert_workflows(&namespace, observed_at, chunk).await?;
+    }
+    tracing::info!(workflows = table.len(), "backfill_workflow_table_written");
     let jobs =
         workflows::newest_per_job(listed.into_iter().filter(workflows::is_bakta_web).collect());
     let total = jobs.len();
