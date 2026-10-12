@@ -173,9 +173,14 @@ impl StatsDb {
         .bind(present)
         .execute(self.pool())
         .await?;
+        self.prune_gone_workflows(namespace, observed_at).await
+    }
+
+    /// Deletes the rows of workflows that are gone for a while at `now`.
+    pub async fn prune_gone_workflows(&self, namespace: &str, now: DateTime<Utc>) -> Result<()> {
         sqlx::query("DELETE FROM workflows WHERE namespace = $1 AND gone_at < $2")
             .bind(namespace)
-            .bind(observed_at - chrono::Duration::minutes(GONE_ROWS_KEPT_MINUTES))
+            .bind(now - chrono::Duration::minutes(GONE_ROWS_KEPT_MINUTES))
             .execute(self.pool())
             .await?;
         Ok(())
@@ -239,10 +244,7 @@ mod tests {
         test_support::test_handler_with_stats,
     };
     use serde_json::{Value, json};
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path, query_param},
-    };
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
     fn listed(name: &str, phase: &str, environment: &str) -> Value {
         json!({
@@ -393,31 +395,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_poll_records_bakta_web_workflows_with_their_suspend_state() {
-        let Some(db) = test_db("the_poll_records_bakta_web_workflows").await else {
+    async fn a_full_list_records_bakta_web_workflows_with_their_suspend_state() {
+        let Some(db) = test_db("a_full_list_records_bakta_web_workflows").await else {
             return;
         };
+        // The suspend state comes from `spec.suspend`, so Argo is not asked.
         let argo = MockServer::start().await;
-        let mut paused = listed("paused", "Running", "production");
-        paused["status"]["nodes"] = json!({"s": {"id": "s", "name": "paused.approve", "type": "Suspend", "phase": "Running"}});
         Mock::given(method("GET"))
-            .and(path("/api/v1/workflows/bakta"))
-            .and(query_param(
-                "listOptions.labelSelector",
-                "workflows.argoproj.io/phase=Running",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
-                paused, listed("running", "Running", "staging")
-            ]})))
-            .expect(1)
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
             .mount(&argo)
             .await;
         let (stats, _events) = StatsRecorder::capturing_with_db((*db).clone());
         let handler = test_handler_with_stats(&argo.uri(), "https://s3.example.com", stats);
+        let mut paused = listed("paused", "Running", "production");
+        paused["spec"]["suspend"] = json!(true);
         let mut foreign = listed("foreign", "Failed", "production");
         foreign["metadata"]["labels"] = json!({"app": "other"});
         let polled: Vec<SimpleStatus> = [
-            listed("paused", "Running", "production"),
+            paused,
             listed("running", "Running", "staging"),
             listed("done", "Succeeded", "production"),
             foreign,
@@ -445,22 +441,16 @@ mod tests {
             ["running"]
         );
 
-        // The next poll no longer lists `done`, and the running lookup fails:
-        // nothing is written.
-        argo.reset().await;
+        // The next full list no longer has `done`.
         handler
             .state_handler
             .record_workflows(&polled[..2], Utc::now())
             .await;
-        assert_eq!(db.live_workflows("bakta", None).await.unwrap().len(), 3);
-        // Without running workflows no lookup is needed.
-        handler
-            .state_handler
-            .record_workflows(&polled[2..3], Utc::now())
-            .await;
-        assert_eq!(
-            names(&db.live_workflows("bakta", None).await.unwrap()),
-            ["done"]
-        );
+        let mut all = names(&db.live_workflows("bakta", None).await.unwrap())
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        all.sort();
+        assert_eq!(all, ["paused", "running"]);
     }
 }

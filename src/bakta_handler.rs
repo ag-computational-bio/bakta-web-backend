@@ -520,6 +520,35 @@ fn current_workflows(
 
 const MAX_ERROR_MESSAGE_LENGTH: usize = 500;
 
+/// Rows per write to the `workflows` table, and the time each write may take.
+const TABLE_WRITE_CHUNK: usize = 2000;
+const TABLE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Jobs per statistics event of the workflow updates.
+const STATS_EVENT_CHUNK: usize = 2000;
+
+fn bakta_web_workflows(items: &[SimpleStatus]) -> Vec<crate::argo::structs::ArgoWorkflow> {
+    items
+        .iter()
+        .map(crate::argo::structs::ArgoWorkflow::from)
+        .filter(crate::admin::operations::is_bakta_web_workflow)
+        .collect()
+}
+
+/// Logs a failed write to the `workflows` table and returns true on success.
+fn log_table_write(result: Result<Result<()>, tokio::time::error::Elapsed>) -> bool {
+    match result {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "workflow_table_write_failed");
+            false
+        }
+        Err(_) => {
+            tracing::warn!("workflow_table_write_timed_out");
+            false
+        }
+    }
+}
+
 fn stats_new_job(state: &FullJobState, environment: &str, created_at: DateTime<Utc>) -> NewJob {
     NewJob {
         id: state.id,
@@ -1075,9 +1104,9 @@ impl StateHandler {
         });
     }
 
-    /// Writes the polled Bakta Web workflows to the `workflows` table for
-    /// the admin API, and marks the others as gone. `observed_at` is a time
-    /// before the list was fetched. Does nothing without a database.
+    /// Writes the complete list of workflows to the `workflows` table for
+    /// the admin API, and marks all other rows as gone. `observed_at` is a
+    /// time before the list was fetched. Does nothing without a database.
     pub(crate) async fn record_workflows(
         &self,
         items: &[SimpleStatus],
@@ -1086,64 +1115,53 @@ impl StateHandler {
         let Some(db) = self.stats.db() else {
             return;
         };
-        let mut workflows: Vec<_> = items
-            .iter()
-            .map(crate::argo::structs::ArgoWorkflow::from)
-            .filter(crate::admin::operations::is_bakta_web_workflow)
+        let names: Vec<String> = bakta_web_workflows(items)
+            .into_iter()
+            .map(|workflow| workflow.metadata.name)
             .collect();
-        // The poll does not fetch nodes. Running workflows are fetched again
-        // with their nodes to find those waiting in a suspend step.
-        if workflows
-            .iter()
-            .any(|workflow| workflow.status.phase == "Running")
-        {
-            let running = match self
-                .argo_client
-                .list_workflows(Some("workflows.argoproj.io/phase=Running"))
-                .await
-            {
-                Ok(running) => running,
-                Err(error) => {
-                    tracing::warn!(%error, "running_workflows_lookup_failed");
-                    return;
-                }
-            };
-            let suspended: HashSet<String> = running
-                .into_iter()
-                .filter(|workflow| workflow.is_suspended())
-                .map(|workflow| workflow.metadata.name)
-                .collect();
-            for workflow in &mut workflows {
-                if suspended.contains(&workflow.metadata.name) {
-                    workflow.spec.suspend = Some(true);
-                }
-            }
-        }
-        let names: Vec<String> = workflows
-            .iter()
-            .map(|workflow| workflow.metadata.name.clone())
-            .collect();
-        let namespace = self.argo_client.namespace();
-        let write = async {
-            db.upsert_workflows(namespace, observed_at, &workflows)
-                .await?;
-            db.remove_missing_workflows(namespace, observed_at, &names)
-                .await
-        };
-        match tokio::time::timeout(std::time::Duration::from_secs(10), write).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(%error, "workflow_table_write_failed"),
-            Err(_) => tracing::warn!("workflow_table_write_timed_out"),
+        if self.upsert_workflows(items, observed_at).await {
+            let namespace = self.argo_client.namespace();
+            let remove = db.remove_missing_workflows(namespace, observed_at, &names);
+            log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, remove).await);
         }
     }
 
-    /// Merges the workflow list from Argo into the job state, records
-    /// metrics and statistics for status changes and drops expired jobs.
+    /// Writes the Bakta Web workflows of `items` in chunks and returns true
+    /// when all chunks were written. The suspend state comes from
+    /// `spec.suspend`: no workflow template has a suspend step.
+    async fn upsert_workflows(&self, items: &[SimpleStatus], observed_at: DateTime<Utc>) -> bool {
+        let Some(db) = self.stats.db() else {
+            return false;
+        };
+        let namespace = self.argo_client.namespace();
+        for chunk in bakta_web_workflows(items).chunks(TABLE_WRITE_CHUNK) {
+            let upsert = db.upsert_workflows(namespace, observed_at, chunk);
+            if !log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, upsert).await) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Merges a complete workflow list into the job state, records metrics
+    /// and statistics for status changes and drops expired jobs. Returns the
+    /// jobs that were skipped for now and need another pass.
     pub(crate) async fn apply_workflow_statuses(
         &self,
         items: Vec<SimpleStatus>,
         now: DateTime<Utc>,
-    ) {
+    ) -> HashSet<Uuid> {
+        self.apply_workflows(items, None, now).await
+    }
+
+    async fn apply_workflows(
+        &self,
+        items: Vec<SimpleStatus>,
+        scope: Option<&HashSet<Uuid>>,
+        now: DateTime<Utc>,
+    ) -> HashSet<Uuid> {
+        let in_scope = |id: &Uuid| scope.is_none_or(|jobs| jobs.contains(id));
+        let mut retry = HashSet::new();
         let recorded_in_db = self.recorded_workflow_names(&items).await;
         let deleted_in_db = self.deleted_in_db(&items).await;
         let mut write_lock = self.job_state.write().await;
@@ -1187,7 +1205,10 @@ impl StateHandler {
                 }
             }
             markers.retain(|id, marker| {
-                reserved.contains(id) || resolved.contains(id) || marker.still_unknown(now)
+                !in_scope(id)
+                    || reserved.contains(id)
+                    || resolved.contains(id)
+                    || marker.still_unknown(now)
             });
         }
         let deleted = {
@@ -1214,12 +1235,20 @@ impl StateHandler {
                         phase: item.status.phase.clone(),
                     },
                 ))
-            })
-            .collect();
-        *self
-            .live_workflows
-            .write()
-            .expect("live workflows lock poisoned") = live;
+            });
+        {
+            let mut live_workflows = self
+                .live_workflows
+                .write()
+                .expect("live workflows lock poisoned");
+            match scope {
+                None => *live_workflows = live.collect(),
+                Some(jobs) => {
+                    live_workflows.retain(|id, _| !jobs.contains(id));
+                    live_workflows.extend(live);
+                }
+            }
+        }
 
         let mut expired = Vec::new();
         let mut polled = Vec::new();
@@ -1233,7 +1262,10 @@ impl StateHandler {
                 continue;
             }
             let job_id = job_id_label(&item);
-            if job_id.is_some_and(|id| reserved.contains(&id)) {
+            if let Some(id) = job_id
+                && reserved.contains(&id)
+            {
+                retry.insert(id);
                 continue;
             }
             // Deleted jobs are never added back.
@@ -1251,7 +1283,10 @@ impl StateHandler {
             // list it as deleted.
             if !write_lock.contains_key(&state.id) {
                 match &deleted_in_db {
-                    None => continue,
+                    None => {
+                        retry.insert(state.id);
+                        continue;
+                    }
                     Some(deleted) if deleted.contains(&state.id) => {
                         self.record_deleted(state.id);
                         metadata.push(polled_metadata(state.id, &item));
@@ -1318,14 +1353,17 @@ impl StateHandler {
         expired.extend(purge_expired_states(&mut write_lock, now));
         // Recorded while the lock is held, so it is ordered with the events
         // of retries and resubmits.
-        if !polled.is_empty() {
-            self.stats.record(StatsEvent::Polled(polled));
+        // A full list at startup has many workflows, so the writes are split.
+        for chunk in polled.chunks(STATS_EVENT_CHUNK) {
+            self.stats.record(StatsEvent::Polled(chunk.to_vec()));
         }
-        if !metadata.is_empty() {
-            self.stats.record(StatsEvent::PolledMetadata(metadata));
+        for chunk in metadata.chunks(STATS_EVENT_CHUNK) {
+            self.stats
+                .record(StatsEvent::PolledMetadata(chunk.to_vec()));
         }
         drop(write_lock);
         self.record_expired(expired);
+        retry
     }
 
     /// Workflow names from the database for jobs with several workflows and
