@@ -129,6 +129,8 @@ fn parse_workflow(value: serde_json::Value) -> Result<Workflow> {
                 creation_timestamp: metadata.creation_timestamp,
                 labels: metadata.labels,
             },
+            // the template name is kept in `template` below
+            spec: Default::default(),
             status: SimpleStatusStatus {
                 phase: status.phase,
                 // A workflow that never started has no start time.
