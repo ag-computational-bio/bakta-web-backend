@@ -116,6 +116,7 @@ async fn finished_job(db: &StatsDb, environment: &str, kind: &str, status: &'sta
         },
         workflow_name: format!("wf-{id}"),
         submitted_at: job.created_at,
+        origin: "bakta.computational.bio".to_string(),
     })))
     .await
     .unwrap();
@@ -127,6 +128,7 @@ async fn finished_job(db: &StatsDb, environment: &str, kind: &str, status: &'sta
         started_at: Some(job.created_at + Duration::seconds(10)),
         finished_at: Some(job.created_at + Duration::seconds(110)),
         error_message: None,
+        origin: None,
     }]))
     .await
     .unwrap();
@@ -159,6 +161,7 @@ pub async fn aged_job(
         started_at: Some(created_at),
         finished_at,
         error_message: None,
+        origin: None,
     }]))
     .await
     .unwrap();

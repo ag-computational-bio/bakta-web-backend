@@ -58,6 +58,8 @@ pub struct SubmittedJob {
     pub versions: JobVersions,
     pub workflow_name: String,
     pub submitted_at: DateTime<Utc>,
+    /// Sanitized `Origin` header of the start request, `Unknown` when missing.
+    pub origin: String,
 }
 
 /// State of a job's current workflow, as seen by the polling loop.
@@ -76,6 +78,8 @@ pub struct WorkflowState {
     /// Argo `status.finishedAt` of a finished workflow.
     pub finished_at: Option<DateTime<Utc>>,
     pub error_message: Option<String>,
+    /// The `origin` label. A missing label keeps the recorded origin.
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -166,10 +170,12 @@ impl StatsDb {
         };
         let ids: Vec<Uuid> = states.iter().map(|state| state.job.id).collect();
         sqlx::query(
-            "INSERT INTO jobs (id, environment, workflow_kind, api_version, status, name, created_at, updated_at)
-             SELECT id, environment, workflow_kind, api_version, 'submitted', name, created_at, now()
-             FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::timestamptz[])
-                 AS polled(id, environment, workflow_kind, api_version, name, created_at)
+            "INSERT INTO jobs (id, environment, workflow_kind, api_version, status, name, created_at, origin,
+                               updated_at)
+             SELECT id, environment, workflow_kind, api_version, 'submitted', name, created_at, origin, now()
+             FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::timestamptz[],
+                         $7::text[])
+                 AS polled(id, environment, workflow_kind, api_version, name, created_at, origin)
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(&ids)
@@ -178,6 +184,7 @@ impl StatsDb {
         .bind(column(|state| Some(state.job.api_version.clone())))
         .bind(column(|state| state.job.name.clone()))
         .bind(states.iter().map(|state| state.job.created_at).collect::<Vec<_>>())
+        .bind(column(|state| state.origin.clone()))
         .execute(&self.pool)
         .await?;
         let times =
@@ -187,12 +194,14 @@ impl StatsDb {
         sqlx::query(
             "WITH polled AS (
                  SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::timestamptz[],
-                                      $5::timestamptz[], $6::timestamptz[], $7::text[], $8::text[])
+                                      $5::timestamptz[], $6::timestamptz[], $7::text[], $8::text[],
+                                      $9::text[])
                      AS polled(id, workflow_name, status, created_at, started_at, finished_at, error_message,
-                               environment)
+                               environment, origin)
              ), target AS (
                  SELECT jobs.id, polled.workflow_name, polled.status, polled.started_at,
                      polled.finished_at, polled.error_message, polled.environment,
+                     COALESCE(polled.origin, jobs.origin) AS origin,
                      COALESCE(jobs.submitted_at, polled.created_at) AS submitted_at,
                      CASE WHEN polled.status IN ('succeeded', 'failed', 'error')
                          THEN polled.status ELSE jobs.outcome END AS outcome
@@ -214,16 +223,16 @@ impl StatsDb {
                  started_at = wanted.started_at, finished_at = wanted.finished_at,
                  runtime_seconds = wanted.runtime_seconds, queue_seconds = wanted.queue_seconds,
                  error_message = wanted.error_message, environment = wanted.environment,
-                 updated_at = now()
+                 origin = wanted.origin, updated_at = now()
              FROM wanted
              WHERE jobs.id = wanted.id
                  AND (jobs.workflow_name, jobs.status, jobs.outcome, jobs.submitted_at,
                       jobs.started_at, jobs.finished_at, jobs.runtime_seconds,
-                      jobs.queue_seconds, jobs.error_message, jobs.environment)
+                      jobs.queue_seconds, jobs.error_message, jobs.environment, jobs.origin)
                  IS DISTINCT FROM
                      (wanted.workflow_name, wanted.status, wanted.outcome, wanted.submitted_at,
                       wanted.started_at, wanted.finished_at, wanted.runtime_seconds,
-                      wanted.queue_seconds, wanted.error_message, wanted.environment)",
+                      wanted.queue_seconds, wanted.error_message, wanted.environment, wanted.origin)",
         )
         .bind(&ids)
         .bind(column(|state| Some(state.workflow_name.clone())))
@@ -233,6 +242,7 @@ impl StatsDb {
         .bind(times(|state| state.finished_at))
         .bind(column(|state| state.error_message.clone()))
         .bind(column(|state| Some(state.job.environment.clone())))
+        .bind(column(|state| state.origin.clone()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -252,7 +262,7 @@ impl StatsDb {
                          bakta_version = $11, bakta_db_version = $12,
                          baktfold_version = $13, baktfold_db_version = $14,
                          workflow_name = COALESCE(workflow_name, $15), submitted_at = $16,
-                         updated_at = now()
+                         origin = $17, updated_at = now()
                      WHERE id = $1",
                 )
                 .bind(job.id)
@@ -271,6 +281,7 @@ impl StatsDb {
                 .bind(&submitted.versions.baktfold_db_version)
                 .bind(&submitted.workflow_name)
                 .bind(submitted.submitted_at)
+                .bind(&submitted.origin)
                 .execute(&self.pool)
                 .await?;
             }
@@ -585,6 +596,7 @@ mod tests {
             started_at,
             finished_at,
             error_message: None,
+            origin: None,
         }])
     }
 
@@ -661,6 +673,7 @@ mod tests {
             },
             workflow_name: "wf-1".to_string(),
             submitted_at: t0 + ChronoDuration::seconds(10),
+            origin: "Unknown".to_string(),
         })))
         .await
         .unwrap();
@@ -743,6 +756,7 @@ mod tests {
             started_at: Some(t0),
             finished_at: Some(t0 + ChronoDuration::seconds(5)),
             error_message: Some("OOMKilled".to_string()),
+            origin: Some("bakta.computational.bio".to_string()),
         }]))
         .await
         .unwrap();
@@ -949,6 +963,7 @@ mod tests {
             versions: JobVersions::default(),
             workflow_name: "wf-a".to_string(),
             submitted_at: t0 + ChronoDuration::seconds(10),
+            origin: "Unknown".to_string(),
         })))
         .await
         .unwrap();
@@ -1033,6 +1048,71 @@ mod tests {
         assert_eq!(
             row(&db, id).await.get::<String, _>("environment"),
             "production"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_origin_comes_from_the_start_and_the_poll() {
+        let Some(db) = test_db("test_origin_comes_from_the_start_and_the_poll").await else {
+            return;
+        };
+        let t0 = Utc::now() - ChronoDuration::hours(1);
+        let job = new_job(&unique_environment(), t0);
+        let id = job.id;
+        async fn origin(db: &StatsDb, id: Uuid) -> Option<String> {
+            row(db, id).await.get("origin")
+        }
+        let poll = |origin: Option<&str>| {
+            StatsEvent::Polled(vec![WorkflowState {
+                job: job.clone(),
+                workflow_name: "wf-a".to_string(),
+                status: "running",
+                created_at: None,
+                started_at: Some(t0),
+                finished_at: None,
+                error_message: None,
+                origin: origin.map(str::to_string),
+            }])
+        };
+        db.apply(&poll(Some("bakta.computational.bio")))
+            .await
+            .unwrap();
+        assert_eq!(
+            origin(&db, id).await.as_deref(),
+            Some("bakta.computational.bio")
+        );
+        // A workflow without the label keeps the recorded origin.
+        db.apply(&poll(None)).await.unwrap();
+        assert_eq!(
+            origin(&db, id).await.as_deref(),
+            Some("bakta.computational.bio")
+        );
+        db.apply(&poll(Some("Unknown"))).await.unwrap();
+        assert_eq!(origin(&db, id).await.as_deref(), Some("Unknown"));
+
+        let started = new_job(&unique_environment(), t0);
+        db.apply(&StatsEvent::Created(started.clone()))
+            .await
+            .unwrap();
+        assert_eq!(origin(&db, started.id).await, None);
+        db.apply(&StatsEvent::Submitted(Box::new(SubmittedJob {
+            job: started.clone(),
+            genus: None,
+            species: None,
+            strain: None,
+            sequence_count: None,
+            total_length: None,
+            config: None,
+            versions: JobVersions::default(),
+            workflow_name: "wf-b".to_string(),
+            submitted_at: t0,
+            origin: "staging.bakta.computational.bio".to_string(),
+        })))
+        .await
+        .unwrap();
+        assert_eq!(
+            origin(&db, started.id).await.as_deref(),
+            Some("staging.bakta.computational.bio")
         );
     }
 

@@ -182,6 +182,10 @@ async fn v2_job_lifecycle_is_recorded() {
     let config: Value = row.get::<Option<Value>, _>("config").unwrap();
     assert_eq!(config["genus"], "Escherichia");
     assert!(!config.to_string().contains(&secret));
+    assert_eq!(
+        row.get::<Option<String>, _>("origin").as_deref(),
+        Some("Unknown")
+    );
 
     let state = &handler.state_handler;
     state
@@ -638,6 +642,7 @@ async fn late_resubmit_does_not_reset_a_finished_workflow_of_a_database_only_job
             versions: JobVersions::default(),
             workflow_name: "wf-a".to_string(),
             submitted_at: created,
+            origin: "Unknown".to_string(),
         },
     )))
     .await

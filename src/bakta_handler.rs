@@ -555,6 +555,11 @@ fn workflow_environment(labels: &HashMap<String, String>) -> &str {
     "production"
 }
 
+/// Value of the `origin` label for the sanitized `Origin` header of a start request.
+fn origin_label(origin: Option<String>) -> String {
+    origin.unwrap_or_else(|| "Unknown".to_string())
+}
+
 fn stats_status_label(status: &ArgoStatus) -> &'static str {
     match status {
         ArgoStatus::Pending | ArgoStatus::Init => "submitted",
@@ -597,6 +602,7 @@ fn polled_workflow_state(
                 message.truncate(message.floor_char_boundary(MAX_ERROR_MESSAGE_LENGTH));
                 message
             }),
+        origin: item.metadata.labels.get("origin").cloned(),
     })
 }
 
@@ -1797,6 +1803,7 @@ impl StateHandler {
         state: &FullJobState,
         details: SubmissionDetails,
         workflow_name: &str,
+        origin: Option<String>,
     ) {
         let now = Utc::now();
         self.stats
@@ -1811,6 +1818,7 @@ impl StateHandler {
                 versions: versions_for_kind(state.workflow_kind, &self.stats.versions),
                 workflow_name: workflow_name.to_string(),
                 submitted_at: now,
+                origin: origin_label(origin),
             })));
     }
 
@@ -1839,10 +1847,7 @@ impl StateHandler {
                 "result-kind".to_string(),
                 result_kind_label_value(state.result_kind).to_string(),
             ),
-            (
-                "origin".to_string(),
-                origin.unwrap_or_else(|| "Unknown".to_string()),
-            ),
+            ("origin".to_string(), origin_label(origin)),
         ])
     }
 
@@ -1883,7 +1888,7 @@ impl StateHandler {
                 return Err(SubmissionUnknown.into());
             }
             (
-                self.submit_labels(state, origin),
+                self.submit_labels(state, origin.clone()),
                 state.api_version,
                 state.workflow_kind,
                 reservation,
@@ -1942,7 +1947,7 @@ impl StateHandler {
             state.api_version.as_label_value(),
             workflow_kind_label_value(state.workflow_kind),
         );
-        self.record_submitted(state, details, &workflow_name);
+        self.record_submitted(state, details, &workflow_name, origin);
         tracing::info!(
             job_id = %id,
             api_version = state.api_version.as_label_value(),
@@ -1996,7 +2001,7 @@ impl StateHandler {
                 return Err(SubmissionUnknown.into());
             }
             (
-                self.submit_labels(state, origin),
+                self.submit_labels(state, origin.clone()),
                 state.api_version,
                 reservation,
             )
@@ -2052,7 +2057,7 @@ impl StateHandler {
             state.api_version.as_label_value(),
             workflow_kind_label_value(state.workflow_kind),
         );
-        self.record_submitted(state, details, &workflow_name);
+        self.record_submitted(state, details, &workflow_name, origin);
         tracing::info!(
             job_id = %job_id,
             api_version = state.api_version.as_label_value(),
