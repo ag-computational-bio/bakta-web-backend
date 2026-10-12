@@ -1420,6 +1420,15 @@ async fn the_reconcile_adopts_a_newer_completed_attempt_than_the_recorded_one() 
         assert_eq!(name.as_deref(), Some(newer.as_str()));
         assert_eq!(status, "succeeded");
         assert!(created.is_some());
+        // The times describe the new attempt, not the gap since the old one.
+        let (submitted, queue): (Option<chrono::DateTime<Utc>>, Option<f64>) =
+            sqlx::query_as("SELECT submitted_at, queue_seconds FROM jobs WHERE id = $1")
+                .bind(id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(submitted, created);
+        assert!(queue.is_some_and(|queue| queue < 60.0), "{queue:?}");
         let served = state
             .user_job_state(id, TEST_SECRET)
             .await

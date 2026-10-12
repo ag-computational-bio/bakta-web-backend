@@ -277,7 +277,12 @@ impl StatsDb {
                      COALESCE(jobs.secret_hash, polled.secret_hash) AS secret_hash,
                      COALESCE(jobs.result_kind, polled.result_kind) AS result_kind,
                      COALESCE(polled.argo_uid, jobs.argo_uid) AS argo_uid,
-                     COALESCE(jobs.submitted_at, polled.created_at) AS submitted_at,
+                     -- Another workflow than the recorded one (a newer attempt that
+                     -- the reconcile adopts) starts its own queue time.
+                     CASE WHEN jobs.workflow_name IS DISTINCT FROM polled.workflow_name
+                              AND jobs.workflow_name IS NOT NULL AND polled.created_at IS NOT NULL
+                          THEN polled.created_at
+                          ELSE COALESCE(jobs.submitted_at, polled.created_at) END AS submitted_at,
                      CASE WHEN polled.status IN ('succeeded', 'failed', 'error')
                          THEN polled.status ELSE jobs.outcome END AS outcome
                  FROM jobs JOIN polled ON jobs.id = polled.id
