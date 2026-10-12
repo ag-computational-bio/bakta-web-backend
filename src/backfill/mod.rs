@@ -2,3 +2,4 @@
 //! into the statistics database.
 
 pub mod parse;
+pub mod summary;

@@ -174,6 +174,26 @@ impl S3Handler {
         }
     }
 
+    /// Reads a small result file as text. `None` when it does not exist.
+    pub async fn read_result_text(&self, job_id: &str, key_name: &str) -> Result<Option<String>> {
+        let url = self
+            .sign_result_object_url(
+                job_id,
+                key_name,
+                Method::GET,
+                RESULT_EXISTENCE_CHECK_DURATION_SECONDS,
+                None,
+            )
+            .await?;
+
+        let response = self.client.get(url).send().await?;
+        match response.status() {
+            StatusCode::OK => Ok(Some(response.text().await?)),
+            StatusCode::NOT_FOUND => Ok(None),
+            status => Err(anyhow!("Failed to read result file {key_name}: {status}")),
+        }
+    }
+
     async fn sign_result_download_url(
         &self,
         job_id: &str,
@@ -654,6 +674,59 @@ mod tests {
             url.query().unwrap().contains(
                 "response-content-disposition=attachment%3B%20filename%3D%22sample.json%22"
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_result_text_returns_none_for_a_missing_file() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jobs/job-1/results/result.txt"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("Length: 10\n"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jobs/job-2/results/result.txt"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jobs/job-3/results/result.txt"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let handler = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            format!("http://s3.test:{}", server.address().port()),
+        )
+        .with_bucket_host_address(*server.address());
+        assert_eq!(
+            handler
+                .read_result_text("job-1", "result.txt")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Length: 10\n")
+        );
+        assert_eq!(
+            handler
+                .read_result_text("job-2", "result.txt")
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            handler
+                .read_result_text("job-3", "result.txt")
+                .await
+                .is_err()
         );
     }
 
