@@ -137,6 +137,19 @@ fn response_phase(workflow: &ArgoWorkflow, fallback: &str) -> String {
     }
 }
 
+/// Time an admin write to the `workflows` table may take. The action holds
+/// the job's reservation until it is done.
+const TABLE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Logs a failed or timed out admin write to the `workflows` table.
+fn log_table_write(result: Result<anyhow::Result<()>, tokio::time::error::Elapsed>) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "admin_workflow_store_failed"),
+        Err(_) => tracing::warn!("admin_workflow_store_timed_out"),
+    }
+}
+
 /// Writes a workflow as Argo returned it after an admin action to the
 /// `workflows` table, so the next workflow list shows the change. Failures
 /// are only logged.
@@ -149,12 +162,8 @@ async fn store_workflow(state: &BaktaHandler, workflow: &ArgoWorkflow) {
         return;
     }
     let namespace = handler.argo_client.namespace();
-    if let Err(error) = db
-        .upsert_workflows(namespace, Utc::now(), std::slice::from_ref(workflow))
-        .await
-    {
-        tracing::warn!(%error, workflow_name = %workflow.metadata.name, "admin_workflow_store_failed");
-    }
+    let write = db.upsert_workflows(namespace, Utc::now(), std::slice::from_ref(workflow));
+    log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, write).await);
 }
 
 /// Marks deleted workflows as gone in the `workflows` table: the named one,
@@ -166,17 +175,17 @@ async fn store_workflow_gone(state: &BaktaHandler, name: Option<&str>, job_id: O
     };
     let namespace = handler.argo_client.namespace();
     let now = Utc::now();
-    let result = match (name, job_id) {
-        (Some(name), _) => {
-            db.remove_workflows(namespace, now, &[name.to_string()])
-                .await
+    let write = async {
+        match (name, job_id) {
+            (Some(name), _) => {
+                db.remove_workflows(namespace, now, &[name.to_string()])
+                    .await
+            }
+            (None, Some(id)) => db.remove_job_workflows(namespace, now, id).await,
+            (None, None) => Ok(()),
         }
-        (None, Some(id)) => db.remove_job_workflows(namespace, now, id).await,
-        (None, None) => Ok(()),
     };
-    if let Err(error) = result {
-        tracing::warn!(%error, "admin_workflow_store_failed");
-    }
+    log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, write).await);
 }
 
 /// Updates the job state and record after an Argo retry requested at

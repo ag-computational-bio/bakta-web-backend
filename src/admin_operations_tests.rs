@@ -2664,3 +2664,64 @@ async fn workflow_list_and_bulk_actions_are_limited_with_totals() {
         ["DELETE /api/v1/workflows/bakta/old-failed"]
     );
 }
+
+#[tokio::test]
+async fn a_stalled_workflow_table_does_not_hold_admin_actions() {
+    let Some(db) = test_db("a_stalled_workflow_table_does_not_hold_admin_actions").await else {
+        return;
+    };
+    let argo = MockServer::start().await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+    let id = job_with_workflow(&setup.handler, "wf-1", ArgoStatus::Running).await;
+    let job = id.to_string();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(listed_workflow(
+            "wf-1",
+            "Running",
+            Some(&job),
+            None,
+        )))
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-1/terminate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(listed_workflow(
+            "wf-1",
+            "Failed",
+            Some(&job),
+            Some(0),
+        )))
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&argo)
+        .await;
+
+    // A connection that stalls on the workflow table.
+    let mut lock = db.pool().begin().await.unwrap();
+    sqlx::query("LOCK TABLE workflows IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let limit = std::time::Duration::from_secs(20);
+    let stop = tokio::time::timeout(
+        limit,
+        admin_call(&setup, "POST", &format!("/api/admin/jobs/{id}/stop"), None),
+    )
+    .await;
+    let delete = tokio::time::timeout(
+        limit,
+        admin_call(&setup, "DELETE", &format!("/api/admin/jobs/{id}"), None),
+    )
+    .await;
+    lock.rollback().await.unwrap();
+    let (status, body) = stop.expect("the stop must not wait for the table");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = delete.expect("the delete must not wait for the table");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The delete released the reservation and recorded the job as deleted.
+    assert!(setup.handler.state_handler.reserve_start(id).is_ok());
+    assert!(setup.handler.state_handler.is_deleted(&id));
+}
