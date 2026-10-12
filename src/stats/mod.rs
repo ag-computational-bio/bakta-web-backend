@@ -8,7 +8,7 @@ mod queries_tests;
 pub mod runtimes;
 pub mod workflows;
 
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -453,16 +453,24 @@ impl StatsDb {
 }
 
 /// Sends job lifecycle events to the statistics database in the background.
-/// Events are written in order by a single worker. Events that keep the
-/// state of jobs (see `StatsEvent::is_durable`) are retried with a pause of
-/// 1 to 10 seconds until they are written, later events wait for them.
-/// Statistics-only events are tried a few times and then dropped. When
+/// Events are written in order by a single worker, see `Writer`. When
 /// recording is disabled, every call is a no-op.
 #[derive(Clone, Default)]
 pub struct StatsRecorder {
     sink: Option<Sink>,
     db: Option<StatsDb>,
+    health: Arc<WriterHealth>,
     pub versions: JobVersions,
+}
+
+/// State of the writer for metrics and readiness.
+#[derive(Default)]
+struct WriterHealth {
+    /// Number of parked events.
+    parked: std::sync::atomic::AtomicUsize,
+    /// Since when the writer retries a write that fails with a transient
+    /// error (the database is not reachable), `None` while it works.
+    stuck_since: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 #[derive(Clone)]
@@ -478,8 +486,13 @@ type Queued = (StatsEvent, Option<tokio::sync::oneshot::Sender<()>>);
 
 /// Attempts of a statistics-only event before it is dropped.
 const STATS_ONLY_ATTEMPTS: u32 = 3;
+/// Attempts of a durable event whose error is neither clearly transient nor
+/// clearly permanent before it is parked.
+const DURABLE_ATTEMPTS: u32 = 5;
 const MIN_RETRY: Duration = Duration::from_secs(1);
 const MAX_RETRY: Duration = Duration::from_secs(10);
+/// Interval at which parked events are tried again.
+const PARKED_RETRY: Duration = Duration::from_secs(300);
 
 /// A write that `persist` could not confirm in time. Answered with `503`.
 /// The write stays queued and is still retried.
@@ -494,7 +507,78 @@ impl std::fmt::Display for RecordWriteFailed {
 
 impl std::error::Error for RecordWriteFailed {}
 
+/// How a failed write is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failure {
+    /// The database is not reachable or busy: the write is repeated in place.
+    Transient,
+    /// The write itself is wrong (constraint, data or schema error): it is
+    /// parked at once.
+    Permanent,
+    /// Anything else: repeated up to `DURABLE_ATTEMPTS` times, then parked.
+    Other,
+}
+
+fn classify(error: &anyhow::Error) -> Failure {
+    match error.downcast_ref::<sqlx::Error>() {
+        Some(
+            sqlx::Error::Io(_)
+            | sqlx::Error::Tls(_)
+            | sqlx::Error::Protocol(_)
+            | sqlx::Error::PoolTimedOut
+            | sqlx::Error::PoolClosed
+            | sqlx::Error::WorkerCrashed,
+        ) => Failure::Transient,
+        Some(sqlx::Error::Database(error)) => match error.code().as_deref() {
+            // Connection, resources, operator intervention, serialization
+            // failure, deadlock and lock timeout.
+            Some(code)
+                if code.starts_with("08")
+                    || code.starts_with("53")
+                    || code.starts_with("57")
+                    || matches!(code, "40001" | "40P01" | "55P03") =>
+            {
+                Failure::Transient
+            }
+            // Data exceptions, constraint violations, syntax and schema errors.
+            Some(code)
+                if code.starts_with("22") || code.starts_with("23") || code.starts_with("42") =>
+            {
+                Failure::Permanent
+            }
+            _ => Failure::Other,
+        },
+        _ => Failure::Other,
+    }
+}
+
 impl StatsEvent {
+    /// The jobs whose records the event writes.
+    fn job_ids(&self) -> Vec<Uuid> {
+        match self {
+            StatsEvent::Created(job) => vec![job.id],
+            StatsEvent::Submitted(submitted) => vec![submitted.job.id],
+            StatsEvent::Polled(states) => states.iter().map(|state| state.job.id).collect(),
+            StatsEvent::PolledMetadata(metadata) => metadata.iter().map(|(id, _, _)| *id).collect(),
+            StatsEvent::Retried { id, .. }
+            | StatsEvent::Resubmitted { id, .. }
+            | StatsEvent::Deleted { id }
+            | StatsEvent::Expired { id, .. } => vec![*id],
+        }
+    }
+
+    /// One event per job of a workflow update of several jobs, so one bad
+    /// job does not keep the others from being written.
+    fn split(self) -> Vec<StatsEvent> {
+        match self {
+            StatsEvent::Polled(states) if states.len() > 1 => states
+                .into_iter()
+                .map(|state| StatsEvent::Polled(vec![state]))
+                .collect(),
+            event => vec![event],
+        }
+    }
+
     /// Events that keep the state of jobs, which the user API serves from
     /// the database. The others only feed the statistics.
     fn is_durable(&self) -> bool {
@@ -516,40 +600,37 @@ impl StatsRecorder {
 
     /// Starts the background writer. Must be called inside a Tokio runtime.
     pub fn new(db: StatsDb, versions: JobVersions) -> Self {
-        let (sender, mut receiver) = mpsc::channel::<Queued>(EVENT_QUEUE_SIZE);
-        let worker_db = db.clone();
-        tokio::spawn(async move {
-            while let Some((event, written)) = receiver.recv().await {
-                let mut attempt = 0;
-                let mut pause = MIN_RETRY;
-                loop {
-                    attempt += 1;
-                    let error =
-                        match tokio::time::timeout(WRITE_TIMEOUT, worker_db.apply(&event)).await {
-                            Ok(Ok(())) => {
-                                if let Some(written) = written {
-                                    let _ = written.send(());
-                                }
-                                break;
-                            }
-                            Ok(Err(error)) => error.to_string(),
-                            Err(_) => "timed out".to_string(),
-                        };
-                    if !event.is_durable() && attempt >= STATS_ONLY_ATTEMPTS {
-                        tracing::warn!(%error, ?event, "stats_write_failed");
-                        break;
-                    }
-                    tracing::warn!(%error, attempt, ?event, "stats_write_retry");
-                    tokio::time::sleep(pause).await;
-                    pause = (pause * 2).min(MAX_RETRY);
-                }
-            }
-        });
+        let (sender, receiver) = mpsc::channel::<Queued>(EVENT_QUEUE_SIZE);
+        let health = Arc::new(WriterHealth::default());
+        let writer = Writer {
+            db: db.clone(),
+            parked: HashMap::new(),
+            health: health.clone(),
+        };
+        tokio::spawn(writer.run(receiver));
         Self {
             sink: Some(Sink::Writer(sender)),
             db: Some(db),
+            health,
             versions,
         }
+    }
+
+    /// Number of parked events, see `Writer`.
+    pub fn parked_events(&self) -> usize {
+        self.health
+            .parked
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How long the writer has been retrying a write that fails with a
+    /// transient error, `None` while it works.
+    pub fn writer_stuck_for(&self) -> Option<Duration> {
+        self.health
+            .stuck_since
+            .lock()
+            .expect("writer health lock poisoned")
+            .map(|since| since.elapsed())
     }
 
     /// Recorder that sends all events to the returned receiver. Only for tests.
@@ -559,6 +640,7 @@ impl StatsRecorder {
         let recorder = Self {
             sink: Some(Sink::Capture(sender)),
             db: None,
+            health: Default::default(),
             versions: JobVersions::default(),
         };
         (recorder, receiver)
@@ -623,6 +705,195 @@ impl StatsRecorder {
                 tracing::warn!("stats_persist_not_confirmed");
                 Err(RecordWriteFailed.into())
             }
+        }
+    }
+}
+
+/// Writes the queued events in order.
+///
+/// - A write that fails with a transient error (the database is not
+///   reachable or busy) is repeated in place with a pause of 1 to 10 seconds,
+///   as long as it takes. Later events wait.
+/// - A durable event (see `StatsEvent::is_durable`) whose write fails with a
+///   permanent error (constraint, data or schema error), or still fails after
+///   `DURABLE_ATTEMPTS` attempts, is parked: it is kept and logged once, and
+///   later events of the same job are kept behind it, so the order per job
+///   stays. Events of other jobs move on. A workflow update of several jobs
+///   is split first, so only the bad job is parked. Parked events are tried
+///   again every five minutes and whenever a new event of their job arrives.
+/// - Statistics-only events are tried `STATS_ONLY_ATTEMPTS` times and then
+///   dropped.
+struct Writer {
+    db: StatsDb,
+    /// Parked events by job, oldest first. The first one failed.
+    parked: HashMap<Uuid, std::collections::VecDeque<Queued>>,
+    health: Arc<WriterHealth>,
+}
+
+impl Writer {
+    async fn run(mut self, mut receiver: mpsc::Receiver<Queued>) {
+        let mut retry = tokio::time::interval(PARKED_RETRY);
+        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        retry.tick().await;
+        loop {
+            tokio::select! {
+                queued = receiver.recv() => match queued {
+                    Some((event, written)) => self.handle(event, written).await,
+                    None => return,
+                },
+                _ = retry.tick() => {
+                    let jobs: Vec<Uuid> = self.parked.keys().copied().collect();
+                    for id in jobs {
+                        self.flush(id).await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle(
+        &mut self,
+        event: StatsEvent,
+        written: Option<tokio::sync::oneshot::Sender<()>>,
+    ) {
+        let jobs = event.job_ids();
+        if jobs.len() == 1 && event.is_durable() {
+            return self.handle_one(event, written).await;
+        }
+        let blocked = event.is_durable() && jobs.iter().any(|id| self.parked.contains_key(id));
+        if !blocked {
+            match self.write(&event).await {
+                Ok(()) => {
+                    if let Some(written) = written {
+                        let _ = written.send(());
+                    }
+                    return;
+                }
+                Err(error) if !event.is_durable() => {
+                    tracing::warn!(%error, ?event, "stats_write_failed");
+                    return;
+                }
+                Err(_) => {}
+            }
+        }
+        // The jobs are written or parked one by one. The whole event is not
+        // confirmed then.
+        for part in event.split() {
+            self.handle_one(part, None).await;
+        }
+    }
+
+    /// Writes or parks an event of one job.
+    async fn handle_one(
+        &mut self,
+        event: StatsEvent,
+        written: Option<tokio::sync::oneshot::Sender<()>>,
+    ) {
+        let Some(id) = event.job_ids().first().copied() else {
+            return;
+        };
+        if self.parked.contains_key(&id) {
+            self.park(id, (event, written));
+            self.flush(id).await;
+            return;
+        }
+        match self.write(&event).await {
+            Ok(()) => {
+                if let Some(written) = written {
+                    let _ = written.send(());
+                }
+            }
+            Err(error) if event.is_durable() => {
+                tracing::warn!(job_id = %id, %error, ?event, "job_record_write_parked");
+                self.park(id, (event, written));
+            }
+            Err(error) => tracing::warn!(%error, ?event, "stats_write_failed"),
+        }
+    }
+
+    fn park(&mut self, id: Uuid, queued: Queued) {
+        self.parked.entry(id).or_default().push_back(queued);
+        self.count_parked();
+    }
+
+    /// Writes the parked events of a job in order, until one fails again.
+    async fn flush(&mut self, id: Uuid) {
+        while let Some((event, _)) = self.parked.get(&id).and_then(|events| events.front()) {
+            let event = event.clone();
+            if let Err(error) = self.write(&event).await {
+                tracing::debug!(job_id = %id, %error, "job_record_write_still_parked");
+                break;
+            }
+            if let Some((_, Some(written))) = self
+                .parked
+                .get_mut(&id)
+                .and_then(|events| events.pop_front())
+            {
+                let _ = written.send(());
+            }
+            if self.parked.get(&id).is_some_and(|events| events.is_empty()) {
+                self.parked.remove(&id);
+                tracing::info!(job_id = %id, "job_record_write_unparked");
+            }
+        }
+        self.count_parked();
+    }
+
+    fn count_parked(&self) {
+        let count = self.parked.values().map(|events| events.len()).sum();
+        self.health
+            .parked
+            .store(count, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Writes an event. Transient errors are retried as long as they last,
+    /// other errors give up as described at `Writer`.
+    async fn write(&self, event: &StatsEvent) -> std::result::Result<(), String> {
+        let mut attempt = 0;
+        let mut pause = MIN_RETRY;
+        loop {
+            attempt += 1;
+            let (failure, error) =
+                match tokio::time::timeout(WRITE_TIMEOUT, self.db.apply(event)).await {
+                    Ok(Ok(())) => {
+                        self.set_stuck(false);
+                        return Ok(());
+                    }
+                    Ok(Err(error)) => (classify(&error), error.to_string()),
+                    Err(_) => (Failure::Transient, "timed out".to_string()),
+                };
+            if !event.is_durable() && attempt >= STATS_ONLY_ATTEMPTS {
+                self.set_stuck(false);
+                return Err(error);
+            }
+            match failure {
+                Failure::Transient => self.set_stuck(true),
+                Failure::Permanent => {
+                    self.set_stuck(false);
+                    return Err(error);
+                }
+                Failure::Other if attempt >= DURABLE_ATTEMPTS => {
+                    self.set_stuck(false);
+                    return Err(error);
+                }
+                Failure::Other => {}
+            }
+            tracing::warn!(%error, attempt, ?failure, "stats_write_retry");
+            tokio::time::sleep(pause).await;
+            pause = (pause * 2).min(MAX_RETRY);
+        }
+    }
+
+    fn set_stuck(&self, stuck: bool) {
+        let mut since = self
+            .health
+            .stuck_since
+            .lock()
+            .expect("writer health lock poisoned");
+        match (stuck, *since) {
+            (true, None) => *since = Some(std::time::Instant::now()),
+            (false, Some(_)) => *since = None,
+            _ => {}
         }
     }
 }
@@ -1449,5 +1720,98 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!("recorder did not write the events");
+    }
+
+    /// Makes every write of job `id` fail with a constraint error.
+    async fn poison_job(db: &StatsDb, id: Uuid) {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE OR REPLACE FUNCTION poison_job() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF NEW.id = '{id}' THEN
+                     RAISE EXCEPTION 'poisoned job' USING ERRCODE = 'check_violation';
+                 END IF;
+                 RETURN NEW;
+             END $$"
+        )))
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER poison_job BEFORE INSERT OR UPDATE ON jobs
+             FOR EACH ROW EXECUTE FUNCTION poison_job()",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_a_poisoned_job_does_not_block_other_jobs() {
+        let Some(db) = test_db("test_a_poisoned_job_does_not_block_other_jobs").await else {
+            return;
+        };
+        let environment = unique_environment();
+        let (bad, good, other) = (
+            new_job(&environment, Utc::now()),
+            new_job(&environment, Utc::now()),
+            new_job(&environment, Utc::now()),
+        );
+        for job in [&bad, &good, &other] {
+            db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
+        }
+        poison_job(&db, bad.id).await;
+        let recorder = StatsRecorder::new((*db).clone(), JobVersions::default());
+        let wait = Duration::from_secs(10);
+
+        // One batch with the poisoned job and a good one, then another job.
+        let StatsEvent::Polled(mut states) = polled(&bad, "wf-bad", "succeeded", None, None) else {
+            unreachable!()
+        };
+        let StatsEvent::Polled(good_states) = polled(&good, "wf-good", "succeeded", None, None)
+        else {
+            unreachable!()
+        };
+        states.extend(good_states);
+        recorder.record(StatsEvent::Polled(states));
+        recorder
+            .persist(StatsEvent::Deleted { id: other.id }, wait)
+            .await
+            .expect("other jobs are written");
+        assert_eq!(
+            row(&db, good.id).await.get::<String, _>("status"),
+            "succeeded"
+        );
+        assert_eq!(
+            row(&db, other.id).await.get::<String, _>("status"),
+            "deleted"
+        );
+        // The writer is not stuck: one parked job does not take it down.
+        assert_eq!(recorder.parked_events(), 1);
+        assert!(recorder.writer_stuck_for().is_none());
+        // A later event of the poisoned job waits behind it.
+        assert!(
+            recorder
+                .persist(StatsEvent::Deleted { id: bad.id }, Duration::from_secs(2))
+                .await
+                .is_err()
+        );
+        assert_eq!(row(&db, bad.id).await.get::<String, _>("status"), "created");
+
+        // Once the job can be written, a new event writes its kept events in order.
+        sqlx::query("DROP TRIGGER poison_job ON jobs")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        recorder
+            .persist(StatsEvent::Deleted { id: bad.id }, wait)
+            .await
+            .expect("the kept events are written");
+        let record = row(&db, bad.id).await;
+        assert_eq!(record.get::<String, _>("status"), "deleted");
+        assert_eq!(recorder.parked_events(), 0);
+        assert_eq!(
+            record.get::<Option<String>, _>("workflow_name").as_deref(),
+            Some("wf-bad")
+        );
     }
 }

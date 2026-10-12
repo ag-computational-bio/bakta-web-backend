@@ -25,6 +25,9 @@ use crate::bakta_handler::BaktaHandler;
 
 const ACTIVE_WORKFLOW_KINDS: [&str; 4] = ["bakta", "bakta_proteins", "bakta_baktfold", "baktfold"];
 const ACTIVE_JOB_STATUSES: [&str; 4] = ["created", "pending", "init", "running"];
+/// Readiness fails while the job record writer has retried a write that
+/// fails with a transient error for longer than this.
+const WRITER_STUCK_LIMIT: Duration = Duration::from_secs(120);
 /// Requests that take at least this long are logged.
 const SLOW_REQUEST: Duration = Duration::from_millis(500);
 
@@ -72,6 +75,8 @@ pub struct AppMetrics {
     workflow_relists_total: Counter,
     workflow_watch_last_event: Gauge,
     workflow_last_list: Gauge,
+    job_record_writes_parked: Gauge,
+    job_record_writer_stuck_seconds: Gauge,
 }
 
 impl AppMetrics {
@@ -88,6 +93,8 @@ impl AppMetrics {
         let workflow_relists_total = Counter::default();
         let workflow_watch_last_event = Gauge::default();
         let workflow_last_list = Gauge::default();
+        let job_record_writes_parked = Gauge::default();
+        let job_record_writer_stuck_seconds = Gauge::default();
 
         let mut registry = Registry::default();
         registry.register(
@@ -136,6 +143,16 @@ impl AppMetrics {
             workflow_watch_last_event.clone(),
         );
         registry.register(
+            "job_record_writes_parked",
+            "Number of job record writes that failed with a permanent error and are kept.",
+            job_record_writes_parked.clone(),
+        );
+        registry.register(
+            "job_record_writer_stuck_seconds",
+            "Seconds the job record writer has retried a write that fails with a transient error, 0 while it works.",
+            job_record_writer_stuck_seconds.clone(),
+        );
+        registry.register(
             "workflow_last_list_timestamp_seconds",
             "Unix time of the last successful full workflow list.",
             workflow_last_list.clone(),
@@ -153,6 +170,8 @@ impl AppMetrics {
             workflow_relists_total,
             workflow_watch_last_event,
             workflow_last_list,
+            job_record_writes_parked,
+            job_record_writer_stuck_seconds,
         }
     }
 
@@ -205,6 +224,12 @@ impl AppMetrics {
 
     pub fn record_watch_event(&self, at: chrono::DateTime<chrono::Utc>) {
         self.workflow_watch_last_event.set(at.timestamp());
+    }
+
+    pub fn update_writer(&self, parked: usize, stuck_for: Option<Duration>) {
+        self.job_record_writes_parked.set(parked as i64);
+        self.job_record_writer_stuck_seconds
+            .set(stuck_for.map_or(0, |stuck| stuck.as_secs() as i64));
     }
 
     pub fn record_workflow_list(&self, at: chrono::DateTime<chrono::Utc>) {
@@ -287,6 +312,15 @@ pub async fn ready(State(state): State<Arc<BaktaHandler>>) -> StatusCode {
     let handler = &state.state_handler;
     let ordering = std::sync::atomic::Ordering::Relaxed;
     if !handler.ready.load(ordering) || !handler.reconciled.load(ordering) {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
+    // A writer that cannot reach the database for long cannot keep the job
+    // records. A parked write of one job does not count.
+    if handler
+        .stats
+        .writer_stuck_for()
+        .is_some_and(|stuck| stuck > WRITER_STUCK_LIMIT)
+    {
         return StatusCode::SERVICE_UNAVAILABLE;
     }
     if let Some(db) = handler.stats.db() {

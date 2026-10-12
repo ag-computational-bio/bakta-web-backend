@@ -1921,6 +1921,8 @@ impl StateHandler {
         drop(read_lock);
 
         self.metrics.update_active_jobs(&snapshot);
+        self.metrics
+            .update_writer(self.stats.parked_events(), self.stats.writer_stuck_for());
         self.metrics.encode().map_err(|e| anyhow!(e.to_string()))
     }
 
