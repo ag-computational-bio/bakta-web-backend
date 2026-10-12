@@ -531,6 +531,30 @@ fn stats_new_job(state: &FullJobState, environment: &str, created_at: DateTime<U
     }
 }
 
+/// Environment of a polled workflow. Workflows from before the
+/// `bakta-environment` label have none, so it is derived from other labels:
+/// before that label existed, only the staging backend set `api-version`, and
+/// the `origin` label shows the staging and local development UIs. All other
+/// workflows come from the old production backend.
+fn workflow_environment(labels: &HashMap<String, String>) -> &str {
+    if let Some(environment) = labels.get("bakta-environment")
+        && crate::admin::is_valid_environment(environment)
+    {
+        return environment;
+    }
+    if labels.contains_key("api-version") {
+        return "staging";
+    }
+    let origin = labels.get("origin").map(String::as_str).unwrap_or_default();
+    if ["staging.", "http_localhost", "http_127.0.0.1"]
+        .iter()
+        .any(|prefix| origin.starts_with(prefix))
+    {
+        return "staging";
+    }
+    "production"
+}
+
 fn stats_status_label(status: &ArgoStatus) -> &'static str {
     match status {
         ArgoStatus::Pending | ArgoStatus::Init => "submitted",
@@ -1178,12 +1202,7 @@ impl StateHandler {
                 }
                 continue;
             }
-            let environment = item
-                .metadata
-                .labels
-                .get("bakta-environment")
-                .map(String::as_str)
-                .unwrap_or(&self.environment);
+            let environment = workflow_environment(&item.metadata.labels);
             polled.extend(polled_workflow_state(&state, environment, &item));
             if let Some(previous) = write_lock.get(&state.id)
                 && !is_terminal_status(previous.status.as_ref())
@@ -2141,6 +2160,48 @@ mod tests {
             workflow_kind,
             result_kind: ResultKind::Bakta,
         }
+    }
+
+    #[test]
+    fn test_workflow_environment_uses_labels_of_old_workflows() {
+        let environment = |labels: &[(&str, &str)]| {
+            let labels: HashMap<String, String> = labels
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect();
+            workflow_environment(&labels).to_string()
+        };
+        assert_eq!(
+            environment(&[
+                ("bakta-environment", "dev"),
+                ("origin", "bakta.computational.bio")
+            ]),
+            "dev"
+        );
+        assert_eq!(
+            environment(&[("bakta-environment", "not valid"), ("origin", "Unknown")]),
+            "production"
+        );
+        assert_eq!(
+            environment(&[("api-version", "v2"), ("origin", "Unknown")]),
+            "staging"
+        );
+        assert_eq!(
+            environment(&[("origin", "staging.bakta.computational.bio")]),
+            "staging"
+        );
+        assert_eq!(environment(&[("origin", "http_localhost_5173")]), "staging");
+        assert_eq!(environment(&[("origin", "http_127.0.0.1_5173")]), "staging");
+        assert_eq!(
+            environment(&[("origin", "bakta.computational.bio")]),
+            "production"
+        );
+        assert_eq!(
+            environment(&[("origin", "http_bakta.computational.bio")]),
+            "production"
+        );
+        assert_eq!(environment(&[("origin", "Unknown")]), "production");
+        assert_eq!(environment(&[]), "production");
     }
 
     #[test]
