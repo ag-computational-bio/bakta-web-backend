@@ -83,6 +83,32 @@ The workflow state in a job record follows the job's current workflow in Argo:
 - A resubmit records the new workflow for the job at once, also for a job that is only in the database (for example after a restart). So the next poll takes the new workflow as current, even before the database write of the resubmit is done.
 - Other writes only set what polls cannot see: the job init, the start request (input options, input statistics, versions, `submitted_at`), the request time of a retry or resubmit (`submitted_at`), user and admin deletes, and expiry. They never overwrite the workflow state of a newer poll. A resubmit only points the record to the new workflow (and resets its state to `submitted`) when no poll has seen that workflow yet.
 
+### Live workflows
+
+Table `workflows` keeps the live Bakta Web workflows for `GET /workflows` and the bulk preview, so these do not need to list all workflows from Argo. One row per workflow, primary key `namespace` and `name`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `namespace`, `name` | text | Argo namespace and workflow name |
+| `job_id` | uuid, null | `jobid` label, null when missing or not a UUID |
+| `environment` | text | Derived environment, see "Environment of a workflow" below |
+| `workflow_kind`, `origin` | text, null | `workflow-kind` and `origin` labels |
+| `template` | text, null | Name of the workflow template |
+| `phase` | text | Argo phase |
+| `created_at`, `started_at`, `finished_at` | timestamptz, null | Argo creation time, `status.startedAt` and `status.finishedAt` |
+| `message` | text, null | Argo `status.message` |
+| `suspended` | boolean | See `POST /jobs/{id}/resume` |
+| `labels` | jsonb | All workflow labels |
+| `gone_at` | timestamptz, null | Time the workflow was no longer listed or was deleted by an admin. Such rows are hidden and deleted after one hour. |
+| `updated_at` | timestamptz | Time of the state in the row |
+
+How the table is written:
+
+- Every poll (every 15 seconds) writes the Bakta Web workflows of the list (see "Workflow labels" below). A row is only written when it differs. Workflows that the poll no longer lists get `gone_at`. The poll does not fetch the nodes of all workflows: running workflows are fetched a second time with their nodes, to find those that wait in a `Suspend` step. If that fails, the poll does not write the table.
+- Admin actions (retry, resubmit, stop, resume, delete, bulk runs) write the workflow that Argo returns, or set `gone_at` for deleted workflows, right away.
+- A row is never set to a state that is older than the one it has, so a poll that fetched its list before an admin action does not undo the action's write.
+- So the data is at most one poll interval old, except rows changed by admin actions, which are current. A new or deployed backend fills the table with its first poll.
+
 ### Environment of a workflow
 
 Production and staging backends watch the same Argo namespace. A poll takes the environment of a workflow from its labels:
@@ -357,7 +383,9 @@ When the backend knows no workflow name for the job (for example a start request
 
 ### `GET /workflows?environment&phase&orphans`
 
-For this endpoint and for `POST /workflows/bulk`, `environment` defaults to the backend's own `ENVIRONMENT`. The backend lists all workflows from Argo and keeps those whose environment, derived as in "Environment of a workflow", matches. So workflows without a `bakta-environment` label are found too.
+For this endpoint and for `POST /workflows/bulk`, `environment` defaults to the backend's own `ENVIRONMENT`. The backend keeps the Bakta Web workflows whose environment, derived as in "Environment of a workflow", matches. So workflows without a `bakta-environment` label are found too.
+
+With the statistics database, this endpoint and the bulk dry run read the `workflows` table (see "Live workflows"), newest first. Without it, they list all workflows from Argo. A real bulk run always lists the workflows from Argo again.
 
 Live Argo workflows of this backend, including ones without a job record. `phase`: comma separated (`Pending`, `Running`, `Succeeded`, `Failed`, `Error`).
 
@@ -390,7 +418,7 @@ Runs one action on all live workflows that match a filter.
 - `filter` fields are all optional and combine with AND. `q` matches the workflow name or job ID, case insensitive substring. `finished_before_hours` keeps only workflows that finished more than that many hours ago. `environment` defaults to the backend's own environment, `all` is allowed.
 - `action`: `delete`, `stop` (Argo terminate), `retry` (Argo retry), `resume` (Argo resume of suspended workflows), `resubmit` (Argo resubmit; the job record then points to the new workflow).
 - `dry_run` defaults to `true`: return the matching workflows and, per workflow, whether the action applies, without changing anything.
-- `workflow_names`: when given (a real run after a dry run), only workflows in this list that still match the filter are processed.
+- `workflow_names`: when given (a real run after a dry run), only workflows in this list that still match the filter are processed. A real run checks the filter and the applicability against the current workflow list from Argo, not against the `workflows` table.
 - Applicability: `stop` for `Pending` and `Running`, `retry` for `Failed` and `Error`, `resume` only for suspended workflows, `resubmit` for any finished workflow (`Succeeded`, `Failed`, `Error`), `delete` for any workflow that is not `Pending` or `Running`.
 - `delete` does not apply to `Pending` and `Running` workflows: `applicable` is false and `reason` is `Still running, stop it first`. A real run skips them.
 - `retry` and `resubmit` only apply to the job's current workflow. An older workflow of a job that was resubmitted is not applicable (`reason` names the current workflow).
