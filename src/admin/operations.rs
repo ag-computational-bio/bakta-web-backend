@@ -783,6 +783,25 @@ pub async fn bulk_workflows(
     let mut items = Vec::with_capacity(workflows.len());
     for workflow in workflows {
         let mut reason = bulk_phase_reason(action, &workflow);
+        // A real resubmit takes the job's reservation, like a start or
+        // delete. It is taken before deciding which workflow is current and
+        // kept until the result is recorded, so another resubmit cannot
+        // publish a new workflow in between.
+        let mut _reservation = None;
+        if reason.is_none()
+            && !dry_run
+            && action == BulkAction::Resubmit
+            && let Some(id) = workflow
+                .metadata
+                .labels
+                .get("jobid")
+                .and_then(|value| value.parse::<Uuid>().ok())
+        {
+            match state.state_handler.reserve_start(id) {
+                Ok(reservation) => _reservation = Some(reservation),
+                Err(_) => reason = Some(JOB_BUSY.to_string()),
+            }
+        }
         // Retry and resubmit only act on the job's current workflow, and
         // not when it cannot be determined.
         if reason.is_none() && matches!(action, BulkAction::Retry | BulkAction::Resubmit) {
@@ -799,21 +818,6 @@ pub async fn bulk_workflows(
             && !workflow_data_available(&state, &workflow).await
         {
             reason = Some("Input data deleted after the retention period".to_string());
-        }
-        // A resubmit takes the job's reservation, like a start or delete.
-        let mut _reservation = None;
-        if reason.is_none() && !dry_run && action == BulkAction::Resubmit {
-            let job_id = workflow
-                .metadata
-                .labels
-                .get("jobid")
-                .and_then(|value| value.parse::<Uuid>().ok());
-            if let Some(id) = job_id {
-                match state.state_handler.reserve_start(id) {
-                    Ok(reservation) => _reservation = Some(reservation),
-                    Err(_) => reason = Some(JOB_BUSY.to_string()),
-                }
-            }
         }
         let applicable = reason.is_none();
         let (result, error) = if dry_run {

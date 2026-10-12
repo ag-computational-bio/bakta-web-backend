@@ -2060,3 +2060,83 @@ async fn deleting_an_archived_job_whose_live_workflow_is_gone_succeeds() {
             .contains_key(&id)
     );
 }
+
+#[tokio::test]
+async fn resubmit_is_refused_while_a_bulk_resubmit_checks_the_job() {
+    let Some(db) = test_db("resubmit_is_refused_while_a_bulk_resubmit_checks_the_job").await else {
+        return;
+    };
+    let argo = MockServer::start().await;
+    let setup = std::sync::Arc::new(
+        admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await,
+    );
+    let id = job_with_workflow(&setup.handler, "wf-old", ArgoStatus::Failed).await;
+    let listed = listed_workflow("wf-old", "Failed", Some(&id.to_string()), Some(1));
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [listed]})))
+        .mount(&argo)
+        .await;
+    // Only the bulk resubmit runs.
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-old/resubmit"))
+        .respond_with(workflow("wf-new", "Pending"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+
+    // Holds the bulk resubmit in its retention lookup, after it checked
+    // which workflow is current.
+    let mut lock = db.pool().begin().await.unwrap();
+    sqlx::query("LOCK TABLE jobs IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let bulk = tokio::spawn({
+        let setup = setup.clone();
+        async move {
+            admin_call(
+                &setup,
+                "POST",
+                "/api/admin/workflows/bulk",
+                Some(json!({"action": "resubmit", "dry_run": false})),
+            )
+            .await
+        }
+    });
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid))",
+        )
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // A single resubmit now would publish wf-new, and the bulk resubmit
+    // would then resubmit wf-old again.
+    let single = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        admin_call(
+            &setup,
+            "POST",
+            &format!("/api/admin/jobs/{id}/resubmit"),
+            None,
+        ),
+    )
+    .await;
+    lock.rollback().await.unwrap();
+    let (status, body) = single.expect("the single resubmit must not wait for the bulk one");
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "Job is busy, try again later");
+
+    let (status, body) = bulk.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"][0]["result"], "done", "{body}");
+    let states = setup.handler.state_handler.job_state.read().await;
+    assert_eq!(states[&id].workflowname.as_deref(), Some("wf-new"));
+}
