@@ -185,33 +185,10 @@ async fn store_workflow(
     log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, write).await);
 }
 
-/// Marks deleted workflows as gone in the `workflows` table: the named one,
-/// or all of the job without a name. Failures are only logged.
+/// Marks deleted workflows as gone in the `workflows` table, see
+/// `StateHandler::mark_workflows_gone`.
 async fn store_workflow_gone(state: &BaktaHandler, name: Option<&str>, job_id: Option<Uuid>) {
-    let handler = &state.state_handler;
-    let Some(db) = handler.stats.db() else {
-        return;
-    };
-    let namespace = handler.argo_client.namespace();
-    let now = Utc::now();
-    let write = async {
-        match (name, job_id) {
-            (Some(name), _) => {
-                db.remove_workflows(namespace, now, &[name.to_string()])
-                    .await
-            }
-            (None, Some(id)) => db.remove_job_workflows(namespace, now, id).await,
-            (None, None) => Ok(()),
-        }
-    };
-    // A deleted workflow sends no watch event, so a failed write is repeated.
-    if !log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, write).await) {
-        match (name, job_id) {
-            (Some(name), _) => handler.keep_unwritten(Vec::new(), vec![name.to_string()], now),
-            (None, Some(id)) => handler.keep_unwritten_job(id, now),
-            (None, None) => {}
-        }
-    }
+    state.state_handler.mark_workflows_gone(name, job_id).await;
 }
 
 /// Updates the job state and record after an Argo retry requested at

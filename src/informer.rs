@@ -999,6 +999,38 @@ impl StateHandler {
         }
     }
 
+    /// Marks deleted workflows as gone in the `workflows` table after a
+    /// delete: the named one, or all of the job without a name. A deleted
+    /// completed workflow sends no watch event, so a failed write is kept
+    /// and repeated.
+    pub(crate) async fn mark_workflows_gone(&self, name: Option<&str>, job_id: Option<Uuid>) {
+        let Some(db) = self.stats.db() else {
+            return;
+        };
+        let namespace = self.argo_client.namespace();
+        let now = Utc::now();
+        let write = async {
+            match (name, job_id) {
+                (Some(name), _) => {
+                    db.remove_workflows(namespace, now, &[name.to_string()])
+                        .await
+                }
+                (None, Some(id)) => db.remove_job_workflows(namespace, now, id).await,
+                (None, None) => Ok(()),
+            }
+        };
+        match tokio::time::timeout(Duration::from_secs(5), write).await {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => tracing::warn!(%error, "workflow_gone_write_failed"),
+            Err(_) => tracing::warn!("workflow_gone_write_timed_out"),
+        }
+        match (name, job_id) {
+            (Some(name), _) => self.keep_unwritten(Vec::new(), vec![name.to_string()], now),
+            (None, Some(id)) => self.keep_unwritten_job(id, now),
+            (None, None) => {}
+        }
+    }
+
     /// Keeps a failed write that marks all workflows of a job as gone.
     pub(crate) fn keep_unwritten_job(&self, id: Uuid, observed_at: DateTime<Utc>) {
         self.unwritten

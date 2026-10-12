@@ -562,3 +562,53 @@ async fn a_job_that_leaves_memory_during_a_status_request_is_found() {
     assert!(list.failed_jobs.is_empty(), "v2");
     assert_eq!(list.jobs.len(), 2, "v2");
 }
+
+#[tokio::test]
+async fn a_user_delete_marks_the_workflow_rows_gone() {
+    let Some(db) = crate::stats::test_db::test_db("a_user_delete_marks_the_workflow_rows").await
+    else {
+        return;
+    };
+    let argo = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&argo)
+        .await;
+    let handler = test_handler_with_stats(
+        &argo.uri(),
+        "https://s3.example.com",
+        crate::stats::StatsRecorder::new((*db).clone(), Default::default()),
+    );
+    for api in ["v1", "v2"] {
+        let (id, _) = recorded_job(&db, Utc::now() - chrono::Duration::hours(1)).await;
+        sqlx::query("UPDATE jobs SET workflow_name = $2 WHERE id = $1")
+            .bind(id)
+            .bind(format!("wf-{api}"))
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let row: crate::argo::structs::ArgoWorkflow = serde_json::from_value(json!({
+            "metadata": {"name": format!("wf-{api}"),
+                         "labels": {"jobid": id.to_string(), "bakta-environment": "production"}},
+            "status": {"phase": "Succeeded"}
+        }))
+        .unwrap();
+        db.upsert_workflows("bakta", Utc::now() - chrono::Duration::minutes(1), &[row])
+            .await
+            .unwrap();
+        let uri = match api {
+            "v1" => format!("/api/v1/job/delete?jobID={id}&secret={TEST_SECRET}"),
+            _ => format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+        };
+        let (status, body) = call(&test_router(handler.clone()), "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{api}: {body}");
+        let live: Vec<String> = db
+            .live_workflows("bakta", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|workflow| workflow.metadata.name)
+            .collect();
+        assert!(!live.contains(&format!("wf-{api}")), "{api}: {live:?}");
+    }
+}

@@ -2196,6 +2196,9 @@ impl StateHandler {
         } else {
             self.delete_job_workflows(job_id).await?;
         }
+        // Like the admin delete: the admin workflow list no longer offers it.
+        self.mark_workflows_gone(state.workflowname.as_deref(), Some(job_id))
+            .await;
         {
             let mut job_state = self.job_state.write().await;
             self.record_deleted(job_id);
