@@ -137,6 +137,48 @@ fn response_phase(workflow: &ArgoWorkflow, fallback: &str) -> String {
     }
 }
 
+/// Writes a workflow as Argo returned it after an admin action to the
+/// `workflows` table, so the next workflow list shows the change. Failures
+/// are only logged.
+async fn store_workflow(state: &BaktaHandler, workflow: &ArgoWorkflow) {
+    let handler = &state.state_handler;
+    let Some(db) = handler.stats.db() else {
+        return;
+    };
+    if !is_bakta_web_workflow(workflow) {
+        return;
+    }
+    let namespace = handler.argo_client.namespace();
+    if let Err(error) = db
+        .upsert_workflows(namespace, Utc::now(), std::slice::from_ref(workflow))
+        .await
+    {
+        tracing::warn!(%error, workflow_name = %workflow.metadata.name, "admin_workflow_store_failed");
+    }
+}
+
+/// Marks deleted workflows as gone in the `workflows` table: the named one,
+/// or all of the job without a name. Failures are only logged.
+async fn store_workflow_gone(state: &BaktaHandler, name: Option<&str>, job_id: Option<Uuid>) {
+    let handler = &state.state_handler;
+    let Some(db) = handler.stats.db() else {
+        return;
+    };
+    let namespace = handler.argo_client.namespace();
+    let now = Utc::now();
+    let result = match (name, job_id) {
+        (Some(name), _) => {
+            db.remove_workflows(namespace, now, &[name.to_string()])
+                .await
+        }
+        (None, Some(id)) => db.remove_job_workflows(namespace, now, id).await,
+        (None, None) => Ok(()),
+    };
+    if let Err(error) = result {
+        tracing::warn!(%error, "admin_workflow_store_failed");
+    }
+}
+
 /// Updates the job state and record after an Argo retry requested at
 /// `retried_at`. The event is recorded while the job state lock is held, so
 /// it is ordered with the status updates of the polling loop. A finish seen
@@ -255,6 +297,7 @@ pub async fn retry_job(
         .map_err(AdminError::argo)?;
     tracing::info!(user = %user.username, job_id = %id, workflow_name = %workflow_name, "admin_retry");
     after_retry(&state, id, &workflow_name, retried_at).await;
+    store_workflow(&state, &workflow).await;
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Running"),
         workflow_name,
@@ -321,6 +364,7 @@ pub async fn resubmit_job(
         new_workflow_name = %new_name, "admin_resubmit"
     );
     after_resubmit(&state, id, &old_name, &workflow).await;
+    store_workflow(&state, &workflow).await;
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Pending"),
         workflow_name: new_name,
@@ -363,6 +407,7 @@ pub async fn stop_job(
         .await
         .map_err(AdminError::argo)?;
     tracing::info!(user = %user.username, job_id = %id, workflow_name = %workflow_name, "admin_stop");
+    store_workflow(&state, &workflow).await;
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Failed"),
         workflow_name,
@@ -407,6 +452,7 @@ pub async fn resume_job(
         .await
         .map_err(AdminError::argo)?;
     tracing::info!(user = %user.username, job_id = %id, workflow_name = %workflow_name, "admin_resume");
+    store_workflow(&state, &workflow).await;
     Ok(Json(WorkflowActionResponse {
         phase: response_phase(&workflow, "Running"),
         workflow_name,
@@ -469,6 +515,7 @@ pub async fn delete_job(
             }
         })?,
     };
+    store_workflow_gone(&state, target.workflow_name.as_deref(), Some(id)).await;
     // Without S3 data there is nothing to list or purge.
     let purge = params.purge_data.unwrap_or(false)
         && job_data_available(&state, id, target.in_memory.as_ref()).await;
@@ -770,22 +817,21 @@ async fn run_bulk_action(
         .labels
         .get("jobid")
         .and_then(|value| value.parse::<Uuid>().ok());
-    match action {
+    let changed = match action {
         BulkAction::Delete => {
             argo.delete_workflow_by_name(name).await?;
+            store_workflow_gone(state, Some(name), None).await;
+            return Ok(());
         }
-        BulkAction::Stop => {
-            argo.terminate_workflow(name).await?;
-        }
-        BulkAction::Resume => {
-            argo.resume_workflow(name).await?;
-        }
+        BulkAction::Stop => argo.terminate_workflow(name).await?,
+        BulkAction::Resume => argo.resume_workflow(name).await?,
         BulkAction::Retry => {
             let retried_at = Utc::now();
-            argo.retry_workflow(name).await?;
+            let changed = argo.retry_workflow(name).await?;
             if let Some(id) = job_id {
                 after_retry(state, id, name, retried_at).await;
             }
+            changed
         }
         BulkAction::Resubmit => {
             let requested_at = Utc::now();
@@ -804,8 +850,10 @@ async fn run_bulk_action(
             if let Some(id) = job_id {
                 after_resubmit(state, id, name, &new_workflow).await;
             }
+            new_workflow
         }
-    }
+    };
+    store_workflow(state, &changed).await;
     Ok(())
 }
 

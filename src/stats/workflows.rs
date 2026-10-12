@@ -112,6 +112,44 @@ impl StatsDb {
         Ok(())
     }
 
+    /// Marks the named workflows as gone from Argo at `observed_at`.
+    pub async fn remove_workflows(
+        &self,
+        namespace: &str,
+        observed_at: DateTime<Utc>,
+        names: &[String],
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE workflows SET gone_at = $2, updated_at = $2
+             WHERE namespace = $1 AND name = ANY($3) AND gone_at IS NULL AND updated_at <= $2",
+        )
+        .bind(namespace)
+        .bind(observed_at)
+        .bind(names)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Marks all workflows of a job as gone from Argo at `observed_at`.
+    pub async fn remove_job_workflows(
+        &self,
+        namespace: &str,
+        observed_at: DateTime<Utc>,
+        job_id: Uuid,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE workflows SET gone_at = $2, updated_at = $2
+             WHERE namespace = $1 AND job_id = $3 AND gone_at IS NULL AND updated_at <= $2",
+        )
+        .bind(namespace)
+        .bind(observed_at)
+        .bind(job_id)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     /// Takes `present` as the complete list of live workflows at
     /// `observed_at`: all others are marked as gone. Rows that are gone for
     /// a while are deleted.

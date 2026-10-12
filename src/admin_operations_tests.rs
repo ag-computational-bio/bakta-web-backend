@@ -2495,3 +2495,135 @@ async fn a_poll_after_a_restart_does_not_add_jobs_deleted_in_the_database_back()
     assert!(!states.contains_key(&unrecorded));
     assert!(matches!(states[&recorded].status, Some(ArgoStatus::Error)));
 }
+
+async fn table_names(db: &crate::stats::StatsDb) -> Vec<String> {
+    let mut names: Vec<String> = db
+        .live_workflows("bakta", None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|workflow| workflow.metadata.name)
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn workflow_list_and_bulk_preview_read_the_table() {
+    let Some(db) = test_db("workflow_list_and_bulk_preview_read_the_table").await else {
+        return;
+    };
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"items": [listed_workflow("argo-only", "Failed", None, Some(48))]}),
+        ))
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+    let stored = json!({"items": [listed_workflow("table-only", "Failed", None, Some(48))]});
+    store_listed_workflows(&setup.handler, &stored).await;
+
+    let (status, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), ["table-only"]);
+    let body = bulk_dry_run(&setup, "delete").await;
+    assert_eq!(names(&body), ["table-only"]);
+    assert_eq!(bulk_item(&body, "table-only")["applicable"], true);
+    assert!(argo.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn bulk_run_checks_the_workflows_in_argo() {
+    let Some(db) = test_db("bulk_run_checks_the_workflows_in_argo").await else {
+        return;
+    };
+    let argo = MockServer::start().await;
+    // The table still has an older state: wf-started was started again.
+    let stored = json!({"items": [
+        listed_workflow("wf-started", "Failed", None, Some(48)),
+        listed_workflow("wf-done", "Failed", None, Some(48)),
+    ]});
+    let current = json!({"items": [
+        listed_workflow("wf-started", "Running", None, None),
+        listed_workflow("wf-done", "Failed", None, Some(48)),
+        listed_workflow("wf-new", "Failed", None, Some(48)),
+    ]});
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(current))
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+    store_listed_workflows(&setup.handler, &stored).await;
+
+    let preview = bulk_dry_run(&setup, "delete").await;
+    assert_eq!(bulk_item(&preview, "wf-started")["applicable"], true);
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        "/api/admin/workflows/bulk",
+        Some(json!({
+            "action": "delete", "dry_run": false,
+            "workflow_names": ["wf-started", "wf-done"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), ["wf-started", "wf-done"]);
+    assert_eq!(bulk_item(&body, "wf-started")["result"], "skipped");
+    assert_eq!(bulk_item(&body, "wf-done")["result"], "done");
+    assert_eq!(
+        argo_changes(argo.received_requests().await.unwrap()),
+        ["DELETE /api/v1/workflows/bakta/wf-done"]
+    );
+    // The deleted workflow is gone from the table at once.
+    assert_eq!(table_names(&db).await, ["wf-started"]);
+}
+
+#[tokio::test]
+async fn admin_actions_update_the_workflow_table() {
+    let Some(db) = test_db("admin_actions_update_the_workflow_table").await else {
+        return;
+    };
+    let argo = MockServer::start().await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+    let id = job_with_workflow(&setup.handler, "wf-1", ArgoStatus::Failed).await;
+    let job = id.to_string();
+    let failed = listed_workflow("wf-1", "Failed", Some(&job), Some(1));
+    let retried = listed_workflow("wf-1", "Running", Some(&job), None);
+    store_listed_workflows(&setup.handler, &json!({"items": [failed.clone()]})).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(failed))
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-1/retry"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(retried))
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&argo)
+        .await;
+
+    let (status, body) =
+        admin_call(&setup, "POST", &format!("/api/admin/jobs/{id}/retry"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
+    assert_eq!(names(&body), ["wf-1"]);
+    assert_eq!(body["items"][0]["phase"], "Running");
+    assert_eq!(body["items"][0]["finished_at"], Value::Null);
+
+    let (status, body) = admin_call(&setup, "DELETE", &format!("/api/admin/jobs/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
+    assert!(body["items"].as_array().unwrap().is_empty(), "{body}");
+}
