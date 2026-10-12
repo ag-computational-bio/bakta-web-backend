@@ -72,7 +72,8 @@ const FILL_COLUMNS: [&str; 23] = [
 /// Columns that belong to one workflow attempt. They are only filled when the
 /// record points to the same workflow, so a resubmit that started after the
 /// backfill read the workflows does not get the values of the old attempt.
-const ATTEMPT_COLUMNS: [&str; 7] = [
+const ATTEMPT_COLUMNS: [&str; 8] = [
+    "argo_uid",
     "outcome",
     "submitted_at",
     "started_at",
@@ -357,7 +358,8 @@ mod tests {
         else {
             return;
         };
-        let job = backfill_job(&unique_environment(), Utc::now() - Duration::hours(2));
+        let mut job = backfill_job(&unique_environment(), Utc::now() - Duration::hours(2));
+        job.argo_uid = Some(Uuid::new_v4());
         // A resubmit after the backfill read the workflows: the record points
         // to the new workflow and its attempt fields are empty.
         sqlx::query(
@@ -380,7 +382,7 @@ mod tests {
         );
         let filled: i32 = sqlx::query_scalar(
             "SELECT num_nonnulls(outcome, submitted_at, started_at, finished_at,
-                                 runtime_seconds, queue_seconds, error_message)
+                                 runtime_seconds, queue_seconds, error_message, argo_uid)
              FROM jobs WHERE id = $1",
         )
         .bind(job.job.id)
