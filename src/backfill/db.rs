@@ -65,14 +65,38 @@ const FILL_COLUMNS: [&str; 20] = [
     "total_length",
 ];
 
+/// Columns that belong to one workflow attempt. They are only filled when the
+/// record points to the same workflow, so a resubmit that started after the
+/// backfill read the workflows does not get the values of the old attempt.
+const ATTEMPT_COLUMNS: [&str; 7] = [
+    "outcome",
+    "submitted_at",
+    "started_at",
+    "finished_at",
+    "runtime_seconds",
+    "queue_seconds",
+    "error_message",
+];
+
 static FILL_SQL: LazyLock<String> = LazyLock::new(|| {
+    let fill = |column: &str| {
+        if ATTEMPT_COLUMNS.contains(&column) {
+            format!(
+                "CASE WHEN jobs.workflow_name IS DISTINCT FROM EXCLUDED.workflow_name
+                     AND jobs.workflow_name IS NOT NULL
+                     THEN jobs.{column} ELSE COALESCE(jobs.{column}, EXCLUDED.{column}) END"
+            )
+        } else {
+            format!("COALESCE(jobs.{column}, EXCLUDED.{column})")
+        }
+    };
     let set: Vec<String> = FILL_COLUMNS
         .iter()
-        .map(|column| format!("{column} = COALESCE(jobs.{column}, EXCLUDED.{column})"))
+        .map(|column| format!("{column} = {}", fill(column)))
         .collect();
     let changed: Vec<String> = FILL_COLUMNS
         .iter()
-        .map(|column| format!("(jobs.{column} IS NULL AND EXCLUDED.{column} IS NOT NULL)"))
+        .map(|column| format!("(jobs.{column} IS DISTINCT FROM {})", fill(column)))
         .collect();
     let placeholders: Vec<String> = (1..=FILL_COLUMNS.len() + 6)
         .map(|index| format!("${index}"))
@@ -314,5 +338,49 @@ mod tests {
 
         // A second run changes nothing.
         assert_eq!(db.backfill_job(&job).await.unwrap(), Fill::Unchanged);
+    }
+
+    #[tokio::test]
+    async fn test_backfill_keeps_the_cleared_fields_of_a_newer_attempt() {
+        let Some(db) = test_db("test_backfill_keeps_the_cleared_fields_of_a_newer_attempt").await
+        else {
+            return;
+        };
+        let job = backfill_job(&unique_environment(), Utc::now() - Duration::hours(2));
+        // A resubmit after the backfill read the workflows: the record points
+        // to the new workflow and its attempt fields are empty.
+        sqlx::query(
+            "INSERT INTO jobs (id, environment, workflow_kind, api_version, status, created_at,
+                               workflow_name, updated_at)
+             VALUES ($1, $2, 'bakta', 'v1', 'submitted', $3, 'bakta-job-new', now())",
+        )
+        .bind(job.job.id)
+        .bind(&job.job.environment)
+        .bind(job.job.created_at)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        assert_eq!(db.backfill_job(&job).await.unwrap(), Fill::Filled);
+        let record = row(&db, job.job.id).await;
+        assert_eq!(
+            record.get::<Option<String>, _>("workflow_name").unwrap(),
+            "bakta-job-new"
+        );
+        let filled: i32 = sqlx::query_scalar(
+            "SELECT num_nonnulls(outcome, submitted_at, started_at, finished_at,
+                                 runtime_seconds, queue_seconds, error_message)
+             FROM jobs WHERE id = $1",
+        )
+        .bind(job.job.id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(filled, 0);
+        assert_eq!(
+            record.get::<Option<String>, _>("genus").unwrap(),
+            "Escherichia"
+        );
+        assert_eq!(record.get::<Option<i32>, _>("sequence_count"), Some(2));
     }
 }
