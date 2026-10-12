@@ -6,6 +6,7 @@ pub mod queries;
 #[cfg(test)]
 mod queries_tests;
 pub mod runtimes;
+pub mod workflows;
 
 use std::time::Duration;
 

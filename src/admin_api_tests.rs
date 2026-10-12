@@ -581,14 +581,15 @@ async fn admin_workflows_can_list_orphans_only() {
         }
         json!({"metadata": {"name": name, "labels": labels}, "status": {"phase": "Running"}})
     };
+    let items = json!({"items": [
+        item("known", Some(known.to_string())),
+        item("unknown", Some(unknown.to_string())),
+        item("no-label", None),
+        item("bad-label", Some("not-a-uuid".to_string())),
+    ]});
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
-            item("known", Some(known.to_string())),
-            item("unknown", Some(unknown.to_string())),
-            item("no-label", None),
-            item("bad-label", Some("not-a-uuid".to_string())),
-        ]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(items.clone()))
         .mount(&argo)
         .await;
     let (status, _) = admin_call(
@@ -601,17 +602,22 @@ async fn admin_workflows_can_list_orphans_only() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+    store_listed_workflows(&setup.handler, &items).await;
+    let argo_requests = argo.received_requests().await.unwrap().len();
     let (status, body) = admin_call(&setup, "GET", "/api/admin/workflows?orphans=true", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let names: Vec<_> = body["items"]
+    let mut names: Vec<_> = body["items"]
         .as_array()
         .unwrap()
         .iter()
         .map(|item| item["name"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(names, ["unknown", "no-label", "bad-label"]);
+    names.sort();
+    assert_eq!(names, ["bad-label", "no-label", "unknown"]);
     let (_, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
     assert_eq!(body["items"].as_array().unwrap().len(), 4);
+    // Both lists come from the table, not from Argo.
+    assert_eq!(argo.received_requests().await.unwrap().len(), argo_requests);
 }
 
 fn time(value: &Value) -> chrono::DateTime<Utc> {

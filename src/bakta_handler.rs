@@ -1066,12 +1066,75 @@ impl StateHandler {
                     }
                 };
 
+                self.record_workflows(&initial.items, now).await;
                 self.apply_workflow_statuses(initial.items, now).await;
                 tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
             }
             #[allow(unreachable_code)]
             Ok::<(), anyhow::Error>(())
         });
+    }
+
+    /// Writes the polled Bakta Web workflows to the `workflows` table for
+    /// the admin API, and marks the others as gone. `observed_at` is a time
+    /// before the list was fetched. Does nothing without a database.
+    pub(crate) async fn record_workflows(
+        &self,
+        items: &[SimpleStatus],
+        observed_at: DateTime<Utc>,
+    ) {
+        let Some(db) = self.stats.db() else {
+            return;
+        };
+        let mut workflows: Vec<_> = items
+            .iter()
+            .map(crate::argo::structs::ArgoWorkflow::from)
+            .filter(crate::admin::operations::is_bakta_web_workflow)
+            .collect();
+        // The poll does not fetch nodes. Running workflows are fetched again
+        // with their nodes to find those waiting in a suspend step.
+        if workflows
+            .iter()
+            .any(|workflow| workflow.status.phase == "Running")
+        {
+            let running = match self
+                .argo_client
+                .list_workflows(Some("workflows.argoproj.io/phase=Running"))
+                .await
+            {
+                Ok(running) => running,
+                Err(error) => {
+                    tracing::warn!(%error, "running_workflows_lookup_failed");
+                    return;
+                }
+            };
+            let suspended: HashSet<String> = running
+                .into_iter()
+                .filter(|workflow| workflow.is_suspended())
+                .map(|workflow| workflow.metadata.name)
+                .collect();
+            for workflow in &mut workflows {
+                if suspended.contains(&workflow.metadata.name) {
+                    workflow.spec.suspend = Some(true);
+                }
+            }
+        }
+        let names: Vec<String> = workflows
+            .iter()
+            .map(|workflow| workflow.metadata.name.clone())
+            .collect();
+        let namespace = self.argo_client.namespace();
+        let write = async {
+            db.upsert_workflows(namespace, observed_at, &workflows)
+                .await?;
+            db.remove_missing_workflows(namespace, observed_at, &names)
+                .await
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(10), write).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "workflow_table_write_failed"),
+            Err(_) => tracing::warn!("workflow_table_write_timed_out"),
+        }
     }
 
     /// Merges the workflow list from Argo into the job state, records

@@ -1245,6 +1245,7 @@ async fn retry_and_resubmit_are_refused_when_the_current_workflow_is_unknown() {
         listed_workflow("wf-restarted", "Failed", Some(&restarted.to_string()), Some(48)),
         listed_workflow("wf-unrecorded", "Failed", Some(&unrecorded.to_string()), Some(48)),
     ]});
+    store_listed_workflows(&setup.handler, &items).await;
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/bakta"))
         .respond_with(ResponseTemplate::new(200).set_body_json(items))
@@ -1265,6 +1266,7 @@ async fn retry_and_resubmit_are_refused_when_the_current_workflow_is_unknown() {
             )
             .await;
             assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["items"].as_array().unwrap().len(), 2, "{body}");
             for item in body["items"].as_array().unwrap() {
                 assert_eq!(item["applicable"], false, "{body}");
                 assert_eq!(
@@ -1786,10 +1788,11 @@ async fn bulk_uses_the_job_record_for_the_retention_time() {
     let argo = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(items))
+        .respond_with(ResponseTemplate::new(200).set_body_json(items.clone()))
         .mount(&argo)
         .await;
     let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+    store_listed_workflows(&setup.handler, &items).await;
     // The records point to these workflows, so they are the current ones.
     for (id, name) in [(gone, "wf-gone"), (kept, "wf-kept")] {
         sqlx::query("UPDATE jobs SET workflow_name = $1 WHERE id = $2")
@@ -2363,10 +2366,12 @@ async fn assert_resubmit_refuses_deleted_job(
     id: Uuid,
     name: &str,
 ) {
-    let listed = listed_workflow(name, "Failed", Some(&id.to_string()), Some(1));
+    let listed =
+        json!({"items": [listed_workflow(name, "Failed", Some(&id.to_string()), Some(1))]});
+    store_listed_workflows(&setup.handler, &listed).await;
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/bakta"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [listed]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(listed))
         .mount(argo)
         .await;
     Mock::given(method("PUT"))

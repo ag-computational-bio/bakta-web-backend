@@ -43,6 +43,10 @@ impl ArgoClient {
 }
 
 impl ArgoClient {
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
     async fn parse_log_entries(&self, response: String) -> Result<Vec<Content>> {
         let mut entries = Vec::new();
 

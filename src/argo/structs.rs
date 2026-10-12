@@ -122,7 +122,30 @@ pub struct SimpleStatusList {
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimpleStatus {
     pub metadata: StatusMetadata,
+    #[serde(default)]
+    pub spec: ArgoWorkflowSpec,
     pub status: SimpleStatusStatus,
+}
+
+impl From<&SimpleStatus> for ArgoWorkflow {
+    /// The polled fields of a workflow, without nodes.
+    fn from(item: &SimpleStatus) -> Self {
+        ArgoWorkflow {
+            metadata: ArgoWorkflowMetadata {
+                name: item.metadata.name.clone(),
+                labels: item.metadata.labels.clone(),
+                creation_timestamp: item.metadata.creation_timestamp,
+            },
+            spec: item.spec.clone(),
+            status: ArgoWorkflowStatus {
+                phase: item.status.phase.clone(),
+                started_at: Some(item.status.started_at),
+                finished_at: item.status.finished_at,
+                message: item.status.message.clone(),
+                nodes: HashMap::new(),
+            },
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

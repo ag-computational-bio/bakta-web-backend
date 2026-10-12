@@ -500,7 +500,7 @@ pub async fn delete_job(
 /// True for workflows created by Bakta Web: they have a `bakta-environment`
 /// label, or (created before that label existed) a `jobid` label and a
 /// Bakta Web workflow template.
-fn is_bakta_web_workflow(workflow: &ArgoWorkflow) -> bool {
+pub(crate) fn is_bakta_web_workflow(workflow: &ArgoWorkflow) -> bool {
     let labels = &workflow.metadata.labels;
     labels.contains_key("bakta-environment")
         || (labels.contains_key("jobid")
@@ -514,18 +514,26 @@ fn is_bakta_web_workflow(workflow: &ArgoWorkflow) -> bool {
 /// Live Bakta Web workflows of one environment, or of all with `all`.
 /// Other workflows in the shared namespace are never returned. The
 /// environment is derived like in the poll, so workflows from before the
-/// `bakta-environment` label are found too.
+/// `bakta-environment` label are found too. They come from the `workflows`
+/// table, or with `fresh` (or without a database) from Argo.
 async fn environment_workflows(
     state: &BaktaHandler,
     environment: Option<&str>,
+    fresh: bool,
 ) -> Result<Vec<ArgoWorkflow>, AdminError> {
-    let environment = parse_environment(environment, &state.state_handler.environment)?;
-    let mut workflows = state
-        .state_handler
-        .argo_client
-        .list_workflows(None)
-        .await
-        .map_err(AdminError::argo)?;
+    let handler = &state.state_handler;
+    let environment = parse_environment(environment, &handler.environment)?;
+    let mut workflows = match handler.stats.db() {
+        Some(db) if !fresh => db
+            .live_workflows(handler.argo_client.namespace(), environment.as_deref())
+            .await
+            .map_err(AdminError::database)?,
+        _ => handler
+            .argo_client
+            .list_workflows(None)
+            .await
+            .map_err(AdminError::argo)?,
+    };
     workflows.retain(|workflow| {
         is_bakta_web_workflow(workflow)
             && environment.as_deref().is_none_or(|environment| {
@@ -565,7 +573,7 @@ pub async fn list_workflows(
         .filter(|phase| !phase.is_empty())
         .map(str::to_string)
         .collect();
-    let mut workflows: Vec<_> = environment_workflows(&state, params.environment.as_deref())
+    let mut workflows: Vec<_> = environment_workflows(&state, params.environment.as_deref(), false)
         .await?
         .into_iter()
         .filter(|workflow| phases.is_empty() || phases.contains(&workflow.status.phase))
@@ -834,17 +842,19 @@ pub async fn bulk_workflows(
     let dry_run = request.dry_run.unwrap_or(true);
     let action = request.action;
 
-    let workflows: Vec<_> = environment_workflows(&state, request.filter.environment.as_deref())
-        .await?
-        .into_iter()
-        .filter(|workflow| bulk_matches(&request.filter, cutoff, workflow))
-        .filter(|workflow| {
-            request
-                .workflow_names
-                .as_ref()
-                .is_none_or(|names| names.contains(&workflow.metadata.name))
-        })
-        .collect();
+    // A real run checks the filter against the current state in Argo.
+    let workflows: Vec<_> =
+        environment_workflows(&state, request.filter.environment.as_deref(), !dry_run)
+            .await?
+            .into_iter()
+            .filter(|workflow| bulk_matches(&request.filter, cutoff, workflow))
+            .filter(|workflow| {
+                request
+                    .workflow_names
+                    .as_ref()
+                    .is_none_or(|names| names.contains(&workflow.metadata.name))
+            })
+            .collect();
 
     let mut items = Vec::with_capacity(workflows.len());
     for workflow in workflows {

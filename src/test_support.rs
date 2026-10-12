@@ -203,3 +203,16 @@ pub async fn v2_state(
     )
     .await
 }
+
+/// Writes an Argo workflow list (`{"items": [...]}`) to the `workflows`
+/// table, like a poll. Does nothing without a database.
+pub async fn store_listed_workflows(handler: &BaktaHandler, list: &Value) {
+    let Some(db) = handler.state_handler.stats.db() else {
+        return;
+    };
+    let workflows: Vec<crate::argo::structs::ArgoWorkflow> =
+        serde_json::from_value(list["items"].clone()).unwrap();
+    db.upsert_workflows("bakta", Utc::now(), &workflows)
+        .await
+        .unwrap();
+}
