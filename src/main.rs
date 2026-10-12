@@ -47,6 +47,16 @@ mod workflow_catalog;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::from_filename(".env")?;
 
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("bakta_web_backend=info"));
+
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    // `bakta-web-backend backfill` imports the job history once and exits.
+    if std::env::args().nth(1).as_deref() == Some("backfill") {
+        return Ok(backfill::run().await?);
+    }
+
     let socket_address: SocketAddr = dotenvy::var("SOCKET_ADDR")
         .unwrap_or("127.0.0.1:8080".to_string())
         .parse()?;
@@ -70,11 +80,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api-docs/openapi-v2.json",
             v2::api_structs::BaktaApiV2::openapi(),
         );
-
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("bakta_web_backend=info"));
-
-    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let environment = dotenvy::var("ENVIRONMENT").unwrap_or_else(|_| "production".to_string());
     if !regex::Regex::new(r"^[A-Za-z0-9._-]{1,63}$")?.is_match(&environment) {
