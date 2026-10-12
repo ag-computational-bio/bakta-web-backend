@@ -606,3 +606,57 @@ async fn a_refused_metadata_list_falls_back_to_the_full_list() {
     reconcile_with(&db, &kube, &jobs).await;
     assert_eq!(live_names(&db).await.len(), 2);
 }
+
+#[tokio::test]
+async fn ready_waits_for_the_first_list_and_the_database() {
+    let Some(db) = test_db("ready_waits_for_the_first_list").await else {
+        return;
+    };
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new((*db).clone(), JobVersions::default()),
+    );
+    let router = test_router(handler.clone());
+    assert_eq!(
+        call(&router, "GET", "/ready", None).await.0,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    // The first list is applied.
+    let (_, workflows) = completed_workflows(60);
+    let metadata: Vec<Value> = workflows
+        .iter()
+        .map(|workflow| json!({"metadata": workflow["metadata"]}))
+        .collect();
+    let kube = reconcile_server(&workflows, page(metadata, "", "10")).await;
+    start(
+        handler.state_handler.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("readiness", || async {
+        call(&router, "GET", "/ready", None).await.0 == axum::http::StatusCode::OK
+    })
+    .await;
+
+    // A database that does not answer makes the backend not ready.
+    let unreachable =
+        crate::stats::StatsDb::connect_lazy("postgres://bakta@127.0.0.1:1/bakta").unwrap();
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new(unreachable, JobVersions::default()),
+    );
+    handler
+        .state_handler
+        .ready
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        call(&test_router(handler), "GET", "/ready", None).await.0,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+}

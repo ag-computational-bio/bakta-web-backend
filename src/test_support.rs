@@ -67,6 +67,7 @@ pub fn test_handler_full(
         live_workflows: Default::default(),
         workflows: Default::default(),
         watch_connected: Default::default(),
+        ready: Default::default(),
         environment: "production".to_string(),
         stats,
     });
@@ -110,6 +111,7 @@ fn test_s3_handler(s3_url: &str) -> S3Handler {
 /// Same routes as main.rs, without swagger, metrics middleware and CORS.
 pub fn test_router(handler: Arc<BaktaHandler>) -> Router {
     Router::new()
+        .route("/ready", get(crate::metrics::ready))
         .route("/api/v1/job/delete", delete(v1::api_paths::delete_job))
         .route("/api/v1/job/logs", get(v1::api_paths::job_logs))
         .route("/api/v1/job/init", post(v1::api_paths::init_job))

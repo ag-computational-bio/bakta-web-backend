@@ -64,6 +64,8 @@ pub struct StateHandler {
     /// True while the workflow watch is connected. Time-based work that
     /// needs current workflows waits for it.
     pub watch_connected: std::sync::atomic::AtomicBool,
+    /// True once the first list of workflows was applied.
+    pub ready: std::sync::atomic::AtomicBool,
     /// Environment name for job records and the `bakta-environment` workflow label.
     pub environment: String,
     pub stats: StatsRecorder,
@@ -1132,6 +1134,7 @@ impl BaktaHandler {
             live_workflows: Default::default(),
             workflows: Default::default(),
             watch_connected: Default::default(),
+            ready: Default::default(),
             environment,
             stats,
         });
@@ -3043,6 +3046,7 @@ mod tests {
             live_workflows: Default::default(),
             workflows: Default::default(),
             watch_connected: Default::default(),
+            ready: Default::default(),
             environment: "production".to_string(),
             stats: StatsRecorder::disabled(),
         };

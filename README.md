@@ -47,5 +47,6 @@ Notes:
 - `SOCKET_ADDR` is the public API listener.
 - `METRICS_SOCKET_ADDR` is a separate private listener exposing only `/metrics`.
 - Swagger UI is available on the public listener at `/swagger-ui`.
+- `GET /ready` on the public listener answers `503` until the first workflow list was applied and while the statistics database (when configured) does not answer, then `200`. Use it as the readiness probe.
 - The backend watches the Argo workflows through the Kubernetes API with `ARGO_TOKEN`. Its service account needs `get`, `list` and `watch` on `workflows.argoproj.io` in `ARGO_NAMESPACE`.
 - With `STATS_DATABASE_URL`, finished jobs are served from the database: status, results, logs and delete work for them as before, with the job secret checked against a stored hash. Without it, finished jobs are kept in memory for 35 days. See `docs/admin-api.md`, section "Workflow watch".

@@ -595,6 +595,7 @@ async fn process(state: Arc<StateHandler>, mut changes: UnboundedReceiver<Workfl
                 None => return,
                 Some(WorkflowChange::Listed { observed_at }) => {
                     retry = state.apply_listed_workflows(observed_at).await;
+                    state.ready.store(true, Ordering::Relaxed);
                 }
                 Some(WorkflowChange::Changed { name, jobs, observed_at }) => {
                     batch.add(name, jobs, observed_at);

@@ -280,6 +280,25 @@ pub async fn metrics(State(state): State<Arc<BaktaHandler>>) -> impl IntoRespons
     }
 }
 
+/// Readiness: `503` until the first list of workflows was applied and while
+/// the statistics database (when configured) does not answer, else `200`.
+pub async fn ready(State(state): State<Arc<BaktaHandler>>) -> StatusCode {
+    let handler = &state.state_handler;
+    if !handler.ready.load(std::sync::atomic::Ordering::Relaxed) {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
+    if let Some(db) = handler.stats.db() {
+        let ping = sqlx::query("SELECT 1").execute(db.pool());
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(2), ping).await,
+            Ok(Ok(_))
+        ) {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+    }
+    StatusCode::OK
+}
+
 /// Maps the request method to a fixed label set so clients cannot create new label values.
 fn method_label(method: &axum::http::Method) -> &'static str {
     match method.as_str() {

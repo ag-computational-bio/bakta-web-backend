@@ -173,6 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .merge(swagger)
         .route("/", get(|| async { Redirect::permanent("/swagger-ui") }))
+        .route("/ready", get(metrics::ready))
         .route("/api/v1/job/delete", delete(v1::api_paths::delete_job))
         .route("/api/v1/job/logs", get(v1::api_paths::job_logs))
         .route("/api/v1/job/init", post(v1::api_paths::init_job))
