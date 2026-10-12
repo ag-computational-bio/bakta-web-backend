@@ -143,6 +143,12 @@ pub fn secret_has_hash(secret: &str, hash: &str) -> bool {
     !secret.is_empty() && bool::from(secret_hash(secret).as_bytes().ct_eq(hash.as_bytes()))
 }
 
+/// True for job records of a finished workflow, also after expiry. Argo
+/// archives finished workflows.
+pub fn is_finished_record(status: &str) -> bool {
+    is_terminal_status(status) || status == "expired"
+}
+
 pub fn is_terminal_status(status: &str) -> bool {
     matches!(status, "succeeded" | "failed" | "error")
 }

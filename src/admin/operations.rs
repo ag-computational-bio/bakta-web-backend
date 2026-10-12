@@ -31,6 +31,9 @@ struct JobTarget {
     workflow_name: Option<String>,
     /// The job record has status `deleted`.
     deleted: bool,
+    /// Argo uid of the archived workflow of a finished job that is only in
+    /// the database.
+    archived_uid: Option<Uuid>,
 }
 
 async fn find_job(state: &BaktaHandler, id: Uuid) -> Result<JobTarget, AdminError> {
@@ -40,6 +43,7 @@ async fn find_job(state: &BaktaHandler, id: Uuid) -> Result<JobTarget, AdminErro
             workflow_name: job.workflowname.clone(),
             in_memory: Some(job),
             deleted: false,
+            archived_uid: None,
         });
     }
     let record = match handler.stats.db() {
@@ -50,6 +54,9 @@ async fn find_job(state: &BaktaHandler, id: Uuid) -> Result<JobTarget, AdminErro
     Ok(JobTarget {
         in_memory: None,
         deleted: record.status == "deleted",
+        archived_uid: record
+            .argo_uid
+            .filter(|_| crate::stats::is_finished_record(&record.status)),
         workflow_name: record.workflow_name,
     })
 }
@@ -517,11 +524,22 @@ pub async fn delete_job(
             .delete_workflow(job)
             .await
             .map_err(AdminError::argo)?,
-        (_, Some(name)) => handler
-            .argo_client
-            .delete_workflow_by_name(name)
-            .await
-            .map_err(AdminError::argo)?,
+        (_, Some(name)) => {
+            let mut deleted = handler
+                .argo_client
+                .delete_workflow_by_name(name)
+                .await
+                .map_err(AdminError::argo)?;
+            // A finished job that is only in the database: also its archive record.
+            if let Some(uid) = &target.archived_uid {
+                deleted |= handler
+                    .argo_client
+                    .delete_archived_workflow(uid)
+                    .await
+                    .map_err(AdminError::argo)?;
+            }
+            deleted
+        }
         // A start may have created a workflow that the backend does not know.
         (_, None) => handler.delete_job_workflows(id).await.map_err(|error| {
             if error.is::<WorkflowLookupFailed>() {

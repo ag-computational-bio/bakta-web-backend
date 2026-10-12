@@ -458,6 +458,12 @@ impl ArgoClient {
     }
 
     /// Deletes a live workflow. Returns `false` when it does not exist.
+    /// Deletes the archive record of a workflow. Returns `false` when it does not exist.
+    pub async fn delete_archived_workflow(&self, argo_uid: &Uuid) -> Result<bool> {
+        self.send_delete(get_delete_url_archived(&self.url, argo_uid))
+            .await
+    }
+
     pub async fn delete_workflow_by_name(&self, workflow_name: &str) -> Result<bool> {
         self.send_delete(get_delete_url_running(
             &self.url,

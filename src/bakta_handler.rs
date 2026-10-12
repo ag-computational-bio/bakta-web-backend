@@ -1037,16 +1037,21 @@ fn recorded_start_result(
     }
 }
 
+/// The workflow status of a job record status, `None` for other statuses.
+pub(crate) fn recorded_status(status: &str) -> Option<ArgoStatus> {
+    match status {
+        "submitted" => Some(ArgoStatus::Pending),
+        "running" => Some(ArgoStatus::Running),
+        "succeeded" => Some(ArgoStatus::Succeeded),
+        "failed" => Some(ArgoStatus::Failed),
+        "error" => Some(ArgoStatus::Error),
+        _ => None,
+    }
+}
+
 /// The job state of a database record, or `None` for a status without one.
 fn recorded_job(record: stats::queries::UserJob, now: DateTime<Utc>) -> Option<RecordedJob> {
-    let status = match record.status.as_str() {
-        "submitted" => ArgoStatus::Pending,
-        "running" => ArgoStatus::Running,
-        "succeeded" => ArgoStatus::Succeeded,
-        "failed" => ArgoStatus::Failed,
-        "error" => ArgoStatus::Error,
-        _ => return None,
-    };
+    let status = recorded_status(&record.status)?;
     let terminal = is_terminal_status(Some(&status));
     let started = record
         .started_at

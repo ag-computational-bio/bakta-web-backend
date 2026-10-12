@@ -2769,3 +2769,78 @@ async fn a_delayed_admin_response_does_not_overwrite_a_newer_state() {
     let (_, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
     assert_eq!(body["items"][0]["phase"], "Succeeded", "{body}");
 }
+
+/// A finished job that is only in the database, with workflow `wf-done`
+/// and Argo uid `uid`.
+async fn finished_record(db: &crate::stats::StatsDb, uid: Uuid) -> Uuid {
+    let id = Uuid::new_v4();
+    let finished = Utc::now() - Duration::hours(1);
+    let job = NewJob {
+        id,
+        environment: "production".to_string(),
+        workflow_kind: "bakta".to_string(),
+        api_version: "v2".to_string(),
+        name: Some("genome".to_string()),
+        created_at: finished - Duration::minutes(10),
+        secret_hash: None,
+        result_kind: Some("bakta".to_string()),
+    };
+    db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
+    db.apply(&StatsEvent::Polled(vec![crate::stats::WorkflowState {
+        job,
+        workflow_name: "wf-done".to_string(),
+        status: "succeeded",
+        created_at: Some(finished - Duration::minutes(10)),
+        started_at: Some(finished - Duration::minutes(5)),
+        finished_at: Some(finished),
+        error_message: None,
+        origin: None,
+        argo_uid: Some(uid),
+    }]))
+    .await
+    .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn admin_logs_and_deletes_of_finished_jobs_use_the_archive() {
+    let Some(db) = test_db("admin_logs_and_deletes_of_finished_jobs").await else {
+        return;
+    };
+    let argo = MockServer::start().await;
+    let uid = Uuid::new_v4();
+    let id = finished_record(&db, uid).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/archived-workflows/{uid}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": {"nodes": {}}})))
+        .expect(1..)
+        .mount(&argo)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/artifact-files/bakta/archived-workflows/{uid}/wf-done/outputs/main-logs"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_string("archived log"))
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-done"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/v1/archived-workflows/{uid}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+
+    let (status, body) =
+        admin_call(&setup, "GET", &format!("/api/admin/jobs/{id}/logs"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.to_string().contains("archived log"), "{body}");
+    let (status, body) = admin_call(&setup, "DELETE", &format!("/api/admin/jobs/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted_workflow"], true, "{body}");
+}

@@ -337,6 +337,9 @@ pub struct JobRecord {
     pub queue_seconds: Option<f64>,
     pub error_message: Option<String>,
     pub updated_at: DateTime<Utc>,
+    /// Argo uid of the current workflow, for the archive. Not sent.
+    #[serde(skip)]
+    pub argo_uid: Option<Uuid>,
     /// When the job data in S3 is deleted.
     #[sqlx(skip)]
     pub data_expires_at: DateTime<Utc>,

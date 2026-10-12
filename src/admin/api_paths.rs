@@ -444,12 +444,14 @@ pub async fn job_logs(
                 None => None,
             }
             .ok_or_else(|| AdminError::NotFound("Job not found".to_string()))?;
+            // Argo archives finished workflows. The archive needs the uid.
+            let finished = crate::stats::is_finished_record(&record.status);
             (
                 workflow_kind_from_label_value(Some(&record.workflow_kind)),
                 record.workflow_name,
-                None,
-                false,
-                None,
+                crate::bakta_handler::recorded_status(&record.status),
+                finished && record.argo_uid.is_some(),
+                record.argo_uid,
             )
         }
     };
