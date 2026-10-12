@@ -4,3 +4,4 @@
 pub mod db;
 pub mod parse;
 pub mod summary;
+pub mod workflows;

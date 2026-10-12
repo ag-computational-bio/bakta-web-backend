@@ -316,7 +316,7 @@ fn secret_label(labels: &HashMap<String, String>) -> Option<String> {
         .cloned()
 }
 
-fn state_from_simple_status(simple_status: SimpleStatus) -> Option<FullJobState> {
+pub(crate) fn state_from_simple_status(simple_status: SimpleStatus) -> Option<FullJobState> {
     let labels = &simple_status.metadata.labels;
     let job_id = labels
         .get("jobid")
@@ -442,7 +442,7 @@ pub(crate) fn state_reference_time(state: &FullJobState) -> Option<DateTime<Utc>
     state.updated.or(state.started)
 }
 
-fn is_state_expired(state: &FullJobState, now: DateTime<Utc>) -> bool {
+pub(crate) fn is_state_expired(state: &FullJobState, now: DateTime<Utc>) -> bool {
     state_reference_time(state)
         .map(|reference_time| reference_time < now - Duration::days(JOB_RETENTION_DAYS))
         .unwrap_or(false)
@@ -464,7 +464,7 @@ fn purge_expired_states(
     expired
 }
 
-fn job_id_label(item: &SimpleStatus) -> Option<Uuid> {
+pub(crate) fn job_id_label(item: &SimpleStatus) -> Option<Uuid> {
     item.metadata
         .labels
         .get("jobid")
@@ -582,7 +582,7 @@ fn polled_metadata(id: Uuid, item: &SimpleStatus) -> (Uuid, String, Option<Strin
 /// Statistics state of a job from its current workflow. Times come from the
 /// workflow, so they describe the current attempt (Argo resets `startedAt`
 /// and clears `finishedAt` on retry).
-fn polled_workflow_state(
+pub(crate) fn polled_workflow_state(
     state: &FullJobState,
     environment: &str,
     item: &SimpleStatus,
