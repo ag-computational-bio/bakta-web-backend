@@ -269,6 +269,15 @@ pub(crate) enum WorkflowChange {
     },
 }
 
+/// What a fetch tells about a workflow that left the watched set.
+enum FinalState {
+    Completed(Box<SimpleStatus>),
+    /// Kubernetes does not have it (or it is not completed): it was deleted.
+    Deleted,
+    /// The fetch failed.
+    Unknown,
+}
+
 #[derive(Debug)]
 enum WatchEnd {
     /// The resource version is too old: all workflows must be listed again.
@@ -321,6 +330,7 @@ pub fn start(state: Arc<StateHandler>, api: KubeApi) {
     );
 }
 
+#[derive(Clone)]
 struct Watcher {
     api: Arc<KubeApi>,
     state: Arc<StateHandler>,
@@ -486,8 +496,12 @@ impl Watcher {
             // The event has the state before the workflow left the watched
             // set: a completion or a real delete.
             match self.final_state(&item.metadata.name).await {
-                Some(completed) => self.complete(completed),
-                None => self.apply_workflow(item, true),
+                FinalState::Completed(completed) => self.complete(*completed),
+                FinalState::Deleted => self.apply_workflow(item, true),
+                // The workflow stays watched until a later fetch tells.
+                FinalState::Unknown => {
+                    tokio::spawn(self.clone().resolve_later(item));
+                }
             }
         } else {
             self.apply_workflow(item, false);
@@ -495,12 +509,14 @@ impl Watcher {
         Ok(())
     }
 
-    /// The final state of a workflow that left the watched set, or `None`
-    /// when it was deleted (or cannot be fetched).
-    async fn final_state(&self, name: &str) -> Option<SimpleStatus> {
+    /// The final state of a workflow that left the watched set.
+    async fn final_state(&self, name: &str) -> FinalState {
         for attempt in 1..=FETCH_ATTEMPTS {
             match self.api.get(name).await {
-                Ok(item) => return item.filter(is_completed),
+                Ok(Some(item)) if is_completed(&item) => {
+                    return FinalState::Completed(Box::new(item));
+                }
+                Ok(_) => return FinalState::Deleted,
                 Err(error) if attempt < FETCH_ATTEMPTS => {
                     tracing::debug!(workflow_name = name, %error, "workflow_fetch_retry");
                     tokio::time::sleep(MIN_BACKOFF).await;
@@ -511,7 +527,22 @@ impl Watcher {
                 }
             }
         }
-        None
+        FinalState::Unknown
+    }
+
+    /// Fetches a workflow that left the watched set with a growing pause
+    /// until Kubernetes tells whether it completed or was deleted.
+    async fn resolve_later(self, item: SimpleStatus) {
+        let mut backoff = MIN_BACKOFF;
+        loop {
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+            match self.final_state(&item.metadata.name).await {
+                FinalState::Completed(completed) => return self.complete(*completed),
+                FinalState::Deleted => return self.apply_workflow(item, true),
+                FinalState::Unknown => {}
+            }
+        }
     }
 
     /// Drops a completed workflow from the watched ones and reports its

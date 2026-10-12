@@ -664,3 +664,95 @@ async fn ready_waits_for_the_first_list_and_the_database() {
         axum::http::StatusCode::SERVICE_UNAVAILABLE
     );
 }
+
+/// Serves `live` as the only watched workflows, a first watch with `events`,
+/// later watches without events, and no completed workflows.
+async fn watch_server(live: Vec<Value>, events: String) -> MockServer {
+    let kube = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", LIVE))
+        .and(query_param_is_missing("watch"))
+        .respond_with(page(live, "", "100"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .respond_with(page(Vec::new(), "", "100"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("watch", "true"))
+        .and(query_param("resourceVersion", "100"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(events)
+                .set_delay(std::time::Duration::from_millis(500)),
+        )
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("watch", "true"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+        .with_priority(5)
+        .mount(&kube)
+        .await;
+    kube
+}
+
+#[tokio::test]
+async fn a_failed_completion_fetch_is_retried_and_not_a_delete() {
+    let Some(db) = test_db("a_failed_completion_fetch_is_retried").await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    let kube = watch_server(
+        vec![kube_workflow("wf-x", id, "Running", false, 90)],
+        event("DELETED", kube_workflow("wf-x", id, "Running", false, 101)),
+    )
+    .await;
+    // Kubernetes fails for a while, then answers with the final state.
+    Mock::given(method("GET"))
+        .and(path(format!("{WORKFLOWS}/wf-x")))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(4)
+        .with_priority(1)
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{WORKFLOWS}/wf-x")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(kube_workflow(
+            "wf-x",
+            id,
+            "Succeeded",
+            true,
+            101,
+        )))
+        .with_priority(2)
+        .mount(&kube)
+        .await;
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new((*db).clone(), JobVersions::default()),
+    );
+    start(
+        handler.state_handler.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the completion after the failed fetches", || async {
+        job_status(&db, id).await.as_deref() == Some("succeeded")
+    })
+    .await;
+    assert_eq!(live_names(&db).await, ["wf-x"]);
+}
