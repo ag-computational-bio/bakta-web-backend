@@ -121,16 +121,31 @@ impl StatsDb {
         Ok(())
     }
 
-    /// Resource versions of the stored live rows of the named workflows.
-    /// A row without one maps to `None`.
+    /// Resource versions of the stored live rows of the named workflows
+    /// whose state is complete in the database: the workflow has no job, or
+    /// its job record is deleted or expired, or has this workflow in a final
+    /// state with the secret hash, result kind and Argo uid, or has a newer
+    /// workflow. Other workflows are missing, so the reconcile fetches them.
     pub async fn workflow_versions(
         &self,
         namespace: &str,
         names: &[String],
     ) -> Result<HashMap<String, Option<String>>> {
         let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-            "SELECT name, resource_version FROM workflows
-             WHERE namespace = $1 AND name = ANY($2) AND gone_at IS NULL",
+            "SELECT workflows.name, workflows.resource_version
+             FROM workflows
+             LEFT JOIN jobs ON jobs.id = workflows.job_id
+             LEFT JOIN workflows current
+                 ON current.namespace = workflows.namespace AND current.name = jobs.workflow_name
+             WHERE workflows.namespace = $1 AND workflows.name = ANY($2) AND workflows.gone_at IS NULL
+                 AND (workflows.job_id IS NULL
+                      OR jobs.status IN ('deleted', 'expired')
+                      OR (jobs.workflow_name = workflows.name
+                          AND jobs.status IN ('succeeded', 'failed', 'error')
+                          AND jobs.secret_hash IS NOT NULL AND jobs.result_kind IS NOT NULL
+                          AND jobs.argo_uid IS NOT NULL)
+                      OR (jobs.workflow_name <> workflows.name
+                          AND current.created_at >= workflows.created_at))",
         )
         .bind(namespace)
         .bind(names)

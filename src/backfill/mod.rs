@@ -116,13 +116,7 @@ pub async fn run() -> Result<()> {
         .list_workflows(&namespace)
         .await?;
     let workflow_count = listed.len();
-    // All Bakta Web workflows go to the `workflows` table. A row that the
-    // backend changed after `observed_at` is kept, also when it is gone.
     let table = workflows::table_workflows(&listed);
-    for chunk in table.chunks(TABLE_CHUNK) {
-        db.upsert_workflows(&namespace, observed_at, chunk).await?;
-    }
-    tracing::info!(workflows = table.len(), "backfill_workflow_table_written");
     let jobs =
         workflows::newest_per_job(listed.into_iter().filter(workflows::is_bakta_web).collect());
     let total = jobs.len();
@@ -163,6 +157,14 @@ pub async fn run() -> Result<()> {
     while let Some(result) = tasks.join_next().await {
         counts.add(result);
     }
+    // All Bakta Web workflows go to the `workflows` table, after the job
+    // records: the reconcile at startup skips a stored workflow only when
+    // its job record is final. A row that the backend changed after
+    // `observed_at` is kept, also when it is gone.
+    for chunk in table.chunks(TABLE_CHUNK) {
+        db.upsert_workflows(&namespace, observed_at, chunk).await?;
+    }
+    tracing::info!(workflows = table.len(), "backfill_workflow_table_written");
     tracing::info!(
         jobs = total,
         inserted = counts.inserted,
