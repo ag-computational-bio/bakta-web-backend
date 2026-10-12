@@ -206,7 +206,7 @@ pub struct BaktaHandler {
     pub data_retention_days: i64,
 }
 
-const JOB_RETENTION_DAYS: i64 = 35;
+pub(crate) const JOB_RETENTION_DAYS: i64 = 35;
 
 /// Returned when a start request targets a job that already has a workflow.
 #[derive(Debug)]
@@ -1257,6 +1257,92 @@ impl StateHandler {
                 .record(StatsEvent::PolledMetadata(chunk.to_vec()));
         }
         for_memory
+    }
+
+    /// Drops finished jobs from memory once the database has their final
+    /// state, so finished jobs are served from the database. A job stays
+    /// while it has a watched workflow, is reserved or has an unresolved
+    /// submission. When the database does not have the final state yet, it
+    /// is recorded again from `finished`.
+    pub(crate) async fn drop_finished_jobs(&self, finished: &mut HashMap<Uuid, SimpleStatus>) {
+        let Some(db) = self.stats.db() else {
+            return;
+        };
+        let watched: HashSet<Uuid> = self
+            .workflows
+            .read()
+            .expect("workflows lock poisoned")
+            .values()
+            .filter_map(job_id_label)
+            .collect();
+        let busy = |id: &Uuid| {
+            watched.contains(id)
+                || self
+                    .starting_jobs
+                    .lock()
+                    .expect("starting jobs lock poisoned")
+                    .contains(id)
+                || self.is_submission_unknown(id)
+        };
+        let candidates: Vec<Uuid> = self
+            .job_state
+            .read()
+            .await
+            .values()
+            .filter(|state| is_terminal_status(state.status.as_ref()) && !busy(&state.id))
+            .map(|state| state.id)
+            .collect();
+        if candidates.is_empty() {
+            finished.clear();
+            return;
+        }
+        let records =
+            match tokio::time::timeout(TABLE_WRITE_TIMEOUT, db.job_states(&candidates)).await {
+                Ok(Ok(records)) => records,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "finished_jobs_lookup_failed");
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!("finished_jobs_lookup_timed_out");
+                    return;
+                }
+            };
+        let mut job_state = self.job_state.write().await;
+        let mut dropped = Vec::new();
+        for id in candidates {
+            let Some(state) = job_state.get(&id) else {
+                continue;
+            };
+            let Some(status) = state.status.as_ref().map(stats_status_label) else {
+                continue;
+            };
+            let in_db = records.get(&id).is_some_and(|(recorded, workflow)| {
+                recorded == status && *workflow == state.workflowname
+            });
+            if in_db && is_terminal_status(state.status.as_ref()) && !busy(&id) {
+                job_state.remove(&id);
+                dropped.push(id);
+            } else if let Some(item) = finished.get(&id)
+                && state.workflowname.as_deref() == Some(item.metadata.name.as_str())
+                && let Some(workflow_state) =
+                    polled_workflow_state(state, workflow_environment(&item.metadata.labels), item)
+            {
+                self.stats.record(StatsEvent::Polled(vec![workflow_state]));
+            }
+        }
+        finished.retain(|id, _| job_state.contains_key(id));
+        drop(job_state);
+        let mut live = self
+            .live_workflows
+            .write()
+            .expect("live workflows lock poisoned");
+        for id in &dropped {
+            live.remove(id);
+        }
+        if !dropped.is_empty() {
+            tracing::debug!(jobs = dropped.len(), "finished_jobs_dropped");
+        }
     }
 
     /// Writes changed workflows to the `workflows` table and marks the

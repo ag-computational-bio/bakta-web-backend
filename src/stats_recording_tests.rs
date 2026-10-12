@@ -990,3 +990,119 @@ async fn poll_corrects_the_environment_of_deleted_jobs() {
             .contains_key(&id)
     );
 }
+
+#[tokio::test]
+async fn finished_jobs_leave_memory_once_the_database_has_their_final_state() {
+    let Some(db) = test_db("finished_jobs_leave_memory").await else {
+        return;
+    };
+    let (stats, mut events) = StatsRecorder::capturing_with_db((*db).clone());
+    let handler = test_handler_with_stats("http://127.0.0.1:1", "https://s3.example.com", stats);
+    let state = &handler.state_handler;
+    let now = Utc::now();
+    let started = now - Duration::minutes(10);
+    let (id, busy) = (Uuid::new_v4(), Uuid::new_v4());
+    let done = job_workflow(id, "wf-1", "Succeeded", started, Some(now));
+    let busy_done = job_workflow(busy, "wf-2", "Succeeded", started, Some(now));
+    state
+        .apply_workflow_statuses(
+            vec![
+                job_workflow(id, "wf-1", "Running", started, None),
+                job_workflow(busy, "wf-2", "Running", started, None),
+            ],
+            now,
+        )
+        .await;
+    for event in drain(&mut events) {
+        db.apply(&event).await.unwrap();
+    }
+    // Both workflows complete. The second job has a new watched workflow.
+    let jobs = std::collections::HashSet::from([id, busy]);
+    state
+        .apply_job_workflows(vec![done.clone(), busy_done.clone()], &jobs, now)
+        .await;
+    let completion = drain(&mut events);
+    state.workflows.write().unwrap().insert(
+        "wf-3".to_string(),
+        job_workflow(busy, "wf-3", "Pending", now, None),
+    );
+    let mut finished =
+        std::collections::HashMap::from([(id, done.clone()), (busy, busy_done.clone())]);
+
+    // The final state is not written yet: the job stays and is recorded again.
+    state.drop_finished_jobs(&mut finished).await;
+    assert!(state.job_state.read().await.contains_key(&id));
+    let again = drain(&mut events);
+    assert!(
+        matches!(again.as_slice(), [StatsEvent::Polled(states)] if states[0].status == "succeeded"),
+        "{again:?}"
+    );
+
+    for event in completion {
+        db.apply(&event).await.unwrap();
+    }
+    state.drop_finished_jobs(&mut finished).await;
+    let job_state = state.job_state.read().await;
+    assert!(!job_state.contains_key(&id));
+    assert!(job_state.contains_key(&busy));
+    drop(job_state);
+    assert_eq!(finished.keys().collect::<Vec<_>>(), [&busy]);
+    assert!(!state.live_workflows.read().unwrap().contains_key(&id));
+
+    // The finished job is served from the database.
+    let served = state.user_job_state(id, TEST_SECRET).await.unwrap();
+    assert!(served.secret_matches(TEST_SECRET));
+    assert!(matches!(served.status, Some(ArgoStatus::Succeeded)));
+    assert!(
+        !state
+            .user_job_state(id, "Unknown")
+            .await
+            .unwrap()
+            .secret_matches("Unknown")
+    );
+}
+
+#[tokio::test]
+async fn finished_job_records_expire_after_the_job_retention() {
+    let Some(db) = test_db("finished_job_records_expire").await else {
+        return;
+    };
+    let (stats, mut events) = StatsRecorder::capturing_with_db((*db).clone());
+    let handler = test_handler_with_stats("http://127.0.0.1:1", "https://s3.example.com", stats);
+    let now = Utc::now();
+    let (old, recent) = (Uuid::new_v4(), Uuid::new_v4());
+    handler
+        .state_handler
+        .apply_workflow_statuses(
+            vec![
+                job_workflow(
+                    old,
+                    "wf-old",
+                    "Failed",
+                    now - Duration::days(30),
+                    Some(now - Duration::days(30)),
+                ),
+                job_workflow(recent, "wf-new", "Failed", now, Some(now)),
+            ],
+            now,
+        )
+        .await;
+    for event in drain(&mut events) {
+        db.apply(&event).await.unwrap();
+    }
+    db.expire_finished_jobs(now - Duration::days(29))
+        .await
+        .unwrap();
+    let status = |id: Uuid| {
+        let db = db.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT status FROM jobs WHERE id = $1")
+                .bind(id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(status(old).await, "expired");
+    assert_eq!(status(recent).await, "failed");
+}

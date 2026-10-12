@@ -33,7 +33,7 @@ use uuid::Uuid;
 use crate::{
     argo::structs::SimpleStatus,
     backfill::workflows::{KubeWorkflow, Page},
-    bakta_handler::{StateHandler, job_id_label},
+    bakta_handler::{JOB_RETENTION_DAYS, StateHandler, job_id_label},
 };
 
 /// Label selectors of workflows that are not completed, and of completed ones.
@@ -52,8 +52,10 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// Changed workflows are applied together this long after the first change.
 const BATCH_DELAY: Duration = Duration::from_secs(1);
 /// Interval of the time-based work: expiry, unresolved submissions, skipped
-/// jobs and old rows of gone workflows.
+/// jobs, finished jobs and old rows of gone workflows.
 const TICK: Duration = Duration::from_secs(15);
+/// Interval of the expiry of finished job records in the database.
+const RECORD_EXPIRY_INTERVAL: Duration = Duration::from_secs(3600);
 /// Attempts to fetch a workflow after a `DELETED` event.
 const FETCH_ATTEMPTS: u32 = 3;
 
@@ -554,8 +556,11 @@ async fn process(state: Arc<StateHandler>, mut changes: UnboundedReceiver<Workfl
     let mut batch = Batch::default();
     // Jobs that were skipped and need another pass.
     let mut retry = HashSet::new();
+    // Final workflow states of finished jobs that are still in memory.
+    let mut finished = HashMap::new();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut records_expired_at: Option<Instant> = None;
     loop {
         let due = batch.due;
         tokio::select! {
@@ -576,11 +581,18 @@ async fn process(state: Arc<StateHandler>, mut changes: UnboundedReceiver<Workfl
             () = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => {
                 let batch = std::mem::take(&mut batch);
                 retry = state
-                    .apply_changed_workflows(batch, std::mem::take(&mut retry))
+                    .apply_changed_workflows(batch, std::mem::take(&mut retry), &mut finished)
                     .await;
             }
             _ = tick.tick() => {
-                retry = state.run_timed_work(std::mem::take(&mut retry)).await;
+                let expire_records = records_expired_at
+                    .is_none_or(|at| at.elapsed() >= RECORD_EXPIRY_INTERVAL);
+                if expire_records {
+                    records_expired_at = Some(Instant::now());
+                }
+                retry = state
+                    .run_timed_work(std::mem::take(&mut retry), &mut finished, expire_records)
+                    .await;
             }
         }
     }
@@ -706,11 +718,13 @@ impl StateHandler {
 
     /// Writes the changed workflows and applies all workflows of their jobs,
     /// of the `retry` jobs and of jobs with an unresolved submission.
-    /// Completed workflows are applied with their final state.
+    /// Completed workflows are applied with their final state and kept in
+    /// `finished` until the job leaves memory.
     async fn apply_changed_workflows(
         &self,
         batch: Batch,
         mut jobs: HashSet<Uuid>,
+        finished: &mut HashMap<Uuid, SimpleStatus>,
     ) -> HashSet<Uuid> {
         jobs.extend(batch.jobs);
         jobs.extend(self.marked_jobs());
@@ -734,6 +748,7 @@ impl StateHandler {
             if let Some(id) = job_id_label(&item)
                 && jobs.contains(&id)
             {
+                finished.insert(id, item.clone());
                 items.push(item);
             }
         }
@@ -741,18 +756,33 @@ impl StateHandler {
     }
 
     /// Drops expired jobs, counts checks for unresolved submissions, applies
-    /// skipped jobs again and deletes old rows of gone workflows. While the
-    /// watch is not connected, the workflows may be outdated: then only
-    /// expired jobs are dropped, like after a failed poll before.
-    async fn run_timed_work(&self, retry: HashSet<Uuid>) -> HashSet<Uuid> {
+    /// skipped jobs again, drops finished jobs whose final state is in the
+    /// database and deletes old rows of gone workflows. While the watch is
+    /// not connected, the workflows may be outdated: then only expired jobs
+    /// are dropped, like after a failed poll before.
+    async fn run_timed_work(
+        &self,
+        retry: HashSet<Uuid>,
+        finished: &mut HashMap<Uuid, SimpleStatus>,
+        expire_records: bool,
+    ) -> HashSet<Uuid> {
         let now = Utc::now();
         if let Some(db) = self.stats.db() {
-            let prune = db.prune_gone_workflows(self.argo_client.namespace(), now);
-            match tokio::time::timeout(Duration::from_secs(10), prune).await {
+            let namespace = self.argo_client.namespace();
+            let work = async {
+                db.prune_gone_workflows(namespace, now).await?;
+                if expire_records {
+                    db.expire_finished_jobs(now - chrono::Duration::days(JOB_RETENTION_DAYS))
+                        .await?;
+                }
+                anyhow::Ok(())
+            };
+            match tokio::time::timeout(Duration::from_secs(10), work).await {
                 Ok(Ok(())) => {}
-                Ok(Err(error)) => tracing::warn!(%error, "workflow_table_prune_failed"),
-                Err(_) => tracing::warn!("workflow_table_prune_timed_out"),
+                Ok(Err(error)) => tracing::warn!(%error, "timed_database_work_failed"),
+                Err(_) => tracing::warn!("timed_database_work_timed_out"),
             }
+            self.drop_finished_jobs(finished).await;
         }
         if !self.watch_connected.load(Ordering::Relaxed) {
             self.apply_job_workflows(Vec::new(), &HashSet::new(), now)

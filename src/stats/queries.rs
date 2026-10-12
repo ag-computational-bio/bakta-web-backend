@@ -604,6 +604,36 @@ impl StatsDb {
         .await?)
     }
 
+    /// Status and workflow name of the jobs in `ids`.
+    pub async fn job_states(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, (String, Option<String>)>> {
+        let rows: Vec<(Uuid, String, Option<String>)> =
+            sqlx::query_as("SELECT id, status, workflow_name FROM jobs WHERE id = ANY($1)")
+                .bind(ids.to_vec())
+                .fetch_all(self.pool())
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, status, workflow_name)| (id, (status, workflow_name)))
+            .collect())
+    }
+
+    /// Sets finished jobs whose reference time is before `cutoff` to
+    /// `expired`, like the expiry of jobs in memory.
+    pub async fn expire_finished_jobs(&self, cutoff: DateTime<Utc>) -> Result<()> {
+        sqlx::query(
+            "UPDATE jobs SET status = 'expired', updated_at = now()
+             WHERE status IN ('succeeded', 'failed', 'error')
+                 AND COALESCE(finished_at, started_at, submitted_at, created_at) < $1",
+        )
+        .bind(cutoff)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobRecord>> {
         Ok(sqlx::query_as("SELECT * FROM jobs WHERE id = $1")
             .bind(id)
