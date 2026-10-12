@@ -104,6 +104,17 @@ The V2 start request gets an optional top level field, ignored by older clients:
 
 The web UI fills it from the parsed FASTA input. The backend stores it in `sequence_count` and `total_length`.
 
+### Backfill
+
+`bakta-web-backend backfill` imports the job history once and exits. The Argo server only lists recent workflows, so the backfill reads all `Workflow` objects from the Kubernetes API (in-cluster service account, `get` and `list` on `workflows.argoproj.io` in `ARGO_NAMESPACE`). It needs `STATS_DATABASE_URL` and the S3 variables. The GitOps repository has a Kubernetes Job for it.
+
+- Only Bakta Web workflows are used, and only the newest workflow of each job.
+- Missing jobs are inserted. Existing records only get columns that are still null. Existing values, the environment and the status are never changed.
+- Environment, origin, status, outcome, times, runtime, queue time and error message are derived like in the poll. A job past the 35 day job retention gets status `expired` with its `outcome`.
+- Organism and `config` come from the Bakta command line of the workflow, in the shape the start request of its API version is stored. Bakta and Baktfold versions come from the template name.
+- For succeeded `bakta` and `bakta_baktfold` jobs, `total_length`, `sequence_count` and `bakta_db_version` come from Bakta's summary `jobs/<id>/results/result.txt` in S3, if it still exists.
+- Running it again changes nothing that is already filled. Errors of single jobs are logged and skipped. It logs progress every 1000 jobs and a final summary (`inserted`, `filled`, `skipped`, `s3_missing`, `errors`).
+
 ## Data retention
 
 Job data in S3 (inputs, results and archived logs) is deleted `DATA_RETENTION_DAYS` days after the job. The backend keeps job state for 35 days, and the statistics database keeps job records forever. So a job can exist while its S3 data is gone.
