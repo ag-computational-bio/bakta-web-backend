@@ -56,10 +56,10 @@ pub struct StateHandler {
     /// for `JOB_RETENTION_DAYS`: after that, a poll treats a finished workflow
     /// of the job as expired anyway. Job IDs are random and never reused.
     pub deleted_jobs: std::sync::Mutex<HashMap<Uuid, DateTime<Utc>>>,
-    /// Live workflow per job, from the workflows of the informer.
+    /// Live workflow per job, from the workflow watch.
     pub live_workflows: std::sync::RwLock<HashMap<Uuid, LiveWorkflow>>,
-    /// Workflows with a `jobid` or `bakta-environment` label by name, as the
-    /// Kubernetes list and watch last reported them.
+    /// Workflows that are not completed, with a `jobid` or `bakta-environment`
+    /// label, by name, as the Kubernetes list and watch last reported them.
     pub workflows: std::sync::RwLock<HashMap<String, SimpleStatus>>,
     /// True while the workflow watch is connected. Time-based work that
     /// needs current workflows waits for it.
