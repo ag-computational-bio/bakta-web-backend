@@ -66,6 +66,8 @@ pub struct StateHandler {
     pub watch_connected: std::sync::atomic::AtomicBool,
     /// True once the first list of workflows was applied.
     pub ready: std::sync::atomic::AtomicBool,
+    /// Completed workflows that are not applied yet or kept for the database.
+    pub(crate) completions: std::sync::Mutex<crate::informer::Completions>,
     /// Environment name for job records and the `bakta-environment` workflow label.
     pub environment: String,
     pub stats: StatsRecorder,
@@ -1165,6 +1167,7 @@ impl BaktaHandler {
             workflows: Default::default(),
             watch_connected: Default::default(),
             ready: Default::default(),
+            completions: Default::default(),
             environment,
             stats,
         });
@@ -3085,6 +3088,7 @@ mod tests {
             workflows: Default::default(),
             watch_connected: Default::default(),
             ready: Default::default(),
+            completions: Default::default(),
             environment: "production".to_string(),
             stats: StatsRecorder::disabled(),
         };

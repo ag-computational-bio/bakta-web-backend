@@ -596,6 +596,16 @@ impl Watcher {
     }
 }
 
+/// Final states of completed workflows that the processing keeps.
+#[derive(Default)]
+pub(crate) struct Completions {
+    /// Completions that were not applied yet, by workflow name.
+    pub(crate) pending: HashMap<String, SimpleStatus>,
+    /// With a database: the applied final state of each finished job that is
+    /// still in memory, to record it again until the database has it.
+    pub(crate) finished: HashMap<Uuid, SimpleStatus>,
+}
+
 /// Changes waiting to be applied together.
 #[derive(Default)]
 struct Batch {
@@ -614,8 +624,6 @@ async fn process(state: Arc<StateHandler>, mut changes: UnboundedReceiver<Workfl
     let mut batch = Batch::default();
     // Jobs that were skipped and need another pass.
     let mut retry = HashSet::new();
-    // Final workflow states of finished jobs that are still in memory.
-    let mut finished = HashMap::new();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut records_expired_at: Option<Instant> = None;
@@ -626,6 +634,7 @@ async fn process(state: Arc<StateHandler>, mut changes: UnboundedReceiver<Workfl
                 None => return,
                 Some(WorkflowChange::Listed { observed_at }) => {
                     retry = state.apply_listed_workflows(observed_at).await;
+                    retry.extend(state.pending_completion_jobs());
                     state.ready.store(true, Ordering::Relaxed);
                 }
                 Some(WorkflowChange::Changed { name, jobs, observed_at }) => {
@@ -640,7 +649,7 @@ async fn process(state: Arc<StateHandler>, mut changes: UnboundedReceiver<Workfl
             () = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => {
                 let batch = std::mem::take(&mut batch);
                 retry = state
-                    .apply_changed_workflows(batch, std::mem::take(&mut retry), &mut finished)
+                    .apply_changed_workflows(batch, std::mem::take(&mut retry))
                     .await;
             }
             _ = tick.tick() => {
@@ -650,7 +659,7 @@ async fn process(state: Arc<StateHandler>, mut changes: UnboundedReceiver<Workfl
                     records_expired_at = Some(Instant::now());
                 }
                 retry = state
-                    .run_timed_work(std::mem::take(&mut retry), &mut finished, expire_records)
+                    .run_timed_work(std::mem::take(&mut retry), expire_records)
                     .await;
             }
         }
@@ -867,13 +876,11 @@ impl StateHandler {
 
     /// Writes the changed workflows and applies all workflows of their jobs,
     /// of the `retry` jobs and of jobs with an unresolved submission.
-    /// Completed workflows are applied with their final state and kept in
-    /// `finished` until the job leaves memory.
+    /// Completed workflows are applied with their final state.
     async fn apply_changed_workflows(
         &self,
         batch: Batch,
         mut jobs: HashSet<Uuid>,
-        finished: &mut HashMap<Uuid, SimpleStatus>,
     ) -> HashSet<Uuid> {
         jobs.extend(batch.jobs);
         jobs.extend(self.marked_jobs());
@@ -892,16 +899,77 @@ impl StateHandler {
         let observed_at = batch.observed_at.unwrap_or_else(Utc::now);
         self.record_changed_workflows(&changed, &gone, observed_at)
             .await;
-        let mut items = self.job_workflows(&jobs);
-        for item in batch.completed.into_values() {
-            if let Some(id) = job_id_label(&item)
-                && jobs.contains(&id)
-            {
-                finished.insert(id, item.clone());
-                items.push(item);
+        let items = self.job_workflows(&jobs);
+        let completed = batch.completed.into_values().collect();
+        self.apply_with_completions(items, &jobs, completed, Utc::now())
+            .await
+    }
+
+    /// Jobs with a completion that was not applied yet.
+    fn pending_completion_jobs(&self) -> Vec<Uuid> {
+        self.completions
+            .lock()
+            .expect("completions lock poisoned")
+            .pending
+            .values()
+            .filter_map(job_id_label)
+            .collect()
+    }
+
+    /// Applies `items` and the completions of `jobs`, the `completed` ones
+    /// and the pending ones. A completion that is skipped (for example while
+    /// the job is reserved) stays pending and its job is returned for
+    /// another pass, until it is applied. An applied completion is kept in
+    /// `finished` until the job leaves memory.
+    async fn apply_with_completions(
+        &self,
+        mut items: Vec<SimpleStatus>,
+        jobs: &HashSet<Uuid>,
+        completed: Vec<SimpleStatus>,
+        now: DateTime<Utc>,
+    ) -> HashSet<Uuid> {
+        let in_scope =
+            |item: &SimpleStatus| job_id_label(item).is_some_and(|id| jobs.contains(&id));
+        {
+            let mut completions = self.completions.lock().expect("completions lock poisoned");
+            for item in completed.into_iter().filter(in_scope) {
+                completions.pending.insert(item.metadata.name.clone(), item);
+            }
+            items.extend(
+                completions
+                    .pending
+                    .values()
+                    .filter(|item| in_scope(item))
+                    .cloned(),
+            );
+        }
+        let mut retry = self.apply_job_workflows(items, jobs, now).await;
+        let job_state = self.job_state.read().await;
+        let mut completions = self.completions.lock().expect("completions lock poisoned");
+        let applied: Vec<String> = completions
+            .pending
+            .iter()
+            .filter(|(_, item)| {
+                job_id_label(item).is_some_and(|id| jobs.contains(&id) && !retry.contains(&id))
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in applied {
+            let Some(item) = completions.pending.remove(&name) else {
+                continue;
+            };
+            let Some(id) = job_id_label(&item) else {
+                continue;
+            };
+            let current = job_state
+                .get(&id)
+                .is_some_and(|state| state.workflowname.as_deref() == Some(name.as_str()));
+            if current {
+                completions.finished.insert(id, item);
             }
         }
-        self.apply_job_workflows(items, &jobs, Utc::now()).await
+        retry.extend(completions.pending.values().filter_map(job_id_label));
+        retry
     }
 
     /// Drops expired jobs, counts checks for unresolved submissions, applies
@@ -909,12 +977,7 @@ impl StateHandler {
     /// database and deletes old rows of gone workflows. While the watch is
     /// not connected, the workflows may be outdated: then only expired jobs
     /// are dropped, like after a failed poll before.
-    async fn run_timed_work(
-        &self,
-        retry: HashSet<Uuid>,
-        finished: &mut HashMap<Uuid, SimpleStatus>,
-        expire_records: bool,
-    ) -> HashSet<Uuid> {
+    async fn run_timed_work(&self, retry: HashSet<Uuid>, expire_records: bool) -> HashSet<Uuid> {
         let now = Utc::now();
         if let Some(db) = self.stats.db() {
             let namespace = self.argo_client.namespace();
@@ -931,16 +994,35 @@ impl StateHandler {
                 Ok(Err(error)) => tracing::warn!(%error, "timed_database_work_failed"),
                 Err(_) => tracing::warn!("timed_database_work_timed_out"),
             }
-            self.drop_finished_jobs(finished).await;
+            let mut finished = std::mem::take(
+                &mut self
+                    .completions
+                    .lock()
+                    .expect("completions lock poisoned")
+                    .finished,
+            );
+            self.drop_finished_jobs(&mut finished).await;
+            self.completions
+                .lock()
+                .expect("completions lock poisoned")
+                .finished
+                .extend(finished);
         }
         if !self.watch_connected.load(Ordering::Relaxed) {
-            self.apply_job_workflows(Vec::new(), &HashSet::new(), now)
+            // Final states of completions do not get outdated, so they are
+            // applied anyway. The other jobs wait for the watch.
+            let pending: HashSet<Uuid> = self.pending_completion_jobs().into_iter().collect();
+            let items = self.job_workflows(&pending);
+            let mut still = self
+                .apply_with_completions(items, &pending, Vec::new(), now)
                 .await;
-            return retry;
+            still.extend(retry);
+            return still;
         }
         let mut jobs = retry;
         jobs.extend(self.marked_jobs());
         let items = self.job_workflows(&jobs);
-        self.apply_job_workflows(items, &jobs, now).await
+        self.apply_with_completions(items, &jobs, Vec::new(), now)
+            .await
     }
 }

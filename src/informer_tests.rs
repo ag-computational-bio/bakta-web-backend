@@ -756,3 +756,68 @@ async fn a_failed_completion_fetch_is_retried_and_not_a_delete() {
     .await;
     assert_eq!(live_names(&db).await, ["wf-x"]);
 }
+
+#[tokio::test]
+async fn a_completion_of_a_reserved_job_is_applied_later() {
+    let id = Uuid::new_v4();
+    let kube = watch_server(
+        vec![kube_workflow("wf-y", id, "Running", false, 90)],
+        event("DELETED", kube_workflow("wf-y", id, "Running", false, 101)),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{WORKFLOWS}/wf-y")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(kube_workflow(
+            "wf-y",
+            id,
+            "Succeeded",
+            true,
+            101,
+        )))
+        .mount(&kube)
+        .await;
+    let handler = test_handler("http://127.0.0.1:1", "https://s3.example.com");
+    let state = handler.state_handler.clone();
+    insert_state(
+        &handler,
+        crate::bakta_handler::FullJobState {
+            id,
+            workflowname: Some("wf-y".to_string()),
+            ..job_state(
+                crate::bakta_handler::ApiVersion::V2,
+                crate::v2::api_structs::WorkflowKind::Bakta,
+                crate::v2::api_structs::ResultKind::Bakta,
+                Some(crate::api_structs::ArgoStatus::Running),
+            )
+        },
+    )
+    .await;
+    // A start or delete holds the job while the completion arrives.
+    let reservation = state.reserve_start(id).unwrap();
+    start(
+        state.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the completion to arrive", || async {
+        !state.workflows.read().unwrap().contains_key("wf-y")
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(matches!(
+        state.job_state.read().await[&id].status,
+        Some(crate::api_structs::ArgoStatus::Running)
+    ));
+    drop(reservation);
+    wait_for("the completion to be applied", || async {
+        matches!(
+            state.job_state.read().await[&id].status,
+            Some(crate::api_structs::ArgoStatus::Succeeded)
+        )
+    })
+    .await;
+}

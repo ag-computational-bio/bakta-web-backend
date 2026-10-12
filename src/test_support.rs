@@ -68,6 +68,7 @@ pub fn test_handler_full(
         workflows: Default::default(),
         watch_connected: Default::default(),
         ready: Default::default(),
+        completions: Default::default(),
         environment: "production".to_string(),
         stats,
     });
