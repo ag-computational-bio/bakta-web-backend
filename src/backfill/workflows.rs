@@ -11,7 +11,9 @@ use uuid::Uuid;
 
 use super::{db::BackfillJob, parse};
 use crate::{
-    argo::structs::{SimpleStatus, SimpleStatusStatus, StatusMetadata},
+    argo::structs::{
+        ArgoWorkflowSpec, SimpleStatus, SimpleStatusStatus, StatusMetadata, WorkflowTemplateRef,
+    },
     bakta_handler::{
         is_state_expired, job_id_label, polled_workflow_state, state_from_simple_status,
         workflow_environment,
@@ -35,22 +37,23 @@ pub struct Workflow {
 }
 
 #[derive(Deserialize)]
-struct Page {
+pub(crate) struct Page<T> {
+    #[serde(default = "Vec::new")]
+    pub(crate) items: Vec<T>,
     #[serde(default)]
-    items: Vec<serde_json::Value>,
-    #[serde(default)]
-    metadata: PageMetadata,
+    pub(crate) metadata: PageMetadata,
 }
 
 #[derive(Deserialize, Default)]
-struct PageMetadata {
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PageMetadata {
     #[serde(rename = "continue", default)]
-    next: Option<String>,
+    pub(crate) next: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct KubeWorkflow {
+pub(crate) struct KubeWorkflow {
     metadata: KubeMetadata,
     #[serde(default)]
     spec: KubeSpec,
@@ -64,6 +67,7 @@ struct KubeMetadata {
     name: String,
     #[serde(default)]
     uid: Uuid,
+    resource_version: Option<String>,
     creation_timestamp: Option<DateTime<Utc>>,
     #[serde(default)]
     labels: HashMap<String, String>,
@@ -73,6 +77,7 @@ struct KubeMetadata {
 #[serde(rename_all = "camelCase")]
 struct KubeSpec {
     workflow_template_ref: Option<KubeTemplateRef>,
+    suspend: Option<bool>,
     #[serde(default)]
     arguments: KubeArguments,
 }
@@ -106,31 +111,28 @@ struct KubeStatus {
     message: Option<String>,
 }
 
-fn parse_workflow(value: serde_json::Value) -> Result<Workflow> {
-    let workflow: KubeWorkflow = serde_json::from_value(value)?;
-    let mut metadata = workflow.metadata;
-    // The job secret grants access to the results and is never needed here.
-    metadata.labels.remove("secret");
-    let status = workflow.status;
-    let parameter = workflow
-        .spec
-        .arguments
-        .parameters
-        .into_iter()
-        .find(|parameter| parameter.name == "parameter")
-        .map(|parameter| parameter.value)
-        .unwrap_or_default();
-    Ok(Workflow {
-        item: SimpleStatus {
+impl KubeWorkflow {
+    /// Name, labels (with the job secret), spec and status in the form the
+    /// Argo server lists them.
+    pub(crate) fn into_simple_status(self) -> SimpleStatus {
+        let metadata = self.metadata;
+        let status = self.status;
+        SimpleStatus {
             metadata: StatusMetadata {
                 name: metadata.name,
                 uid: metadata.uid,
-                resource_version: None,
+                resource_version: metadata.resource_version,
                 creation_timestamp: metadata.creation_timestamp,
                 labels: metadata.labels,
             },
-            // the template name is kept in `template` below
-            spec: Default::default(),
+            spec: ArgoWorkflowSpec {
+                workflow_template_ref: self.spec.workflow_template_ref.map(|template| {
+                    WorkflowTemplateRef {
+                        name: template.name,
+                    }
+                }),
+                suspend: self.spec.suspend,
+            },
             status: SimpleStatusStatus {
                 phase: status.phase,
                 // A workflow that never started has no start time.
@@ -141,12 +143,29 @@ fn parse_workflow(value: serde_json::Value) -> Result<Workflow> {
                 finished_at: status.finished_at,
                 message: status.message,
             },
-        },
-        template: workflow
-            .spec
-            .workflow_template_ref
-            .map(|template| template.name)
-            .unwrap_or_default(),
+        }
+    }
+}
+
+fn parse_workflow(value: serde_json::Value) -> Result<Workflow> {
+    let mut workflow: KubeWorkflow = serde_json::from_value(value)?;
+    let parameter = std::mem::take(&mut workflow.spec.arguments.parameters)
+        .into_iter()
+        .find(|parameter| parameter.name == "parameter")
+        .map(|parameter| parameter.value)
+        .unwrap_or_default();
+    let mut item = workflow.into_simple_status();
+    // The job secret grants access to the results and is never needed here.
+    item.metadata.labels.remove("secret");
+    let template = item
+        .spec
+        .workflow_template_ref
+        .as_ref()
+        .map(|template| template.name.clone())
+        .unwrap_or_default();
+    Ok(Workflow {
+        item,
+        template,
         parameter,
     })
 }
@@ -193,7 +212,7 @@ impl KubeClient {
             if let Some(token) = next.as_deref() {
                 page_url.query_pairs_mut().append_pair("continue", token);
             }
-            let page: Page = self
+            let page: Page<serde_json::Value> = self
                 .client
                 .get(page_url)
                 .bearer_auth(&self.token)
