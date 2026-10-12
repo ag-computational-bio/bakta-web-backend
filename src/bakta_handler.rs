@@ -1891,8 +1891,28 @@ impl StateHandler {
             .map(|job| job.for_secret(secret)))
     }
 
+    /// The job states in memory of the jobs in `ids`. A job that leaves
+    /// memory for the database while a request reads the database is still
+    /// found in this copy.
+    async fn memory_snapshot(&self, ids: &[Uuid]) -> HashMap<Uuid, FullJobState> {
+        let job_state = self.job_state.read().await;
+        ids.iter()
+            .filter_map(|id| Some((*id, job_state.get(id)?.clone())))
+            .collect()
+    }
+
+    /// The copy of a job from `memory_snapshot`, unless it was deleted since.
+    fn from_snapshot<'a>(
+        &self,
+        snapshot: &'a HashMap<Uuid, FullJobState>,
+        id: &Uuid,
+    ) -> Option<&'a FullJobState> {
+        snapshot.get(id).filter(|_| !self.is_deleted(id))
+    }
+
     pub async fn get_job_states(&self, request_jobs: Vec<Job>) -> Result<ListResponse> {
         let ids: Vec<Uuid> = request_jobs.iter().map(|job| job.id).collect();
+        let snapshot = self.memory_snapshot(&ids).await;
         let recorded = self.recorded_jobs(&ids).await?;
         let read_lock = self.job_state.read().await;
         let mut jobs = vec![];
@@ -1900,7 +1920,8 @@ impl StateHandler {
 
         for Job { id, secret } in request_jobs {
             let recorded = recorded.get(&id).map(|job| job.for_secret(&secret));
-            if let Some(state) = read_lock.get(&id).or(recorded.as_ref()) {
+            let found = read_lock.get(&id).or(recorded.as_ref());
+            if let Some(state) = found.or_else(|| self.from_snapshot(&snapshot, &id)) {
                 if !state.secret_matches(&secret) {
                     failed.push(FailedJobStatus {
                         id,
@@ -1953,6 +1974,7 @@ impl StateHandler {
         request_jobs: Vec<JobReference>,
     ) -> Result<V2ListResponse> {
         let ids: Vec<Uuid> = request_jobs.iter().map(|job| job.job_id).collect();
+        let snapshot = self.memory_snapshot(&ids).await;
         let recorded = self.recorded_jobs(&ids).await?;
         let read_lock = self.job_state.read().await;
         let mut jobs = vec![];
@@ -1960,7 +1982,8 @@ impl StateHandler {
 
         for JobReference { job_id, secret } in request_jobs {
             let recorded = recorded.get(&job_id).map(|job| job.for_secret(&secret));
-            if let Some(state) = read_lock.get(&job_id).or(recorded.as_ref()) {
+            let found = read_lock.get(&job_id).or(recorded.as_ref());
+            if let Some(state) = found.or_else(|| self.from_snapshot(&snapshot, &job_id)) {
                 if !state.secret_matches(&secret) {
                     failed_jobs.push(into_v2_failed_status(
                         job_id,
@@ -2147,11 +2170,13 @@ impl StateHandler {
         if self.is_deleted(&job_id) {
             return self.persist_deleted(job_id).await;
         }
+        let snapshot = self.memory_snapshot(&[job_id]).await;
         let recorded = self.recorded_jobs(&[job_id]).await?;
         let (state, _reservation) = {
             let read_lock = self.job_state.read().await;
             let recorded = recorded.get(&job_id).map(|job| job.for_secret(&secret));
-            let Some(state) = read_lock.get(&job_id).or(recorded.as_ref()) else {
+            let found = read_lock.get(&job_id).or(recorded.as_ref());
+            let Some(state) = found.or_else(|| self.from_snapshot(&snapshot, &job_id)) else {
                 return Ok(());
             };
             if !state.secret_matches(&secret) {

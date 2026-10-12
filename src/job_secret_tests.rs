@@ -466,3 +466,99 @@ async fn a_delete_succeeds_only_when_its_tombstone_is_written() {
         assert_eq!(status, "deleted", "{delete}");
     }
 }
+
+/// Runs `request` while the job records are locked, and drops `id` from
+/// memory (like the cleanup after a finish) while the request waits for
+/// the database.
+async fn during_handoff<T>(
+    db: &crate::stats::StatsDb,
+    handler: &BaktaHandler,
+    id: Uuid,
+    request: impl std::future::Future<Output = T>,
+) -> T {
+    let mut lock = db.pool().begin().await.unwrap();
+    sqlx::query("LOCK TABLE jobs IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let drop_job = async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid))",
+            )
+            .fetch_one(&mut *lock)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        handler.state_handler.job_state.write().await.remove(&id);
+        lock.rollback().await.unwrap();
+    };
+    let (result, ()) = tokio::join!(request, drop_job);
+    result
+}
+
+#[tokio::test]
+async fn a_job_that_leaves_memory_during_a_status_request_is_found() {
+    let Some(db) = crate::stats::test_db::test_db("a_job_that_leaves_memory").await else {
+        return;
+    };
+    let (historical, _) = recorded_job(&db, Utc::now() - chrono::Duration::hours(2)).await;
+    let (finished, _) = recorded_job(&db, Utc::now() - chrono::Duration::minutes(1)).await;
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        crate::stats::StatsRecorder::capturing_with_db((*db).clone()).0,
+    );
+    let state = &handler.state_handler;
+    let in_memory = state
+        .user_job_state(finished, TEST_SECRET)
+        .await
+        .unwrap()
+        .unwrap();
+
+    insert_state(&handler, in_memory.clone()).await;
+    let list = during_handoff(
+        &db,
+        &handler,
+        finished,
+        state.get_job_states(vec![
+            Job {
+                id: historical,
+                secret: TEST_SECRET.to_string(),
+            },
+            Job {
+                id: finished,
+                secret: TEST_SECRET.to_string(),
+            },
+        ]),
+    )
+    .await
+    .unwrap();
+    assert!(list.failed.is_empty(), "v1");
+    assert_eq!(list.jobs.len(), 2, "v1");
+
+    insert_state(&handler, in_memory).await;
+    let list = during_handoff(
+        &db,
+        &handler,
+        finished,
+        state.get_job_states_v2(vec![
+            JobReference {
+                job_id: historical,
+                secret: TEST_SECRET.to_string(),
+            },
+            JobReference {
+                job_id: finished,
+                secret: TEST_SECRET.to_string(),
+            },
+        ]),
+    )
+    .await
+    .unwrap();
+    assert!(list.failed_jobs.is_empty(), "v2");
+    assert_eq!(list.jobs.len(), 2, "v2");
+}
