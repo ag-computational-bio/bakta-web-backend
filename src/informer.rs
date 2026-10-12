@@ -720,6 +720,8 @@ async fn reconcile_completed(
     let mut names: Vec<String> = Vec::new();
     // False when a single workflow could not be fetched.
     let mut complete = true;
+    let mut deferred = HashMap::new();
+    let mut deferred_hashes = HashMap::new();
     let mut next: Option<String> = None;
     let (mut count, mut fetched) = (0, 0);
     loop {
@@ -768,22 +770,28 @@ async fn reconcile_completed(
         if state.stats.db().is_some() && !state.upsert_workflows(&page, observed_at).await {
             return false;
         }
-        let Some(for_memory) = state.reconcile_jobs(page, &hashes, observed_at).await else {
+        let Some(for_memory) = state
+            .reconcile_jobs(page, &hashes, observed_at, Some(&mut deferred))
+            .await
+        else {
             return false;
         };
-        for item in for_memory {
-            let jobs = job_id_label(&item).into_iter().collect();
-            let _ = changes.send(WorkflowChange::Completed {
-                item: Box::new(item),
-                jobs,
-                observed_at,
-            });
-        }
+        send_completions(changes, for_memory, observed_at);
+        deferred_hashes.extend(hashes);
         next = page_next;
         if next.is_none() {
             break;
         }
     }
+    // The newest workflow of each job without a recorded one, from all pages.
+    let newest = deferred.into_values().collect();
+    let Some(for_memory) = state
+        .reconcile_jobs(newest, &deferred_hashes, observed_at, None)
+        .await
+    else {
+        return false;
+    };
+    send_completions(changes, for_memory, observed_at);
     names.extend(
         state
             .workflows
@@ -802,6 +810,22 @@ async fn reconcile_completed(
         "completed_workflows_reconciled"
     );
     complete
+}
+
+/// Sends the final states of completed workflows of jobs in memory.
+fn send_completions(
+    changes: &UnboundedSender<WorkflowChange>,
+    items: Vec<SimpleStatus>,
+    observed_at: DateTime<Utc>,
+) {
+    for item in items {
+        let jobs = job_id_label(&item).into_iter().collect();
+        let _ = changes.send(WorkflowChange::Completed {
+            item: Box::new(item),
+            jobs,
+            observed_at,
+        });
+    }
 }
 
 /// Repeats the reconcile of the completed workflows with a pause of 1 to 60

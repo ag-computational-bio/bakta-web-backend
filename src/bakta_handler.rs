@@ -1229,7 +1229,9 @@ impl StateHandler {
     }
 
     /// Final states of completed workflows, from the list after startup.
-    /// `None` when the lookup of the recorded workflows fails.
+    /// With `deferred`, jobs without a recorded workflow are only collected
+    /// there (the newest workflow per job), to be passed again after the
+    /// last page. `None` when the lookup of the recorded workflows fails.
     /// Writes the statistics of jobs that are not in memory, in the same way
     /// as a completion. Returns the workflows of jobs in memory, or of all
     /// jobs without a database, which are applied like a completion.
@@ -1239,6 +1241,7 @@ impl StateHandler {
         items: Vec<SimpleStatus>,
         hashes: &HashMap<String, String>,
         now: DateTime<Utc>,
+        deferred: Option<&mut HashMap<Uuid, SimpleStatus>>,
     ) -> Option<Vec<SimpleStatus>> {
         let by_job = workflows_by_job(&items);
         let ids: Vec<Uuid> = by_job.keys().copied().collect();
@@ -1264,7 +1267,26 @@ impl StateHandler {
         let mut for_memory = Vec::new();
         let mut polled = Vec::new();
         let mut metadata = Vec::new();
+        let mut deferred = deferred;
         for (id, workflows) in by_job {
+            // Without a recorded workflow the newest one is current, which
+            // may be on a later page: such jobs wait for the end of the list.
+            if let Some(deferred) = deferred.as_deref_mut()
+                && !recorded.contains_key(&id)
+            {
+                for item in workflows {
+                    let key = |item: &SimpleStatus| {
+                        (item.metadata.creation_timestamp, item.metadata.name.clone())
+                    };
+                    if deferred
+                        .get(&id)
+                        .is_none_or(|newest| key(newest) < key(item))
+                    {
+                        deferred.insert(id, item.clone());
+                    }
+                }
+                continue;
+            }
             // The recorded workflow is current. Another page or the watch
             // has it when it is not in this page.
             let current = match recorded.get(&id) {

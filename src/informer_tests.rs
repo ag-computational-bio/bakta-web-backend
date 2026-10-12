@@ -1014,3 +1014,86 @@ async fn a_stored_workflow_without_a_final_job_record_is_fetched_again() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn the_newest_completed_workflow_of_a_job_wins_across_pages() {
+    let Some(db) = test_db("the_newest_completed_workflow_wins").await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    let mut old = kube_workflow("wf-old", id, "Failed", true, 5);
+    old["metadata"]["creationTimestamp"] = (Utc::now() - Duration::hours(2)).to_rfc3339().into();
+    let new = kube_workflow("wf-new", id, "Succeeded", true, 6);
+    let kube = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", LIVE))
+        .and(query_param_is_missing("watch"))
+        .respond_with(page(Vec::new(), "", "10"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("watch", "true"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+        .mount(&kube)
+        .await;
+    // The older attempt is on the first page, the newer one comes later.
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .and(query_param_is_missing("continue"))
+        .respond_with(page(vec![json!({"metadata": old["metadata"]})], "p2", "10"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .and(query_param("continue", "p2"))
+        .respond_with(
+            page(vec![json!({"metadata": new["metadata"]})], "", "10")
+                .set_delay(std::time::Duration::from_millis(1500)),
+        )
+        .mount(&kube)
+        .await;
+    for workflow in [&old, &new] {
+        let name = workflow["metadata"]["name"].as_str().unwrap();
+        Mock::given(method("GET"))
+            .and(path(format!("{WORKFLOWS}/{name}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(workflow))
+            .mount(&kube)
+            .await;
+    }
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new((*db).clone(), JobVersions::default()),
+    );
+    start(
+        handler.state_handler.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the reconcile", || async {
+        handler
+            .state_handler
+            .reconciled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    })
+    .await;
+    wait_for("the newest workflow", || async {
+        let name: Option<String> =
+            sqlx::query_scalar("SELECT workflow_name FROM jobs WHERE id = $1")
+                .bind(id)
+                .fetch_optional(db.pool())
+                .await
+                .unwrap()
+                .flatten();
+        name.as_deref() == Some("wf-new")
+    })
+    .await;
+}
