@@ -88,8 +88,8 @@ async fn fill_job(
 
 /// Sets the genome size and database version of a job from S3: from the
 /// summary of a succeeded genome job when `read_summary`, else, for a genome
-/// job without size and with `read_input`, the size from its input FASTA
-/// (failed jobs and jobs without summary). The database version only comes
+/// job without both size values and with `read_input`, the missing ones from
+/// its input FASTA (failed jobs and jobs without or with a partial summary). The database version only comes
 /// from the summary. Returns whether the summary was missing.
 pub(crate) async fn read_sizes(
     s3: &S3Handler,
@@ -117,14 +117,18 @@ pub(crate) async fn read_sizes(
             }
         }
     }
-    if read_input && is_genome_job(job) && job.total_length.is_none() {
+    // A value from the summary is kept, a missing one comes from the input.
+    let missing_size = job.total_length.is_none() || job.sequence_count.is_none();
+    if read_input && is_genome_job(job) && missing_size {
         match s3
             .count_input_fasta(&id.to_string(), crate::s3_handler::INPUT_READ_LIMIT)
             .await
         {
             Ok(Some(count)) => {
-                job.total_length = Some(count.bases);
-                job.sequence_count = i32::try_from(count.sequences).ok();
+                job.total_length = job.total_length.or(Some(count.bases));
+                job.sequence_count = job
+                    .sequence_count
+                    .or_else(|| i32::try_from(count.sequences).ok());
             }
             Ok(None) => {}
             Err(error) => tracing::warn!(job_id = %id, %error, "backfill_input_unreadable"),
@@ -321,5 +325,26 @@ mod tests {
         let mut job = self::job("bakta", "failed");
         read_sizes(&s3, &mut job, false, false).await;
         assert_eq!(job.total_length, None);
+    }
+
+    #[tokio::test]
+    async fn test_a_summary_without_count_falls_back_to_the_input_for_the_count() {
+        let job = job("bakta", "succeeded");
+        let (_server, s3) = s3_with(&[
+            (
+                format!("jobs/{}/results/result.txt", job.job.id),
+                "Length: 1000\nDatabase: v6.0\n",
+            ),
+            (
+                format!("jobs/{}/inputs/fastadata.fasta", job.job.id),
+                ">a\nACGT\n>b\nGG\n",
+            ),
+        ])
+        .await;
+        let mut job = job;
+        read_sizes(&s3, &mut job, true, true).await;
+        assert_eq!(job.total_length, Some(1000));
+        assert_eq!(job.sequence_count, Some(2));
+        assert_eq!(job.versions.bakta_db_version.as_deref(), Some("6.0"));
     }
 }
