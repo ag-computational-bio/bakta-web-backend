@@ -256,6 +256,20 @@ mod tests {
         })
     }
 
+    /// Writes a complete list of workflows like the workflow watch after a list.
+    async fn record_list(
+        state: &crate::bakta_handler::StateHandler,
+        items: &[SimpleStatus],
+        at: DateTime<Utc>,
+    ) {
+        assert!(state.upsert_workflows(items, at).await);
+        let names: Vec<String> = items
+            .iter()
+            .map(|item| item.metadata.name.clone())
+            .collect();
+        state.remove_missing_workflows(&names, at).await;
+    }
+
     fn workflow(value: &Value) -> ArgoWorkflow {
         serde_json::from_value(value.clone()).unwrap()
     }
@@ -421,10 +435,7 @@ mod tests {
         .iter()
         .map(|item| serde_json::from_value(item.clone()).unwrap())
         .collect();
-        handler
-            .state_handler
-            .record_workflows(&polled, Utc::now())
-            .await;
+        record_list(&handler.state_handler, &polled, Utc::now()).await;
 
         let live = db.live_workflows("bakta", None).await.unwrap();
         let mut all = names(&live);
@@ -442,10 +453,7 @@ mod tests {
         );
 
         // The next full list no longer has `done`.
-        handler
-            .state_handler
-            .record_workflows(&polled[..2], Utc::now())
-            .await;
+        record_list(&handler.state_handler, &polled[..2], Utc::now()).await;
         let mut all = names(&db.live_workflows("bakta", None).await.unwrap())
             .into_iter()
             .map(str::to_string)
@@ -467,9 +475,7 @@ mod tests {
             serde_json::from_value(listed(name, phase, "production")).unwrap()
         };
         let t0 = Utc::now() - chrono::Duration::minutes(5);
-        state
-            .record_workflows(&[item("a", "Running"), item("b", "Running")], t0)
-            .await;
+        record_list(state, &[item("a", "Running"), item("b", "Running")], t0).await;
         // Only the changed workflow is written. Rows of others are kept.
         state
             .record_changed_workflows(

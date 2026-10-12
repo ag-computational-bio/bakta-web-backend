@@ -1165,26 +1165,98 @@ lazy_static::lazy_static! {
 }
 
 impl StateHandler {
-    /// Writes the complete list of workflows to the `workflows` table for
-    /// the admin API, and marks all other rows as gone. `observed_at` is a
-    /// time before the list was fetched. Does nothing without a database.
-    pub(crate) async fn record_workflows(
+    /// Takes `names` as all workflows that Kubernetes has at `observed_at`
+    /// and marks all other rows of the `workflows` table as gone. Does
+    /// nothing without a database.
+    pub(crate) async fn remove_missing_workflows(
         &self,
-        items: &[SimpleStatus],
+        names: &[String],
         observed_at: DateTime<Utc>,
     ) {
         let Some(db) = self.stats.db() else {
             return;
         };
-        let names: Vec<String> = bakta_web_workflows(items)
-            .into_iter()
-            .map(|workflow| workflow.metadata.name)
-            .collect();
-        if self.upsert_workflows(items, observed_at).await {
-            let namespace = self.argo_client.namespace();
-            let remove = db.remove_missing_workflows(namespace, observed_at, &names);
-            log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, remove).await);
+        let namespace = self.argo_client.namespace();
+        let remove = db.remove_missing_workflows(namespace, observed_at, names);
+        log_table_write(tokio::time::timeout(TABLE_WRITE_TIMEOUT, remove).await);
+    }
+
+    /// Final states of completed workflows, from the list after startup.
+    /// Writes the statistics of jobs that are not in memory, in the same way
+    /// as a completion. Returns the workflows of jobs in memory, which are
+    /// applied like a completion. `hashes` are the secret hashes by
+    /// workflow name.
+    pub(crate) async fn reconcile_jobs(
+        &self,
+        items: Vec<SimpleStatus>,
+        hashes: &HashMap<String, String>,
+        now: DateTime<Utc>,
+    ) -> Vec<SimpleStatus> {
+        let by_job = workflows_by_job(&items);
+        let ids: Vec<Uuid> = by_job.keys().copied().collect();
+        let recorded = match self.stats.db() {
+            Some(db) if !ids.is_empty() => {
+                match tokio::time::timeout(TABLE_WRITE_TIMEOUT, db.workflow_names(&ids)).await {
+                    Ok(Ok(names)) => names,
+                    _ => {
+                        tracing::warn!("recorded_workflow_names_failed");
+                        return Vec::new();
+                    }
+                }
+            }
+            _ => HashMap::new(),
+        };
+        let in_memory: HashSet<Uuid> = {
+            let job_state = self.job_state.read().await;
+            ids.iter()
+                .filter(|id| job_state.contains_key(id))
+                .copied()
+                .collect()
+        };
+        let mut for_memory = Vec::new();
+        let mut polled = Vec::new();
+        let mut metadata = Vec::new();
+        for (id, workflows) in by_job {
+            // The recorded workflow is current. Another page or the watch
+            // has it when it is not in this page.
+            let current = match recorded.get(&id) {
+                Some(name) => workflows
+                    .iter()
+                    .find(|item| item.metadata.name == *name)
+                    .copied(),
+                None => workflows
+                    .iter()
+                    .max_by_key(|item| (item.metadata.creation_timestamp, &item.metadata.name))
+                    .copied(),
+            };
+            let Some(item) = current else {
+                continue;
+            };
+            if in_memory.contains(&id) {
+                for_memory.push(item.clone());
+                continue;
+            }
+            let Some(state) = state_from_simple_status(item.clone()) else {
+                continue;
+            };
+            if self.is_deleted(&id) || is_state_expired(&state, now) {
+                metadata.push(polled_metadata(id, item));
+                continue;
+            }
+            let environment = workflow_environment(&item.metadata.labels);
+            if let Some(mut workflow_state) = polled_workflow_state(&state, environment, item) {
+                workflow_state.job.secret_hash = hashes.get(&item.metadata.name).cloned();
+                polled.push(workflow_state);
+            }
         }
+        for chunk in polled.chunks(STATS_EVENT_CHUNK) {
+            self.stats.record(StatsEvent::Polled(chunk.to_vec()));
+        }
+        for chunk in metadata.chunks(STATS_EVENT_CHUNK) {
+            self.stats
+                .record(StatsEvent::PolledMetadata(chunk.to_vec()));
+        }
+        for_memory
     }
 
     /// Writes changed workflows to the `workflows` table and marks the
@@ -1209,7 +1281,11 @@ impl StateHandler {
     /// Writes the Bakta Web workflows of `items` in chunks and returns true
     /// when all chunks were written. The suspend state comes from
     /// `spec.suspend`: no workflow template has a suspend step.
-    async fn upsert_workflows(&self, items: &[SimpleStatus], observed_at: DateTime<Utc>) -> bool {
+    pub(crate) async fn upsert_workflows(
+        &self,
+        items: &[SimpleStatus],
+        observed_at: DateTime<Utc>,
+    ) -> bool {
         let Some(db) = self.stats.db() else {
             return false;
         };

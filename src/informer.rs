@@ -1,13 +1,21 @@
-//! Workflows from the Kubernetes API, kept current with a watch. At
-//! startup, all Workflow objects of the namespace are listed in pages. A
-//! watch from the resource version of the list then reports added, changed
-//! and deleted workflows. A dropped watch resumes from the last resource
-//! version. Only when Kubernetes no longer has that version (`410 Gone`) are
-//! all workflows listed again. The job state is updated from these
-//! workflows, so no request lists all workflows from Argo.
+//! Workflows from the Kubernetes API, kept current with a watch. Only
+//! workflows that are not completed are watched: at startup, they are
+//! listed in pages, and a watch from the resource version of the list then
+//! reports added, changed and deleted ones. A dropped watch resumes from the
+//! last resource version. Only when Kubernetes no longer has that version
+//! (`410 Gone`) are they listed again.
+//!
+//! A workflow that completes gets the label
+//! `workflows.argoproj.io/completed=true` and leaves the watched set.
+//! Kubernetes then sends a `DELETED` event with the state before the
+//! change, so the workflow is fetched once to tell a completion (final
+//! state) from a real delete (not found). After each list, the completed
+//! workflows are listed once, to write those that completed while the
+//! backend did not watch. The job state is updated from these workflows,
+//! so no request lists all workflows from Argo.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
@@ -28,6 +36,9 @@ use crate::{
     bakta_handler::{StateHandler, job_id_label},
 };
 
+/// Label selectors of workflows that are not completed, and of completed ones.
+const LIVE_SELECTOR: &str = "workflows.argoproj.io/completed!=true";
+const COMPLETED_SELECTOR: &str = "workflows.argoproj.io/completed=true";
 const SERVICE_ACCOUNT_CA: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 const PAGE_SIZE: &str = "500";
 const PAGE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -43,6 +54,8 @@ const BATCH_DELAY: Duration = Duration::from_secs(1);
 /// Interval of the time-based work: expiry, unresolved submissions, skipped
 /// jobs and old rows of gone workflows.
 const TICK: Duration = Duration::from_secs(15);
+/// Attempts to fetch a workflow after a `DELETED` event.
+const FETCH_ATTEMPTS: u32 = 3;
 
 /// Reads Workflow objects of one namespace from the Kubernetes API.
 pub struct KubeApi {
@@ -97,49 +110,80 @@ impl KubeApi {
         }
     }
 
-    /// All workflows with a `jobid` or `bakta-environment` label, and the
-    /// resource version of the list. Workflows that cannot be read are
-    /// logged and skipped.
+    /// One page of the workflows that match `selector`, with a
+    /// `jobid` or `bakta-environment` label, and the continue token and
+    /// resource version. Workflows that cannot be read are logged and skipped.
+    async fn list_page(
+        &self,
+        selector: &str,
+        next: Option<&str>,
+    ) -> Result<(Vec<SimpleStatus>, Option<String>, Option<String>)> {
+        let mut url = url::Url::parse(&self.workflows_url)?;
+        url.query_pairs_mut()
+            .append_pair("labelSelector", selector)
+            .append_pair("limit", PAGE_SIZE);
+        if let Some(token) = next {
+            url.query_pairs_mut().append_pair("continue", token);
+        }
+        let page: Page<Box<RawValue>> = self
+            .client
+            .get(url)
+            .bearer_auth(&self.token)
+            .timeout(PAGE_TIMEOUT)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let mut items = Vec::new();
+        for item in page.items {
+            match serde_json::from_str::<KubeWorkflow>(item.get()) {
+                Ok(workflow) => items.extend(relevant(workflow.into_simple_status())),
+                Err(error) => tracing::warn!(%error, "workflow_unreadable"),
+            }
+        }
+        let next = page.metadata.next.filter(|token| !token.is_empty());
+        Ok((items, next, page.metadata.resource_version))
+    }
+
+    /// All workflows that are not completed, and the resource version of
+    /// the list.
     async fn list(&self) -> Result<(Vec<SimpleStatus>, String)> {
         let mut items = Vec::new();
         let mut next: Option<String> = None;
         loop {
-            let mut url = url::Url::parse(&self.workflows_url)?;
-            url.query_pairs_mut().append_pair("limit", PAGE_SIZE);
-            if let Some(token) = next.as_deref() {
-                url.query_pairs_mut().append_pair("continue", token);
-            }
-            let page: Page<Box<RawValue>> = self
-                .client
-                .get(url)
-                .bearer_auth(&self.token)
-                .timeout(PAGE_TIMEOUT)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            for item in page.items {
-                match serde_json::from_str::<KubeWorkflow>(item.get()) {
-                    Ok(workflow) => items.extend(relevant(workflow.into_simple_status())),
-                    Err(error) => tracing::warn!(%error, "workflow_unreadable"),
-                }
-            }
-            next = page.metadata.next.filter(|token| !token.is_empty());
+            let (page, page_next, version) = self.list_page(LIVE_SELECTOR, next.as_deref()).await?;
+            items.extend(page);
+            next = page_next;
             if next.is_none() {
-                let version = page
-                    .metadata
-                    .resource_version
-                    .context("workflow list without resource version")?;
+                let version = version.context("workflow list without resource version")?;
                 return Ok((items, version));
             }
         }
+    }
+
+    /// One workflow, or `None` when it does not exist.
+    async fn get(&self, name: &str) -> Result<Option<SimpleStatus>> {
+        let response = self
+            .client
+            .get(format!("{}/{name}", self.workflows_url))
+            .bearer_auth(&self.token)
+            .timeout(PAGE_TIMEOUT)
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let body = response.error_for_status()?.bytes().await?;
+        let workflow: KubeWorkflow = serde_json::from_slice(&body)?;
+        Ok(Some(workflow.into_simple_status()))
     }
 
     async fn watch(&self, resource_version: &str) -> Result<reqwest::Response, WatchEnd> {
         let mut url =
             url::Url::parse(&self.workflows_url).map_err(|e| WatchEnd::Failed(e.into()))?;
         url.query_pairs_mut()
+            .append_pair("labelSelector", LIVE_SELECTOR)
             .append_pair("watch", "true")
             .append_pair("resourceVersion", resource_version)
             .append_pair("allowWatchBookmarks", "true")
@@ -167,6 +211,13 @@ fn relevant(item: SimpleStatus) -> Option<SimpleStatus> {
     (labels.contains_key("jobid") || labels.contains_key("bakta-environment")).then_some(item)
 }
 
+fn is_completed(item: &SimpleStatus) -> bool {
+    item.metadata
+        .labels
+        .get("workflows.argoproj.io/completed")
+        .is_some_and(|value| value == "true")
+}
+
 /// A change of the workflows in `StateHandler::workflows`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WorkflowChange {
@@ -177,6 +228,13 @@ pub(crate) enum WorkflowChange {
     /// its old and new state.
     Changed {
         name: String,
+        jobs: Vec<Uuid>,
+        observed_at: DateTime<Utc>,
+    },
+    /// A workflow completed. It is no longer watched: `item` is its final
+    /// state.
+    Completed {
+        item: Box<SimpleStatus>,
         jobs: Vec<Uuid>,
         observed_at: DateTime<Utc>,
     },
@@ -221,6 +279,7 @@ struct WatchStatus {
 
 /// Starts the list and watch and the task that applies the changes.
 pub fn start(state: Arc<StateHandler>, api: KubeApi) {
+    let api = Arc::new(api);
     let (changes, receiver) = unbounded_channel();
     tokio::spawn(process(state.clone(), receiver));
     tokio::spawn(
@@ -234,7 +293,7 @@ pub fn start(state: Arc<StateHandler>, api: KubeApi) {
 }
 
 struct Watcher {
-    api: KubeApi,
+    api: Arc<KubeApi>,
     state: Arc<StateHandler>,
     changes: UnboundedSender<WorkflowChange>,
 }
@@ -300,6 +359,12 @@ impl Watcher {
         self.state.metrics.record_workflow_list(Utc::now());
         tracing::info!(workflows = count, "workflow_list_finished");
         let _ = self.changes.send(WorkflowChange::Listed { observed_at });
+        tokio::spawn(reconcile_completed(
+            self.api.clone(),
+            self.state.clone(),
+            self.changes.clone(),
+            observed_at,
+        ));
         Ok(version)
     }
 
@@ -325,7 +390,7 @@ impl Watcher {
                             continue;
                         }
                         received = true;
-                        if let Err(end) = self.apply_event(&line, version) {
+                        if let Err(end) = self.apply_event(&line, version).await {
                             break 'stream end;
                         }
                     }
@@ -338,7 +403,7 @@ impl Watcher {
         (end, received)
     }
 
-    fn apply_event(&self, line: &[u8], version: &mut String) -> Result<(), WatchEnd> {
+    async fn apply_event(&self, line: &[u8], version: &mut String) -> Result<(), WatchEnd> {
         let event: WatchEvent =
             serde_json::from_slice(line).map_err(|error| WatchEnd::Failed(error.into()))?;
         self.state.metrics.record_watch_event(Utc::now());
@@ -385,8 +450,61 @@ impl Watcher {
         if let Some(next) = workflow.resource_version() {
             *version = next.to_string();
         }
-        self.apply_workflow(workflow.into_simple_status(), deleted);
+        let item = workflow.into_simple_status();
+        if is_completed(&item) {
+            self.complete(item);
+        } else if deleted {
+            // The event has the state before the workflow left the watched
+            // set: a completion or a real delete.
+            match self.final_state(&item.metadata.name).await {
+                Some(completed) => self.complete(completed),
+                None => self.apply_workflow(item, true),
+            }
+        } else {
+            self.apply_workflow(item, false);
+        }
         Ok(())
+    }
+
+    /// The final state of a workflow that left the watched set, or `None`
+    /// when it was deleted (or cannot be fetched).
+    async fn final_state(&self, name: &str) -> Option<SimpleStatus> {
+        for attempt in 1..=FETCH_ATTEMPTS {
+            match self.api.get(name).await {
+                Ok(item) => return item.filter(is_completed),
+                Err(error) if attempt < FETCH_ATTEMPTS => {
+                    tracing::debug!(workflow_name = name, %error, "workflow_fetch_retry");
+                    tokio::time::sleep(MIN_BACKOFF).await;
+                }
+                Err(error) => {
+                    self.state.metrics.record_watch_error();
+                    tracing::warn!(workflow_name = name, %error, "workflow_fetch_failed");
+                }
+            }
+        }
+        None
+    }
+
+    /// Drops a completed workflow from the watched ones and reports its
+    /// final state.
+    fn complete(&self, item: SimpleStatus) {
+        let Some(item) = relevant(item) else {
+            return;
+        };
+        let name = item.metadata.name.clone();
+        let previous = self
+            .state
+            .workflows
+            .write()
+            .expect("workflows lock poisoned")
+            .remove(&name);
+        let mut jobs: Vec<Uuid> = job_id_label(&item).into_iter().collect();
+        jobs.extend(previous.as_ref().and_then(job_id_label));
+        let _ = self.changes.send(WorkflowChange::Completed {
+            item: Box::new(item),
+            jobs,
+            observed_at: Utc::now(),
+        });
     }
 
     fn apply_workflow(&self, item: SimpleStatus, deleted: bool) {
@@ -423,6 +541,8 @@ impl Watcher {
 struct Batch {
     names: HashSet<String>,
     jobs: HashSet<Uuid>,
+    /// Final states of workflows that completed.
+    completed: HashMap<String, SimpleStatus>,
     /// The earliest time a change of the batch was seen.
     observed_at: Option<DateTime<Utc>>,
     due: Option<Instant>,
@@ -442,26 +562,111 @@ async fn process(state: Arc<StateHandler>, mut changes: UnboundedReceiver<Workfl
             change = changes.recv() => match change {
                 None => return,
                 Some(WorkflowChange::Listed { observed_at }) => {
-                    // The list covers all changes before it.
-                    batch = Batch::default();
                     retry = state.apply_listed_workflows(observed_at).await;
                 }
                 Some(WorkflowChange::Changed { name, jobs, observed_at }) => {
-                    batch.names.insert(name);
-                    batch.jobs.extend(jobs);
-                    batch.observed_at.get_or_insert(observed_at);
-                    batch.due.get_or_insert_with(|| Instant::now() + BATCH_DELAY);
+                    batch.add(name, jobs, observed_at);
+                }
+                Some(WorkflowChange::Completed { item, jobs, observed_at }) => {
+                    let name = item.metadata.name.clone();
+                    batch.completed.insert(name.clone(), *item);
+                    batch.add(name, jobs, observed_at);
                 }
             },
             () = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => {
                 let batch = std::mem::take(&mut batch);
-                retry = state.apply_changed_workflows(batch, std::mem::take(&mut retry)).await;
+                retry = state
+                    .apply_changed_workflows(batch, std::mem::take(&mut retry))
+                    .await;
             }
             _ = tick.tick() => {
                 retry = state.run_timed_work(std::mem::take(&mut retry)).await;
             }
         }
     }
+}
+
+impl Batch {
+    fn add(&mut self, name: String, jobs: Vec<Uuid>, observed_at: DateTime<Utc>) {
+        self.names.insert(name);
+        self.jobs.extend(jobs);
+        self.observed_at.get_or_insert(observed_at);
+        self.due.get_or_insert_with(|| Instant::now() + BATCH_DELAY);
+    }
+}
+
+/// Removes the `secret` labels and returns their hashes by workflow name.
+fn take_secret_hashes(items: &mut [SimpleStatus]) -> HashMap<String, String> {
+    items
+        .iter_mut()
+        .filter_map(|item| {
+            let secret = item.metadata.labels.remove("secret")?;
+            (!secret.is_empty()).then(|| {
+                (
+                    item.metadata.name.clone(),
+                    crate::stats::secret_hash(&secret),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Lists the completed workflows once, page by page, and writes those that
+/// the database does not have in this state yet. Jobs in memory get the
+/// final state of their workflow like after a completion. Then all rows of
+/// workflows that Kubernetes no longer has are marked as gone.
+async fn reconcile_completed(
+    api: Arc<KubeApi>,
+    state: Arc<StateHandler>,
+    changes: UnboundedSender<WorkflowChange>,
+    observed_at: DateTime<Utc>,
+) {
+    if state.stats.db().is_none() {
+        return;
+    }
+    let mut names: Vec<String> = Vec::new();
+    let mut next: Option<String> = None;
+    let mut count = 0;
+    loop {
+        let (page, page_next) = match api.list_page(COMPLETED_SELECTOR, next.as_deref()).await {
+            Ok((page, page_next, _)) => (page, page_next),
+            Err(error) => {
+                state.metrics.record_watch_error();
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "completed_workflows_list_failed"
+                );
+                return;
+            }
+        };
+        let mut page = page;
+        let hashes = take_secret_hashes(&mut page);
+        count += page.len();
+        names.extend(page.iter().map(|item| item.metadata.name.clone()));
+        state.upsert_workflows(&page, observed_at).await;
+        for item in state.reconcile_jobs(page, &hashes, observed_at).await {
+            let jobs = job_id_label(&item).into_iter().collect();
+            let _ = changes.send(WorkflowChange::Completed {
+                item: Box::new(item),
+                jobs,
+                observed_at,
+            });
+        }
+        next = page_next;
+        if next.is_none() {
+            break;
+        }
+    }
+    names.extend(
+        state
+            .workflows
+            .read()
+            .expect("workflows lock poisoned")
+            .keys()
+            .cloned(),
+    );
+    state.remove_missing_workflows(&names, observed_at).await;
+    tracing::info!(workflows = count, "completed_workflows_reconciled");
 }
 
 impl StateHandler {
@@ -475,7 +680,7 @@ impl StateHandler {
             .collect()
     }
 
-    /// All known workflows of the jobs in `jobs`.
+    /// All watched workflows of the jobs in `jobs`.
     fn job_workflows(&self, jobs: &HashSet<Uuid>) -> Vec<SimpleStatus> {
         self.workflows
             .read()
@@ -486,7 +691,7 @@ impl StateHandler {
             .collect()
     }
 
-    /// Applies a complete list, like a poll did before.
+    /// Applies the list of all watched workflows.
     async fn apply_listed_workflows(&self, observed_at: DateTime<Utc>) -> HashSet<Uuid> {
         let items: Vec<SimpleStatus> = self
             .workflows
@@ -495,12 +700,13 @@ impl StateHandler {
             .values()
             .cloned()
             .collect();
-        self.record_workflows(&items, observed_at).await;
+        self.upsert_workflows(&items, observed_at).await;
         self.apply_workflow_statuses(items, observed_at).await
     }
 
     /// Writes the changed workflows and applies all workflows of their jobs,
     /// of the `retry` jobs and of jobs with an unresolved submission.
+    /// Completed workflows are applied with their final state.
     async fn apply_changed_workflows(
         &self,
         batch: Batch,
@@ -508,12 +714,12 @@ impl StateHandler {
     ) -> HashSet<Uuid> {
         jobs.extend(batch.jobs);
         jobs.extend(self.marked_jobs());
-        let (changed, gone): (Vec<_>, Vec<_>) = {
+        let (changed, gone) = {
             let workflows = self.workflows.read().expect("workflows lock poisoned");
             let mut changed = Vec::new();
             let mut gone = Vec::new();
             for name in batch.names {
-                match workflows.get(&name) {
+                match workflows.get(&name).or(batch.completed.get(&name)) {
                     Some(item) => changed.push(item.clone()),
                     None => gone.push(name),
                 }
@@ -523,7 +729,14 @@ impl StateHandler {
         let observed_at = batch.observed_at.unwrap_or_else(Utc::now);
         self.record_changed_workflows(&changed, &gone, observed_at)
             .await;
-        let items = self.job_workflows(&jobs);
+        let mut items = self.job_workflows(&jobs);
+        for item in batch.completed.into_values() {
+            if let Some(id) = job_id_label(&item)
+                && jobs.contains(&id)
+            {
+                items.push(item);
+            }
+        }
         self.apply_job_workflows(items, &jobs, Utc::now()).await
     }
 
