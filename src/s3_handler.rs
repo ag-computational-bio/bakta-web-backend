@@ -81,14 +81,14 @@ impl std::io::Write for FastaCounter {
 /// Where the read data goes: straight to the counter, or through gzip.
 enum FastaSink {
     Plain(FastaCounter),
-    Gzip(Box<flate2::write::GzDecoder<FastaCounter>>),
+    Gzip(Box<flate2::write::MultiGzDecoder<FastaCounter>>),
 }
 
 impl FastaSink {
     /// Gzip when `head` starts with the gzip magic bytes.
     fn for_head(head: &[u8]) -> Self {
         if head.starts_with(&[0x1f, 0x8b]) {
-            FastaSink::Gzip(Box::new(flate2::write::GzDecoder::new(
+            FastaSink::Gzip(Box::new(flate2::write::MultiGzDecoder::new(
                 FastaCounter::default(),
             )))
         } else {
@@ -835,6 +835,51 @@ mod tests {
             url.query().unwrap().contains(
                 "response-content-disposition=attachment%3B%20filename%3D%22sample.json%22"
             )
+        );
+    }
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    async fn fasta_server(job: &str, body: Vec<u8>) -> (wiremock::MockServer, S3Handler) {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/jobs/{job}/inputs/fastadata.fasta")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+        let handler = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            format!("http://s3.test:{}", server.address().port()),
+        )
+        .with_bucket_host_address(*server.address());
+        (server, handler)
+    }
+
+    #[tokio::test]
+    async fn test_count_input_fasta_reads_concatenated_gzip_members() {
+        let mut body = gzip(b">a\nACGT\n");
+        body.extend(gzip(b">b\nGG\n"));
+        let (_server, handler) = fasta_server("job", body).await;
+        assert_eq!(
+            handler
+                .count_input_fasta("job", INPUT_READ_LIMIT)
+                .await
+                .unwrap(),
+            Some(FastaCount {
+                sequences: 2,
+                bases: 6
+            })
         );
     }
 
