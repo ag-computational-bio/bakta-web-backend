@@ -58,6 +58,7 @@ pub fn test_handler_full(
         unknown_submissions: Default::default(),
         deleted_jobs: Default::default(),
         live_workflows: Default::default(),
+        workflows: Default::default(),
         environment: "production".to_string(),
         stats,
     });

@@ -58,6 +58,9 @@ pub struct StateHandler {
     pub deleted_jobs: std::sync::Mutex<HashMap<Uuid, DateTime<Utc>>>,
     /// Live workflow per job from the last successful poll.
     pub live_workflows: std::sync::RwLock<HashMap<Uuid, LiveWorkflow>>,
+    /// Workflows with a `jobid` or `bakta-environment` label by name, as the
+    /// Kubernetes list and watch last reported them.
+    pub workflows: std::sync::RwLock<HashMap<String, SimpleStatus>>,
     /// Environment name for job records and the `bakta-environment` workflow label.
     pub environment: String,
     pub stats: StatsRecorder,
@@ -1029,6 +1032,7 @@ impl BaktaHandler {
         backend_version: String,
         environment: String,
         stats: StatsRecorder,
+        kube: crate::informer::KubeApi,
     ) -> Self {
         let argo_client = Arc::new(ArgoClient::new(argo_token, argo_url, argo_namespace));
         let metrics = Arc::new(AppMetrics::new());
@@ -1044,9 +1048,12 @@ impl BaktaHandler {
             unknown_submissions: Default::default(),
             deleted_jobs: Default::default(),
             live_workflows: Default::default(),
+            workflows: Default::default(),
             environment,
             stats,
         });
+
+        crate::informer::start(state_handler.clone(), kube);
 
         let state_handler_clone = state_handler.clone();
         state_handler_clone.run().await;
@@ -2725,6 +2732,7 @@ mod tests {
             unknown_submissions: Default::default(),
             deleted_jobs: Default::default(),
             live_workflows: Default::default(),
+            workflows: Default::default(),
             environment: "production".to_string(),
             stats: StatsRecorder::disabled(),
         };

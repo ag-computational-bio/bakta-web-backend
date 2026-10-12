@@ -49,6 +49,8 @@ pub(crate) struct Page<T> {
 pub(crate) struct PageMetadata {
     #[serde(rename = "continue", default)]
     pub(crate) next: Option<String>,
+    #[serde(default)]
+    pub(crate) resource_version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -112,6 +114,10 @@ struct KubeStatus {
 }
 
 impl KubeWorkflow {
+    pub(crate) fn resource_version(&self) -> Option<&str> {
+        self.metadata.resource_version.as_deref()
+    }
+
     /// Name, labels (with the job secret), spec and status in the form the
     /// Argo server lists them.
     pub(crate) fn into_simple_status(self) -> SimpleStatus {

@@ -22,6 +22,7 @@ mod argo;
 mod argo_and_catalog_tests;
 mod backfill;
 mod bakta_handler;
+mod informer;
 #[cfg(test)]
 mod job_secret_tests;
 mod metrics;
@@ -113,10 +114,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let argo_token = dotenvy::var("ARGO_TOKEN")?;
+    let argo_namespace = dotenvy::var("ARGO_NAMESPACE")?;
+    // The ARGO_TOKEN service account may list and watch the workflows.
+    let kube = informer::KubeApi::from_env(argo_token.clone(), &argo_namespace)?;
     let mut bakta_handler = BaktaHandler::new(
-        dotenvy::var("ARGO_TOKEN")?,
+        argo_token,
         dotenvy::var("ARGO_URL")?,
-        dotenvy::var("ARGO_NAMESPACE")?,
+        argo_namespace,
         dotenvy::var("S3_ACCESS_KEY")?,
         dotenvy::var("S3_SECRET_KEY")?,
         dotenvy::var("S3_BUCKET")?,
@@ -128,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         dotenvy::var("BACKEND_VERSION")?,
         environment,
         stats,
+        kube,
     )
     .await;
     bakta_handler.admin_auth = match dotenvy::var("ADMIN_OIDC_ISSUER") {

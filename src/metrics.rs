@@ -69,6 +69,10 @@ pub struct AppMetrics {
     http_request_duration_seconds: Family<HttpRequestLabels, Histogram>,
     argo_submit_errors_total: Family<WorkflowLabels, Counter>,
     argo_poll_errors_total: Counter,
+    workflow_watch_errors_total: Counter,
+    workflow_relists_total: Counter,
+    workflow_watch_last_event: Gauge,
+    workflow_last_list: Gauge,
 }
 
 impl AppMetrics {
@@ -82,6 +86,10 @@ impl AppMetrics {
             Family::new_with_constructor(build_http_request_histogram as fn() -> Histogram);
         let argo_submit_errors_total = Family::default();
         let argo_poll_errors_total = Counter::default();
+        let workflow_watch_errors_total = Counter::default();
+        let workflow_relists_total = Counter::default();
+        let workflow_watch_last_event = Gauge::default();
+        let workflow_last_list = Gauge::default();
 
         let mut registry = Registry::default();
         registry.register(
@@ -119,6 +127,26 @@ impl AppMetrics {
             "Number of Argo workflow status polling failures.",
             argo_poll_errors_total.clone(),
         );
+        registry.register(
+            "workflow_watch_errors",
+            "Number of failed workflow lists and watches of the Kubernetes API.",
+            workflow_watch_errors_total.clone(),
+        );
+        registry.register(
+            "workflow_relists",
+            "Number of full workflow lists after the watch position expired.",
+            workflow_relists_total.clone(),
+        );
+        registry.register(
+            "workflow_watch_last_event_timestamp_seconds",
+            "Unix time of the last workflow watch event, bookmark or watch start.",
+            workflow_watch_last_event.clone(),
+        );
+        registry.register(
+            "workflow_last_list_timestamp_seconds",
+            "Unix time of the last successful full workflow list.",
+            workflow_last_list.clone(),
+        );
 
         Self {
             registry: Mutex::new(registry),
@@ -129,6 +157,10 @@ impl AppMetrics {
             http_request_duration_seconds,
             argo_submit_errors_total,
             argo_poll_errors_total,
+            workflow_watch_errors_total,
+            workflow_relists_total,
+            workflow_watch_last_event,
+            workflow_last_list,
         }
     }
 
@@ -173,6 +205,22 @@ impl AppMetrics {
 
     pub fn record_poll_error(&self) {
         self.argo_poll_errors_total.inc();
+    }
+
+    pub fn record_watch_error(&self) {
+        self.workflow_watch_errors_total.inc();
+    }
+
+    pub fn record_relist(&self) {
+        self.workflow_relists_total.inc();
+    }
+
+    pub fn record_watch_event(&self, at: chrono::DateTime<chrono::Utc>) {
+        self.workflow_watch_last_event.set(at.timestamp());
+    }
+
+    pub fn record_workflow_list(&self, at: chrono::DateTime<chrono::Utc>) {
+        self.workflow_last_list.set(at.timestamp());
     }
 
     pub fn observe_http_request(
@@ -225,7 +273,7 @@ impl AppMetrics {
     path = "/metrics",
     operation_id = "getPrometheusMetrics",
     summary = "Fetch Prometheus metrics",
-    description = "Returns Prometheus-formatted counters, gauges, and histograms for job submissions, active jobs, completions, runtimes, HTTP request durations, and Argo polling or submission errors.",
+    description = "Returns Prometheus-formatted counters, gauges, and histograms for job submissions, active jobs, completions, runtimes, HTTP request durations, Argo polling or submission errors, and the health of the workflow watch.",
     responses(
         (status = 200, body = String, content_type = "text/plain", description = "Prometheus metrics output."),
         (status = 500, body = String, description = "Metrics could not be rendered.")
@@ -301,7 +349,8 @@ mod tests {
         metrics.record_job_submitted("v2", "bakta");
         metrics.record_job_completed("bakta", "succeeded", Some(Duration::from_secs(42)));
         metrics.record_submit_error("bakta");
-        metrics.record_poll_error();
+        metrics.record_watch_error();
+        metrics.record_watch_event(chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap());
         metrics.observe_http_request(
             "/api/v2/job/start".to_string(),
             "POST".to_string(),
@@ -315,6 +364,8 @@ mod tests {
         assert!(encoded.contains("workflow_kind=\"bakta\""));
         assert!(encoded.contains("jobs_active"));
         assert!(encoded.contains("http_request_duration_seconds"));
+        assert!(encoded.contains("workflow_watch_errors_total 1"));
+        assert!(encoded.contains("workflow_watch_last_event_timestamp_seconds 1700000000"));
     }
 }
 
@@ -329,6 +380,8 @@ mod name_tests {
         metrics.record_job_completed("bakta", "succeeded", None);
         metrics.record_submit_error("bakta");
         metrics.record_poll_error();
+        metrics.record_watch_error();
+        metrics.record_relist();
         let encoded = metrics.encode().unwrap();
         let names: std::collections::BTreeSet<_> = encoded
             .lines()
@@ -343,6 +396,8 @@ mod name_tests {
                 "argo_submit_errors_total",
                 "jobs_completed_total",
                 "jobs_submitted_total",
+                "workflow_relists_total",
+                "workflow_watch_errors_total",
             ]
         );
     }
