@@ -3,6 +3,7 @@
 //! Safe to run again: it only inserts missing jobs and fills empty columns.
 
 pub mod db;
+pub mod enrich;
 pub mod parse;
 pub mod summary;
 pub mod workflows;

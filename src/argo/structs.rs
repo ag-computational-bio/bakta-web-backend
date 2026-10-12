@@ -125,6 +125,10 @@ pub struct SimpleStatus {
     #[serde(default)]
     pub spec: ArgoWorkflowSpec,
     pub status: SimpleStatusStatus,
+    /// The `parameter` argument (the Bakta command line), when the workflow
+    /// came from the Kubernetes API. Used to fill the job details.
+    #[serde(skip)]
+    pub parameter: Option<String>,
 }
 
 impl From<&SimpleStatus> for ArgoWorkflow {

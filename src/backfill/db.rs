@@ -34,6 +34,15 @@ pub struct BackfillJob {
     pub argo_uid: Option<Uuid>,
 }
 
+/// Details that a job record lacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::FromRow)]
+pub struct MissingDetails {
+    /// Organism and input options, or versions.
+    pub details: bool,
+    pub size: bool,
+    pub database_version: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fill {
     Inserted,
@@ -159,6 +168,19 @@ impl StatsDb {
             Some(false) => Fill::Filled,
             None => Fill::Unchanged,
         })
+    }
+
+    /// Which details the record of job `id` lacks, `None` without a record.
+    pub async fn missing_details(&self, id: Uuid) -> Result<Option<MissingDetails>> {
+        Ok(sqlx::query_as(
+            "SELECT config IS NULL OR (bakta_version IS NULL AND baktfold_version IS NULL) AS details,
+                 total_length IS NULL OR sequence_count IS NULL AS size,
+                 bakta_db_version IS NULL AS database_version
+             FROM jobs WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await?)
     }
 
     /// Jobs whose genome size is recorded, so their input is not read again.

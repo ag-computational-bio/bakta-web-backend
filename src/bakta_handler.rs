@@ -75,6 +75,8 @@ pub struct StateHandler {
     pub(crate) completions: std::sync::Mutex<crate::informer::Completions>,
     /// Writes to the `workflows` table that failed and are repeated.
     pub(crate) unwritten: std::sync::Mutex<crate::informer::Unwritten>,
+    /// Fills the details of finished jobs in the background, with a database.
+    pub(crate) enricher: std::sync::OnceLock<crate::backfill::enrich::Enricher>,
     /// Environment name for job records and the `bakta-environment` workflow label.
     pub environment: String,
     /// Also manage workflows without a `bakta-environment` label whose
@@ -1190,6 +1192,12 @@ impl BaktaHandler {
     ) -> Self {
         let argo_client = Arc::new(ArgoClient::new(argo_token, argo_url, argo_namespace));
         let metrics = Arc::new(AppMetrics::new());
+        let enrichment_s3 = S3Handler::new(
+            s3_access_key.clone(),
+            s3_secret_key.clone(),
+            bucket.clone(),
+            endpoint.clone(),
+        );
         let s3_handler = S3Handler::new(s3_access_key, s3_secret_key, bucket, endpoint);
 
         let state_handler = Arc::new(StateHandler {
@@ -1209,11 +1217,16 @@ impl BaktaHandler {
             lists: Default::default(),
             completions: Default::default(),
             unwritten: Default::default(),
+            enricher: Default::default(),
             environment,
             manage_legacy_production,
             stats,
         });
 
+        if let Some(db) = state_handler.stats.db() {
+            let enricher = crate::backfill::enrich::Enricher::start(db.clone(), enrichment_s3);
+            let _ = state_handler.enricher.set(enricher);
+        }
         crate::informer::start(state_handler.clone(), kube);
 
         BaktaHandler {
@@ -1302,6 +1315,8 @@ impl StateHandler {
         };
         let mut for_memory = Vec::new();
         let mut polled = Vec::new();
+        // Finished jobs whose details are filled after their state is written.
+        let mut finished = Vec::new();
         let mut metadata = Vec::new();
         let mut deferred = deferred;
         let mut incomplete = false;
@@ -1375,6 +1390,9 @@ impl StateHandler {
             let environment = workflow_environment(&item.metadata.labels);
             if let Some(mut workflow_state) = polled_workflow_state(&state, environment, item) {
                 workflow_state.job.secret_hash = hashes.get(&item.metadata.name).cloned();
+                if stats::is_terminal_status(workflow_state.status) {
+                    finished.push((item.clone(), workflow_state.job.secret_hash.clone()));
+                }
                 polled.push(workflow_state);
             }
         }
@@ -1390,6 +1408,9 @@ impl StateHandler {
             {
                 return None;
             }
+        }
+        for (item, secret_hash) in &finished {
+            self.request_enrichment(item, secret_hash.clone());
         }
         for chunk in metadata.chunks(STATS_EVENT_CHUNK) {
             self.stats
@@ -1743,6 +1764,9 @@ impl StateHandler {
             }
             let environment = workflow_environment(&item.metadata.labels);
             polled.extend(polled_workflow_state(&state, environment, &item));
+            if is_terminal_status(state.status.as_ref()) {
+                self.request_enrichment(&item, state.secret.as_deref().map(stats::secret_hash));
+            }
             if let Some(previous) = write_lock.get(&state.id)
                 && !is_terminal_status(previous.status.as_ref())
                 && is_terminal_status(state.status.as_ref())
@@ -2448,6 +2472,29 @@ impl StateHandler {
     fn manages_record(&self, environment: &str) -> bool {
         environment == self.environment
             || (self.manage_legacy_production && environment == "production")
+    }
+
+    /// Asks to fill the details of the job of a finished workflow (best
+    /// effort, in the background), see `backfill::enrich`.
+    fn request_enrichment(&self, item: &SimpleStatus, secret_hash: Option<String>) {
+        let Some(enricher) = self.enricher.get() else {
+            return;
+        };
+        let mut item = item.clone();
+        item.metadata.labels.remove("secret");
+        let template = item
+            .spec
+            .workflow_template_ref
+            .as_ref()
+            .map(|template| template.name.clone())
+            .unwrap_or_default();
+        let parameter = item.parameter.take().unwrap_or_default();
+        enricher.request(crate::backfill::workflows::Workflow {
+            item,
+            template,
+            parameter,
+            secret_hash,
+        });
     }
 
     pub(crate) fn is_deleted(&self, job_id: &Uuid) -> bool {
@@ -3279,6 +3326,7 @@ mod tests {
             lists: Default::default(),
             completions: Default::default(),
             unwritten: Default::default(),
+            enricher: Default::default(),
             environment: "production".to_string(),
             manage_legacy_production: false,
             stats: StatsRecorder::disabled(),

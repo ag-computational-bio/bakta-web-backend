@@ -84,6 +84,7 @@ pub fn test_handler_in(
         lists: Default::default(),
         completions: Default::default(),
         unwritten: Default::default(),
+        enricher: Default::default(),
         environment: environment.to_string(),
         manage_legacy_production,
         stats,
@@ -284,6 +285,7 @@ pub fn simple_status(workflow: &crate::argo::structs::ArgoWorkflow) -> SimpleSta
             finished_at: workflow.status.finished_at,
             message: workflow.status.message.clone(),
         },
+        parameter: None,
     }
 }
 

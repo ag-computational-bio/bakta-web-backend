@@ -127,6 +127,13 @@ impl KubeWorkflow {
     pub(crate) fn into_simple_status(self) -> SimpleStatus {
         let metadata = self.metadata;
         let status = self.status;
+        let parameter = self
+            .spec
+            .arguments
+            .parameters
+            .into_iter()
+            .find(|parameter| parameter.name == "parameter")
+            .map(|parameter| parameter.value);
         SimpleStatus {
             metadata: StatusMetadata {
                 name: metadata.name,
@@ -153,18 +160,15 @@ impl KubeWorkflow {
                 finished_at: status.finished_at,
                 message: status.message,
             },
+            parameter,
         }
     }
 }
 
 fn parse_workflow(value: serde_json::Value) -> Result<Workflow> {
-    let mut workflow: KubeWorkflow = serde_json::from_value(value)?;
-    let parameter = std::mem::take(&mut workflow.spec.arguments.parameters)
-        .into_iter()
-        .find(|parameter| parameter.name == "parameter")
-        .map(|parameter| parameter.value)
-        .unwrap_or_default();
+    let workflow: KubeWorkflow = serde_json::from_value(value)?;
     let mut item = workflow.into_simple_status();
+    let parameter = item.parameter.take().unwrap_or_default();
     // The job secret grants access to the results: only its hash is kept.
     let secret_hash = item
         .metadata

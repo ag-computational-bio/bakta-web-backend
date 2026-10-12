@@ -140,6 +140,10 @@ Each backend manages only the jobs of its own environment: the job state in memo
 
 Independently, a job record never switches from its recorded workflow to an older attempt: a workflow update only replaces the recorded workflow with one that was created at the same time or later (`workflow_created_at`). And a finished job in memory whose workflow is no longer watched takes a newer attempt of the job as current, when that attempt was created after the job finished. The workflow list and the bulk actions use the same rule to filter workflows by environment.
 
+### Details of finished jobs
+
+The old production backend records nothing at the start, so its jobs only get the workflow state from the watch. When this backend records a finished job (from the watch or the reconcile) whose record lacks details, it fills them in the background with the rules of the backfill (see "Backfill"): organism, `config` and versions from the workflow's `parameter` argument and template name, and the genome size and database version from S3 (summary, or the input FASTA as above). Only empty columns are filled. Records with all details are skipped. Two workers do this after a pause of 5 seconds, so the job state is written first. It is best effort: a full queue (256 requests) drops requests, and failures are only logged. It never delays the job state, readiness or user requests. Bakta Proteins and Baktfold jobs have no genome size.
+
 ### Input statistics in the V2 start request
 
 The V2 start request gets an optional top level field, ignored by older clients:
@@ -166,6 +170,7 @@ The web UI fills it from the parsed FASTA input. The backend stores it in `seque
 - Environment, origin, status, outcome, times, runtime, queue time and error message are derived like in the poll. A job past the 35 day job retention gets status `expired` with its `outcome`.
 - Organism and `config` come from the Bakta command line of the workflow, in the shape the start request of its API version is stored. Bakta and Baktfold versions come from the template name.
 - For succeeded `bakta` and `bakta_baktfold` jobs, `total_length`, `sequence_count` and `bakta_db_version` come from Bakta's summary `jobs/<id>/results/result.txt` in S3, if it still exists.
+- Other `bakta` and `bakta_baktfold` jobs without size (failed and error jobs, or a missing summary) get `total_length` and `sequence_count` from their input `jobs/<id>/inputs/fastadata.fasta`: the number of header lines (starting with `>`) and the characters of the other lines that are not whitespace. A gzip file (by its first bytes) is read through gzip. At most 1 GB is read, within 120 seconds. The database version never comes from the input. Jobs that have a size already are not read again.
 - `secret_hash`, `result_kind` and `argo_uid` are filled like the other columns.
 - Running it again changes nothing that is already filled. Errors of single jobs are logged and skipped. It logs progress every 1000 jobs and a final summary (`inserted`, `filled`, `skipped`, `s3_missing`, `errors`).
 

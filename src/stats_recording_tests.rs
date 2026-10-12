@@ -1306,3 +1306,135 @@ async fn finished_jobs_of_another_environment_are_not_served() {
         assert_eq!(found.is_some(), served, "{environment}");
     }
 }
+
+#[tokio::test]
+async fn completed_jobs_without_details_are_enriched_in_the_background() {
+    let Some(db) = test_db("completed_jobs_without_details_are_enriched").await else {
+        return;
+    };
+    let now = Utc::now();
+    let (succeeded, failed, complete) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let s3 = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/jobs/{succeeded}/results/result.txt")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("Sequence(s):\nLength: 5594605\nCount: 3\nDatabase: v6.0, full\n"),
+        )
+        .mount(&s3)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/jobs/{failed}/inputs/fastadata.fasta")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(">a\nACGT\n>b\nGG\n"))
+        .mount(&s3)
+        .await;
+    let s3_url = format!("http://s3.test:{}", s3.address().port());
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        &s3_url,
+        StatsRecorder::new(db.clone(), JobVersions::default()),
+    );
+    let enrichment_s3 = crate::s3_handler::S3Handler::new(
+        "access".to_string(),
+        "secret".to_string(),
+        "bucket".to_string(),
+        s3_url.clone(),
+    )
+    .with_bucket_host_address(*s3.address());
+    let _ = handler
+        .state_handler
+        .enricher
+        .set(crate::backfill::enrich::Enricher::start(
+            db.clone(),
+            enrichment_s3,
+        ));
+    // Production jobs of the old backend: the records only come from the watch.
+    let workflow = |id: Uuid, name: &str, phase: &str| {
+        let mut item = job_workflow(id, name, phase, now - Duration::minutes(10), Some(now));
+        item.metadata
+            .labels
+            .insert("bakta-environment".to_string(), "production".to_string());
+        item.spec.workflow_template_ref = Some(crate::argo::structs::WorkflowTemplateRef {
+            name: "bakta-job-1.12.0".to_string(),
+        });
+        item.parameter =
+            Some("--complete --genus 'Escherichia' --strain 'K-12' --gram ?".to_string());
+        item
+    };
+    // A job whose record has all details is not read again.
+    sqlx::query(
+        "INSERT INTO jobs (id, environment, workflow_kind, api_version, status, created_at,
+                           config, bakta_version, total_length, sequence_count, bakta_db_version)
+         VALUES ($1, 'production', 'bakta', 'v1', 'running', now(), '{}', '1.12.0', 10, 1, '6.0')",
+    )
+    .bind(complete)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    handler
+        .state_handler
+        .apply_workflow_statuses(
+            vec![
+                workflow(succeeded, "wf-ok", "Succeeded"),
+                workflow(failed, "wf-failed", "Failed"),
+                workflow(complete, "wf-complete", "Succeeded"),
+            ],
+            now,
+        )
+        .await;
+    let filled = |id: Uuid| {
+        let db = db.clone();
+        async move {
+            sqlx::query("SELECT * FROM jobs WHERE id = $1")
+                .bind(id)
+                .fetch_optional(db.pool())
+                .await
+                .unwrap()
+                .filter(|row| row.get::<Option<i64>, _>("total_length").is_some())
+        }
+    };
+    let mut rows = Vec::new();
+    for id in [succeeded, failed] {
+        let mut row = None;
+        for _ in 0..200 {
+            row = filled(id).await;
+            if row.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        rows.push(row.expect("the job is enriched"));
+    }
+    let ok = &rows[0];
+    assert_eq!(ok.get::<Option<i64>, _>("total_length"), Some(5_594_605));
+    assert_eq!(ok.get::<Option<i32>, _>("sequence_count"), Some(3));
+    assert_eq!(
+        ok.get::<Option<String>, _>("bakta_db_version").as_deref(),
+        Some("6.0")
+    );
+    assert_eq!(
+        ok.get::<Option<String>, _>("genus").as_deref(),
+        Some("Escherichia")
+    );
+    assert_eq!(
+        ok.get::<Option<String>, _>("bakta_version").as_deref(),
+        Some("1.12.0")
+    );
+    assert!(ok.get::<Option<Value>, _>("config").is_some());
+    // A failed job has no summary: the size comes from the input FASTA.
+    let failed_row = &rows[1];
+    assert_eq!(failed_row.get::<Option<i64>, _>("total_length"), Some(6));
+    assert_eq!(failed_row.get::<Option<i32>, _>("sequence_count"), Some(2));
+    assert_eq!(
+        failed_row.get::<Option<String>, _>("bakta_db_version"),
+        None
+    );
+    assert_eq!(failed_row.get::<String, _>("status"), "failed");
+    assert!(
+        s3.received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| !request.url.path().contains(&complete.to_string()))
+    );
+}
