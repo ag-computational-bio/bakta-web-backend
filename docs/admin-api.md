@@ -415,7 +415,7 @@ After a delete (admin or user) or an expiry, the workflow updates never add the 
 `409` with `{ "error": "The result of an earlier start request is not known yet, try again later" }` while an earlier start request may have created a workflow that the backend has not found yet (see Unresolved start requests). The user delete endpoints (`DELETE /api/v1/job/delete`, `DELETE /api/v2/job/delete`) answer `409` in the same case.
 When the backend knows no workflow name for the job (for example a start request created a workflow, but the backend restarted before a poll found it), the delete first looks up live workflows with the job's `jobid` label in Argo and deletes them. If that lookup fails, the delete answers `503` and changes nothing: no workflow is deleted, no S3 data is purged and the job is not marked `deleted`. The user delete endpoints do the same lookup for jobs that are in memory and also answer `503` when it fails. A job that is not in memory and has a record (a finished job) is deleted like a job in memory after its secret was checked against `secret_hash`: its workflow by name and its archive record by `argo_uid`. A job that is neither in memory nor in the database is not looked up: the user delete answers `200` without contacting Argo.
 
-### `GET /workflows?environment&phase&orphans`
+### `GET /workflows?environment&phase&orphans&limit&offset`
 
 For this endpoint and for `POST /workflows/bulk`, `environment` defaults to the backend's own `ENVIRONMENT`. The backend keeps the Bakta Web workflows whose environment, derived as in "Environment of a workflow", matches. So workflows without a `bakta-environment` label are found too.
 
@@ -424,8 +424,10 @@ With the statistics database, this endpoint and the bulk preview read the `workf
 Live Argo workflows of this backend, including ones without a job record. `phase`: comma separated (`Pending`, `Running`, `Succeeded`, `Failed`, `Error`).
 
 ```json
-{ "items": [ { "name": "...", "job_id": "...", "workflow_kind": "bakta", "phase": "Failed", "template": "bakta-job-1.12.2", "environment": "production", "started_at": "...", "finished_at": "...", "message": "...", "suspended": false } ] }
+{ "items": [ { "name": "...", "job_id": "...", "workflow_kind": "bakta", "phase": "Failed", "template": "bakta-job-1.12.2", "environment": "production", "started_at": "...", "finished_at": "...", "message": "...", "suspended": false } ], "total": 1 }
 ```
+
+The list has one page of the matching workflows, newest first: `limit` (default 1000, at most 5000) workflows after skipping `offset` (default 0). `total` is the number of all matching workflows, also those outside the page, after the `phase` and `orphans` filters. Use `total` for counts, not the length of `items`.
 
 `job_id` is null when the workflow has no `jobid` label. `workflow_kind` is null when the workflow has no `workflow-kind` label. `environment` is the derived environment.
 With `orphans=true`, only workflows without a matching job record are returned: no `jobid` label, or a job ID that is not in the statistics database. This needs the statistics database (`503` without it).
@@ -445,7 +447,8 @@ Runs one action on all live workflows that match a filter.
   },
   "action": "delete",
   "dry_run": true,
-  "workflow_names": ["..."]
+  "workflow_names": ["..."],
+  "limit": 1000
 }
 ```
 
@@ -460,6 +463,7 @@ Runs one action on all live workflows that match a filter.
 - `retry` and `resubmit` do not apply when the input data is gone: `applicable` is false and `reason` is `Input data deleted after the retention period`. The reference time is the job's `finished_at` or `created_at` (see Data retention). For a workflow without a job record, it is the workflow's finish time or, if it has none, its creation time.
 - `resubmit` does not apply to a workflow of a deleted job (same rule as the single resubmit): `applicable` is false and `reason` is `Job was deleted`.
 - In a real run, `resubmit` is skipped while the job is being started, deleted or resubmitted: `applicable` is false and `reason` is `Job is busy, try again later`. A dry run does not check this. A real `resubmit` reserves the job before it checks which workflow is current, and keeps it reserved until the result is recorded. While a bulk run holds the reservation, other start, delete and resubmit requests for the job are refused with `409`.
+- `limit` (default 1000, at most 5000): at most this many matching workflows are listed (dry run) or processed (real run), newest first. The response has `total`, the number of all matching workflows, and `truncated`, true when more workflows match than `items` has. Applicability is checked for the listed workflows only.
 - Workflows are processed one by one. One failure does not stop the others. Each action is logged with the admin user name.
 
 Response:
@@ -470,7 +474,9 @@ Response:
   "action": "delete",
   "items": [
     { "name": "...", "job_id": "...", "workflow_kind": "bakta", "phase": "Failed", "finished_at": "...", "applicable": true, "result": null, "error": null, "reason": null }
-  ]
+  ],
+  "total": 1,
+  "truncated": false
 }
 ```
 

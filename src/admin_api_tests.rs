@@ -639,6 +639,17 @@ async fn admin_workflows_can_list_orphans_only() {
         .collect();
     names.sort();
     assert_eq!(names, ["bad-label", "no-label", "unknown"]);
+    // The total counts all orphans, also beyond the page.
+    assert_eq!(body["total"], 3);
+    let (_, body) = admin_call(
+        &setup,
+        "GET",
+        "/api/admin/workflows?orphans=true&limit=1",
+        None,
+    )
+    .await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["total"], 3);
     let (_, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
     assert_eq!(body["items"].as_array().unwrap().len(), 4);
     // Both lists come from the table, not from Argo.

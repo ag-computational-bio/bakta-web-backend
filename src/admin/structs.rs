@@ -146,6 +146,10 @@ pub struct WorkflowListParams {
     pub phase: Option<String>,
     /// Only workflows without a matching job record.
     pub orphans: Option<bool>,
+    /// Page size, default 1000, at most 5000.
+    pub limit: Option<i64>,
+    /// Matching workflows to skip, default 0.
+    pub offset: Option<i64>,
 }
 
 /// A live Argo workflow of this backend.
@@ -171,6 +175,8 @@ pub struct WorkflowSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WorkflowListResponse {
     pub items: Vec<WorkflowSummary>,
+    /// Number of all matching workflows, also those outside the page.
+    pub total: usize,
 }
 
 /// Filter of a bulk action. All fields are optional and combine with AND.
@@ -205,6 +211,9 @@ pub struct BulkRequest {
     pub dry_run: Option<bool>,
     /// When given, only these workflows are processed, if they still match the filter.
     pub workflow_names: Option<Vec<String>>,
+    /// At most this many matching workflows are listed or processed,
+    /// newest first. Default 1000, at most 5000.
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -235,4 +244,8 @@ pub struct BulkResponse {
     pub dry_run: bool,
     pub action: BulkAction,
     pub items: Vec<BulkItem>,
+    /// Number of all matching workflows.
+    pub total: usize,
+    /// True when `items` stops at `limit` and more workflows match.
+    pub truncated: bool,
 }

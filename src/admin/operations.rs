@@ -558,6 +558,10 @@ pub(crate) fn is_bakta_web_workflow(workflow: &ArgoWorkflow) -> bool {
                 .is_some_and(|template| is_bakta_web_template(&template.name)))
 }
 
+/// Default and largest page size of the workflow list and bulk actions.
+const WORKFLOW_LIMIT: usize = 1000;
+const MAX_WORKFLOW_LIMIT: usize = 5000;
+
 /// True for Bakta Web workflows of `environment`, or of all with `None`.
 fn in_environment(environment: Option<&str>, workflow: &ArgoWorkflow) -> bool {
     is_bakta_web_workflow(workflow)
@@ -652,8 +656,15 @@ pub async fn list_workflows(
             .map_err(AdminError::database)?;
         workflows.retain(|workflow| job_id(workflow).is_none_or(|id| !known.contains(&id)));
     }
+    let total = workflows.len();
+    let limit = params.limit.map_or(WORKFLOW_LIMIT, |limit| {
+        limit.clamp(1, MAX_WORKFLOW_LIMIT as i64) as usize
+    });
+    let offset = params.offset.unwrap_or(0).max(0) as usize;
     let items = workflows
         .into_iter()
+        .skip(offset)
+        .take(limit)
         .map(|workflow| {
             let suspended = workflow.is_suspended();
             let labels = &workflow.metadata.labels;
@@ -674,7 +685,7 @@ pub async fn list_workflows(
             }
         })
         .collect();
-    Ok(Json(WorkflowListResponse { items }))
+    Ok(Json(WorkflowListResponse { items, total }))
 }
 
 /// Why `action` does not apply to `workflow` because of its phase, or `None`.
@@ -917,6 +928,11 @@ pub async fn bulk_workflows(
                 .is_none_or(|names| names.contains(&workflow.metadata.name))
         })
         .collect();
+    let total = workflows.len();
+    let limit = request
+        .limit
+        .map_or(WORKFLOW_LIMIT, |limit| limit.clamp(1, MAX_WORKFLOW_LIMIT));
+    let workflows: Vec<_> = workflows.into_iter().take(limit).collect();
 
     let mut items = Vec::with_capacity(workflows.len());
     for workflow in workflows {
@@ -1070,5 +1086,7 @@ pub async fn bulk_workflows(
         dry_run,
         action,
         items,
+        total,
+        truncated: total > limit,
     }))
 }

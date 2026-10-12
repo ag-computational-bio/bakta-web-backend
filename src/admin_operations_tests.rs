@@ -2609,3 +2609,58 @@ async fn admin_actions_update_the_workflow_table() {
     let (_, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
     assert!(body["items"].as_array().unwrap().is_empty(), "{body}");
 }
+
+#[tokio::test]
+async fn workflow_list_and_bulk_actions_are_limited_with_totals() {
+    let argo = workflow_list_argo().await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    store_listed_workflows(&setup.handler, &workflow_list()).await;
+
+    let (status, body) =
+        admin_call(&setup, "GET", "/api/admin/workflows?limit=2&offset=1", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), ["old-error", "new-failed"]);
+    assert_eq!(body["total"], 6);
+    let (_, body) = admin_call(&setup, "GET", "/api/admin/workflows", None).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 6);
+    assert_eq!(body["total"], 6);
+
+    // The preview says when more workflows match than it lists.
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        "/api/admin/workflows/bulk",
+        Some(json!({"action": "delete", "limit": 2})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), ["old-failed", "old-error"]);
+    assert_eq!(body["total"], 6);
+    assert_eq!(body["truncated"], true);
+    let (_, body) = admin_call(
+        &setup,
+        "POST",
+        "/api/admin/workflows/bulk",
+        Some(json!({"action": "delete"})),
+    )
+    .await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 6);
+    assert_eq!(body["truncated"], false);
+
+    // A real run acts on at most `limit` workflows too.
+    let (_, body) = admin_call(
+        &setup,
+        "POST",
+        "/api/admin/workflows/bulk",
+        Some(json!({"action": "delete", "dry_run": false, "limit": 1,
+                    "filter": {"phases": ["Failed"]}})),
+    )
+    .await;
+    assert_eq!(names(&body), ["old-failed"]);
+    assert_eq!(body["total"], 2);
+    assert_eq!(body["truncated"], true);
+    assert_eq!(
+        argo_changes(argo.received_requests().await.unwrap()),
+        ["DELETE /api/v1/workflows/bakta/old-failed"]
+    );
+}
