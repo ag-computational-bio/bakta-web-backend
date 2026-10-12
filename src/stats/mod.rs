@@ -443,13 +443,60 @@ impl StatsDb {
 }
 
 /// Sends job lifecycle events to the statistics database in the background.
-/// Events are written in order by a single worker. When recording is
-/// disabled, every call is a no-op.
+/// Events are written in order by a single worker. Events that keep the
+/// state of jobs (see `StatsEvent::is_durable`) are retried with a pause of
+/// 1 to 10 seconds until they are written, later events wait for them.
+/// Statistics-only events are tried a few times and then dropped. When
+/// recording is disabled, every call is a no-op.
 #[derive(Clone, Default)]
 pub struct StatsRecorder {
-    sender: Option<mpsc::Sender<StatsEvent>>,
+    sink: Option<Sink>,
     db: Option<StatsDb>,
     pub versions: JobVersions,
+}
+
+#[derive(Clone)]
+enum Sink {
+    Writer(mpsc::Sender<Queued>),
+    /// Tests: events go to a receiver instead of the database.
+    #[cfg(test)]
+    Capture(mpsc::Sender<StatsEvent>),
+}
+
+/// An event and, for `persist`, the confirmation that it was written.
+type Queued = (StatsEvent, Option<tokio::sync::oneshot::Sender<()>>);
+
+/// Attempts of a statistics-only event before it is dropped.
+const STATS_ONLY_ATTEMPTS: u32 = 3;
+const MIN_RETRY: Duration = Duration::from_secs(1);
+const MAX_RETRY: Duration = Duration::from_secs(10);
+
+/// A write that `persist` could not confirm in time. Answered with `503`.
+/// The write stays queued and is still retried.
+#[derive(Debug)]
+pub struct RecordWriteFailed;
+
+impl std::fmt::Display for RecordWriteFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "The job database is not available, try again later")
+    }
+}
+
+impl std::error::Error for RecordWriteFailed {}
+
+impl StatsEvent {
+    /// Events that keep the state of jobs, which the user API serves from
+    /// the database. The others only feed the statistics.
+    fn is_durable(&self) -> bool {
+        matches!(
+            self,
+            StatsEvent::Created(_)
+                | StatsEvent::Polled(_)
+                | StatsEvent::Resubmitted { .. }
+                | StatsEvent::Deleted { .. }
+                | StatsEvent::Expired { .. }
+        )
+    }
 }
 
 impl StatsRecorder {
@@ -459,21 +506,37 @@ impl StatsRecorder {
 
     /// Starts the background writer. Must be called inside a Tokio runtime.
     pub fn new(db: StatsDb, versions: JobVersions) -> Self {
-        let (sender, mut receiver) = mpsc::channel::<StatsEvent>(EVENT_QUEUE_SIZE);
+        let (sender, mut receiver) = mpsc::channel::<Queued>(EVENT_QUEUE_SIZE);
         let worker_db = db.clone();
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
-                match tokio::time::timeout(WRITE_TIMEOUT, worker_db.apply(&event)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
+            while let Some((event, written)) = receiver.recv().await {
+                let mut attempt = 0;
+                let mut pause = MIN_RETRY;
+                loop {
+                    attempt += 1;
+                    let error =
+                        match tokio::time::timeout(WRITE_TIMEOUT, worker_db.apply(&event)).await {
+                            Ok(Ok(())) => {
+                                if let Some(written) = written {
+                                    let _ = written.send(());
+                                }
+                                break;
+                            }
+                            Ok(Err(error)) => error.to_string(),
+                            Err(_) => "timed out".to_string(),
+                        };
+                    if !event.is_durable() && attempt >= STATS_ONLY_ATTEMPTS {
                         tracing::warn!(%error, ?event, "stats_write_failed");
+                        break;
                     }
-                    Err(_) => tracing::warn!(?event, "stats_write_timed_out"),
+                    tracing::warn!(%error, attempt, ?event, "stats_write_retry");
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(MAX_RETRY);
                 }
             }
         });
         Self {
-            sender: Some(sender),
+            sink: Some(Sink::Writer(sender)),
             db: Some(db),
             versions,
         }
@@ -484,7 +547,7 @@ impl StatsRecorder {
     pub fn capturing() -> (Self, mpsc::Receiver<StatsEvent>) {
         let (sender, receiver) = mpsc::channel(EVENT_QUEUE_SIZE);
         let recorder = Self {
-            sender: Some(sender),
+            sink: Some(Sink::Capture(sender)),
             db: None,
             versions: JobVersions::default(),
         };
@@ -510,11 +573,46 @@ impl StatsRecorder {
     }
 
     pub fn record(&self, event: StatsEvent) {
-        let Some(sender) = &self.sender else {
-            return;
+        let result = match &self.sink {
+            None => return,
+            Some(Sink::Writer(sender)) => sender.try_send((event, None)).map_err(|e| e.to_string()),
+            #[cfg(test)]
+            Some(Sink::Capture(sender)) => sender.try_send(event).map_err(|e| e.to_string()),
         };
-        if let Err(error) = sender.try_send(event) {
+        if let Err(error) = result {
             tracing::warn!(%error, "stats_event_dropped");
+        }
+    }
+
+    /// Queues `event` and waits until it is written, at most `wait`. Fails
+    /// with `RecordWriteFailed` when it was not written in time; the event
+    /// stays queued and is retried. Without a database it succeeds at once.
+    pub async fn persist(&self, event: StatsEvent, wait: Duration) -> anyhow::Result<()> {
+        let sender = match &self.sink {
+            None => return Ok(()),
+            Some(Sink::Writer(sender)) => sender,
+            #[cfg(test)]
+            Some(Sink::Capture(sender)) => {
+                // The test reads the events like the writer.
+                return sender
+                    .send(event)
+                    .await
+                    .map_err(|_| RecordWriteFailed.into());
+            }
+        };
+        let (written, confirmed) = tokio::sync::oneshot::channel();
+        let deadline = tokio::time::Instant::now() + wait;
+        let sent = tokio::time::timeout_at(deadline, sender.send((event, Some(written)))).await;
+        if !matches!(sent, Ok(Ok(()))) {
+            tracing::warn!("stats_persist_not_queued");
+            return Err(RecordWriteFailed.into());
+        }
+        match tokio::time::timeout_at(deadline, confirmed).await {
+            Ok(Ok(())) => Ok(()),
+            _ => {
+                tracing::warn!("stats_persist_not_confirmed");
+                Err(RecordWriteFailed.into())
+            }
         }
     }
 }

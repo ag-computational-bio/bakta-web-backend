@@ -1248,3 +1248,68 @@ async fn a_failed_gone_write_after_an_admin_delete_is_repeated() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn the_reconcile_completes_only_when_the_job_records_are_written() {
+    let Some(db) = test_db("the_reconcile_completes_only_when").await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    let done = kube_workflow("wf-p", id, "Succeeded", true, 7);
+    let kube = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", LIVE))
+        .and(query_param_is_missing("watch"))
+        .respond_with(page(Vec::new(), "", "10"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("watch", "true"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .respond_with(page(vec![done.clone()], "", "10"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{WORKFLOWS}/wf-p")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(done.clone()))
+        .mount(&kube)
+        .await;
+    fail_job_writes(&db).await;
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new((*db).clone(), JobVersions::default()),
+    );
+    let state = handler.state_handler.clone();
+    start(
+        state.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the list", || async {
+        state.ready.load(std::sync::atomic::Ordering::Relaxed)
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(!state.reconciled.load(std::sync::atomic::Ordering::Relaxed));
+    allow_job_writes(&db).await;
+    wait_for("the job record", || async {
+        job_status(&db, id).await.as_deref() == Some("succeeded")
+    })
+    .await;
+    wait_for("the reconcile", || async {
+        state.reconciled.load(std::sync::atomic::Ordering::Relaxed)
+    })
+    .await;
+}

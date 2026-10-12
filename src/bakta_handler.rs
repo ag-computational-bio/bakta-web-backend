@@ -537,6 +537,9 @@ fn current_workflows(
 
 const MAX_ERROR_MESSAGE_LENGTH: usize = 500;
 
+/// Time the reconcile waits until the final states of jobs are written.
+const RECONCILE_WRITE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Rows per write to the `workflows` table, and the time each write may take.
 const TABLE_WRITE_CHUNK: usize = 2000;
 const TABLE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -1320,8 +1323,18 @@ impl StateHandler {
                 polled.push(workflow_state);
             }
         }
+        // The final states of jobs that are not in memory are only in the
+        // database: the reconcile is complete only when they are written.
         for chunk in polled.chunks(STATS_EVENT_CHUNK) {
-            self.stats.record(StatsEvent::Polled(chunk.to_vec()));
+            let write = StatsEvent::Polled(chunk.to_vec());
+            if self
+                .stats
+                .persist(write, RECONCILE_WRITE_WAIT)
+                .await
+                .is_err()
+            {
+                return None;
+            }
         }
         for chunk in metadata.chunks(STATS_EVENT_CHUNK) {
             self.stats

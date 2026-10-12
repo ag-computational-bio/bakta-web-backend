@@ -286,3 +286,28 @@ pub async fn mount_workflow_gets(argo: &MockServer, list: &Value) {
             .await;
     }
 }
+
+/// Makes every insert and update of job records fail, until dropped.
+pub async fn fail_job_writes(db: &crate::stats::StatsDb) {
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION fail_job_writes() RETURNS trigger LANGUAGE plpgsql
+         AS $$ BEGIN RAISE EXCEPTION 'job records are read only'; END $$",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_job_writes BEFORE INSERT OR UPDATE ON jobs
+         FOR EACH ROW EXECUTE FUNCTION fail_job_writes()",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
+pub async fn allow_job_writes(db: &crate::stats::StatsDb) {
+    sqlx::query("DROP TRIGGER fail_job_writes ON jobs")
+        .execute(db.pool())
+        .await
+        .unwrap();
+}
