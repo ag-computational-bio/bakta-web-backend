@@ -2849,3 +2849,61 @@ async fn admin_logs_and_deletes_of_finished_jobs_use_the_archive() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["deleted_workflow"], true, "{body}");
 }
+
+#[tokio::test]
+async fn an_admin_resubmit_of_another_environment_keeps_no_local_state() {
+    let Some(db) = test_db("an_admin_resubmit_of_another_environment").await else {
+        return;
+    };
+    let id = finished_record(&db, Uuid::new_v4()).await;
+    sqlx::query("UPDATE jobs SET environment = 'staging' WHERE id = $1")
+        .bind(id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let argo = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-done/resubmit"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "metadata": {"name": "wf-new", "creationTimestamp": Utc::now().to_rfc3339(),
+                         "labels": {"jobid": id.to_string(), "bakta-environment": "staging",
+                                    "secret": TEST_SECRET}},
+            "status": {"phase": "Pending"}
+        })))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    // A production backend resubmits a staging job.
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        &format!("/api/admin/jobs/{id}/resubmit"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !setup
+            .handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
+    // The shared record points to the new workflow.
+    for _ in 0..50 {
+        let name: Option<String> =
+            sqlx::query_scalar("SELECT workflow_name FROM jobs WHERE id = $1")
+                .bind(id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        if name.as_deref() == Some("wf-new") {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the record was not updated");
+}

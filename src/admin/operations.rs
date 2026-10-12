@@ -244,13 +244,21 @@ async fn after_retry(
 /// Points the job state and record to the new workflow after an Argo resubmit
 /// of `old_name`. A job without job state gets one, so the next poll takes
 /// the new workflow as current even when the database still names the old one.
+/// A workflow of another environment only updates the shared record: this
+/// backend does not follow its changes, so it keeps no job state for it.
 async fn after_resubmit(state: &BaktaHandler, id: Uuid, old_name: &str, workflow: &ArgoWorkflow) {
     let handler = &state.state_handler;
     let now = Utc::now();
     let created_at = workflow.metadata.creation_timestamp.unwrap_or(now);
     // Record while holding the lock, so the event is ordered with the poll.
     let mut job_state = handler.job_state.write().await;
+    let owned = handler.manages(&workflow.metadata.labels);
     match job_state.entry(id) {
+        // Old state of such a job would not be updated any more.
+        Entry::Occupied(entry) if !owned => {
+            entry.remove();
+        }
+        Entry::Vacant(_) if !owned => {}
         Entry::Occupied(mut entry) => {
             let job = entry.get_mut();
             if job
