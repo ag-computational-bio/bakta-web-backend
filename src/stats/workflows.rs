@@ -224,3 +224,233 @@ impl StatsDb {
 fn label(workflow: &ArgoWorkflow, name: &str) -> Option<String> {
     workflow.metadata.labels.get(name).cloned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        argo::structs::SimpleStatus,
+        stats::{StatsRecorder, test_db::test_db},
+        test_support::test_handler_with_stats,
+    };
+    use serde_json::{Value, json};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param},
+    };
+
+    fn listed(name: &str, phase: &str, environment: &str) -> Value {
+        json!({
+            "metadata": {"name": name, "uid": Uuid::new_v4(), "creationTimestamp": "2026-10-01T10:00:00Z",
+                         "labels": {"bakta-environment": environment, "jobid": Uuid::new_v4().to_string(),
+                                    "workflow-kind": "bakta", "origin": "bakta.computational.bio"}},
+            "spec": {"workflowTemplateRef": {"name": "bakta-job-1.9.0"}},
+            "status": {"phase": phase, "startedAt": "2026-10-01T10:00:05Z", "message": "msg"}
+        })
+    }
+
+    fn workflow(value: &Value) -> ArgoWorkflow {
+        serde_json::from_value(value.clone()).unwrap()
+    }
+
+    async fn updated_at(db: &StatsDb, name: &str) -> DateTime<Utc> {
+        sqlx::query_scalar("SELECT updated_at FROM workflows WHERE name = $1")
+            .bind(name)
+            .fetch_one(db.pool())
+            .await
+            .unwrap()
+    }
+
+    fn names(workflows: &[ArgoWorkflow]) -> Vec<&str> {
+        workflows
+            .iter()
+            .map(|workflow| workflow.metadata.name.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn upsert_only_writes_changed_and_newer_states() {
+        let Some(db) = test_db("upsert_only_writes_changed_and_newer_states").await else {
+            return;
+        };
+        // Postgres stores microseconds.
+        let t0 = chrono::SubsecRound::trunc_subsecs(Utc::now(), 6) - chrono::Duration::minutes(5);
+        let t1 = t0 + chrono::Duration::seconds(15);
+        let failed = workflow(&listed("wf-1", "Failed", "production"));
+        db.upsert_workflows("bakta", t0, std::slice::from_ref(&failed))
+            .await
+            .unwrap();
+        let stored = db
+            .live_workflows("bakta", Some("production"))
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].metadata.labels, failed.metadata.labels);
+        assert_eq!(stored[0].status.phase, "Failed");
+        assert_eq!(
+            stored[0].spec.workflow_template_ref,
+            failed.spec.workflow_template_ref
+        );
+        assert!(!stored[0].is_suspended());
+
+        // The same state is not written again.
+        db.upsert_workflows("bakta", t1, std::slice::from_ref(&failed))
+            .await
+            .unwrap();
+        assert_eq!(updated_at(&db, "wf-1").await, t0);
+
+        // A changed state is written, an older one is ignored.
+        let mut running = failed.clone();
+        running.status.phase = "Running".to_string();
+        db.upsert_workflows("bakta", t1, std::slice::from_ref(&running))
+            .await
+            .unwrap();
+        db.upsert_workflows("bakta", t0, std::slice::from_ref(&failed))
+            .await
+            .unwrap();
+        let stored = db.live_workflows("bakta", None).await.unwrap();
+        assert_eq!(stored[0].status.phase, "Running");
+        assert_eq!(updated_at(&db, "wf-1").await, t1);
+        assert!(
+            db.live_workflows("bakta", Some("staging"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(db.live_workflows("other", None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn gone_workflows_are_hidden_until_they_are_listed_again() {
+        let Some(db) = test_db("gone_workflows_are_hidden_until_they_are_listed_again").await
+        else {
+            return;
+        };
+        let t0 = Utc::now() - chrono::Duration::hours(3);
+        let all = [
+            workflow(&listed("wf-a", "Failed", "production")),
+            workflow(&listed("wf-b", "Failed", "production")),
+            workflow(&listed("wf-c", "Failed", "production")),
+        ];
+        db.upsert_workflows("bakta", t0, &all).await.unwrap();
+        db.upsert_workflows("other", t0, &all[..1]).await.unwrap();
+        // A poll that no longer lists wf-b, and a delete of wf-c.
+        let t1 = t0 + chrono::Duration::seconds(15);
+        db.remove_missing_workflows("bakta", t1, &["wf-a".to_string(), "wf-c".to_string()])
+            .await
+            .unwrap();
+        db.remove_workflows("bakta", t1, &["wf-c".to_string()])
+            .await
+            .unwrap();
+        let live = db.live_workflows("bakta", None).await.unwrap();
+        assert_eq!(names(&live), ["wf-a"]);
+        // Other namespaces are not touched.
+        assert_eq!(
+            names(&db.live_workflows("other", None).await.unwrap()),
+            ["wf-a"]
+        );
+        // A poll fetched before the delete does not add wf-c back.
+        db.upsert_workflows("bakta", t0 + chrono::Duration::seconds(10), &all[2..])
+            .await
+            .unwrap();
+        assert_eq!(
+            names(&db.live_workflows("bakta", None).await.unwrap()),
+            ["wf-a"]
+        );
+        // A later list with wf-b makes it live again.
+        db.upsert_workflows("bakta", t1 + chrono::Duration::seconds(15), &all[1..2])
+            .await
+            .unwrap();
+        let mut live = names(&db.live_workflows("bakta", None).await.unwrap())
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        live.sort();
+        assert_eq!(live, ["wf-a", "wf-b"]);
+        // Rows that are gone for long are deleted.
+        db.remove_missing_workflows("bakta", t1 + chrono::Duration::hours(2), &[])
+            .await
+            .unwrap();
+        db.remove_missing_workflows("bakta", t1 + chrono::Duration::hours(4), &[])
+            .await
+            .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM workflows WHERE namespace = 'bakta'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn the_poll_records_bakta_web_workflows_with_their_suspend_state() {
+        let Some(db) = test_db("the_poll_records_bakta_web_workflows").await else {
+            return;
+        };
+        let argo = MockServer::start().await;
+        let mut paused = listed("paused", "Running", "production");
+        paused["status"]["nodes"] = json!({"s": {"id": "s", "name": "paused.approve", "type": "Suspend", "phase": "Running"}});
+        Mock::given(method("GET"))
+            .and(path("/api/v1/workflows/bakta"))
+            .and(query_param(
+                "listOptions.labelSelector",
+                "workflows.argoproj.io/phase=Running",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+                paused, listed("running", "Running", "staging")
+            ]})))
+            .expect(1)
+            .mount(&argo)
+            .await;
+        let (stats, _events) = StatsRecorder::capturing_with_db((*db).clone());
+        let handler = test_handler_with_stats(&argo.uri(), "https://s3.example.com", stats);
+        let mut foreign = listed("foreign", "Failed", "production");
+        foreign["metadata"]["labels"] = json!({"app": "other"});
+        let polled: Vec<SimpleStatus> = [
+            listed("paused", "Running", "production"),
+            listed("running", "Running", "staging"),
+            listed("done", "Succeeded", "production"),
+            foreign,
+        ]
+        .iter()
+        .map(|item| serde_json::from_value(item.clone()).unwrap())
+        .collect();
+        handler
+            .state_handler
+            .record_workflows(&polled, Utc::now())
+            .await;
+
+        let live = db.live_workflows("bakta", None).await.unwrap();
+        let mut all = names(&live);
+        all.sort();
+        assert_eq!(all, ["done", "paused", "running"]);
+        let suspended: Vec<_> = live
+            .iter()
+            .filter(|workflow| workflow.is_suspended())
+            .map(|workflow| workflow.metadata.name.as_str())
+            .collect();
+        assert_eq!(suspended, ["paused"]);
+        assert_eq!(
+            names(&db.live_workflows("bakta", Some("staging")).await.unwrap()),
+            ["running"]
+        );
+
+        // The next poll no longer lists `done`, and the running lookup fails:
+        // nothing is written.
+        argo.reset().await;
+        handler
+            .state_handler
+            .record_workflows(&polled[..2], Utc::now())
+            .await;
+        assert_eq!(db.live_workflows("bakta", None).await.unwrap().len(), 3);
+        // Without running workflows no lookup is needed.
+        handler
+            .state_handler
+            .record_workflows(&polled[2..3], Utc::now())
+            .await;
+        assert_eq!(
+            names(&db.live_workflows("bakta", None).await.unwrap()),
+            ["done"]
+        );
+    }
+}
