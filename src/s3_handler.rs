@@ -1,9 +1,16 @@
 use anyhow::{Result, anyhow};
-use reqsign::{AwsCredential, AwsV4Signer};
-use reqwest::Method;
+use axum::http;
+use reqsign::aws::{self, StaticCredentialProvider};
+use reqwest::{Client, Method, StatusCode};
 use url::Url;
 
-use crate::api_structs::ResultFiles;
+use crate::{
+    api_structs::ResultFiles,
+    v2::api_structs::{
+        BaktaProteinsResultFiles, BaktaResultFiles, BaktfoldResultFiles, ResultKind, UploadKind,
+        V2ResultFiles,
+    },
+};
 
 pub struct S3Handler {
     access_key: String,
@@ -11,6 +18,143 @@ pub struct S3Handler {
     bucket: String,
     endpoint: String,
     is_ssl: bool,
+    client: Client,
+}
+
+const RESULT_DOWNLOAD_DURATION_SECONDS: i64 = 6 * 86400;
+const RESULT_EXISTENCE_CHECK_DURATION_SECONDS: i64 = 60;
+#[cfg(not(test))]
+const RESULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const RESULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// Time for reading an input FASTA, which can be large.
+#[cfg(not(test))]
+const INPUT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+#[cfg(test)]
+const INPUT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Most bytes of an input FASTA that are read to count it.
+pub const INPUT_READ_LIMIT: u64 = 1 << 30;
+
+/// Number of sequences and bases of a FASTA file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FastaCount {
+    pub sequences: i64,
+    pub bases: i64,
+}
+
+/// Counts the FASTA data written to it: header lines (starting with `>`)
+/// and the characters of the other lines that are not whitespace.
+#[derive(Default)]
+struct FastaCounter {
+    count: FastaCount,
+    in_line: bool,
+    in_header: bool,
+    /// Most bytes it counts, also after gzip.
+    limit: u64,
+    written: u64,
+}
+
+impl FastaCounter {
+    fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            ..Default::default()
+        }
+    }
+}
+
+impl std::io::Write for FastaCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.written += buf.len() as u64;
+        if self.written > self.limit {
+            return Err(std::io::Error::other(format!(
+                "The input file is larger than {} bytes",
+                self.limit
+            )));
+        }
+        for &byte in buf {
+            if byte == b'\n' {
+                self.in_line = false;
+                self.in_header = false;
+                continue;
+            }
+            if !self.in_line {
+                self.in_line = true;
+                if byte == b'>' {
+                    self.in_header = true;
+                    self.count.sequences += 1;
+                }
+            }
+            if !self.in_header && !byte.is_ascii_whitespace() {
+                self.count.bases += 1;
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Where the read data goes: straight to the counter, or through gzip.
+enum FastaSink {
+    Plain(FastaCounter),
+    Gzip(Box<flate2::write::MultiGzDecoder<FastaCounter>>),
+}
+
+impl FastaSink {
+    /// Gzip when `head` starts with the gzip magic bytes.
+    fn for_head(head: &[u8], limit: u64) -> Self {
+        if head.starts_with(&[0x1f, 0x8b]) {
+            FastaSink::Gzip(Box::new(flate2::write::MultiGzDecoder::new(
+                FastaCounter::new(limit),
+            )))
+        } else {
+            FastaSink::Plain(FastaCounter::new(limit))
+        }
+    }
+
+    /// Counts the chunks from `chunks` until it is closed. Blocking: it runs
+    /// in a thread for blocking work, so large inputs do not hold up others.
+    fn count(
+        mut chunks: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        limit: u64,
+    ) -> std::io::Result<FastaCount> {
+        let mut head = Vec::new();
+        let mut sink: Option<FastaSink> = None;
+        while let Some(chunk) = chunks.blocking_recv() {
+            match &mut sink {
+                Some(sink) => sink.write(&chunk)?,
+                None => {
+                    head.extend_from_slice(&chunk);
+                    if head.len() >= 2 {
+                        let mut new = FastaSink::for_head(&head, limit);
+                        new.write(&std::mem::take(&mut head))?;
+                        sink = Some(new);
+                    }
+                }
+            }
+        }
+        let mut sink = sink.unwrap_or_else(|| FastaSink::for_head(&head, limit));
+        sink.write(&head)?;
+        sink.finish()
+    }
+
+    fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        match self {
+            FastaSink::Plain(counter) => counter.write_all(data),
+            FastaSink::Gzip(decoder) => decoder.write_all(data),
+        }
+    }
+
+    fn finish(self) -> std::io::Result<FastaCount> {
+        Ok(match self {
+            FastaSink::Plain(counter) => counter.count,
+            FastaSink::Gzip(decoder) => decoder.finish()?.count,
+        })
+    }
 }
 
 pub enum InputType {
@@ -29,6 +173,19 @@ impl InputType {
     }
 }
 
+fn upload_object_name(kind: UploadKind) -> &'static str {
+    match kind {
+        UploadKind::GenomeFasta => "fastadata.fasta",
+        UploadKind::ProdigalTrainingFile => "prodigal.tf",
+        UploadKind::RepliconsTable => "replicons.tsv",
+        UploadKind::RegionsFile => "regions",
+        UploadKind::TrustedProteinsFile => "trusted_proteins.faa",
+        UploadKind::HmmsFile => "trusted_hmms.hmm",
+        UploadKind::ProteinFasta => "proteins.fasta",
+        UploadKind::BaktaJson => "bakta.json",
+    }
+}
+
 impl S3Handler {
     pub fn new(access_key: String, secret_key: String, bucket: String, endpoint: String) -> Self {
         let ssl = endpoint.starts_with("https://");
@@ -38,10 +195,11 @@ impl S3Handler {
             bucket,
             endpoint,
             is_ssl: ssl,
+            client: Client::new(),
         }
     }
 
-    pub fn sign_upload_url(&self, job_id: &str, input_type: InputType) -> Result<String> {
+    pub async fn sign_upload_url(&self, job_id: &str, input_type: InputType) -> Result<String> {
         let key = format!("jobs/{job_id}/inputs/{}", input_type.to_str());
         sign_url(
             Method::PUT,
@@ -56,43 +214,530 @@ impl S3Handler {
             &self.endpoint,
             10000, // 10000 seconds = 2.77 hours should be enough for uploads
             None,
+            None,
         )
+        .await
     }
-    pub fn sign_download_urls(&self, job_id: &str, name: &str) -> Result<ResultFiles> {
-        let get_download_url = |output_format: &str| -> Result<String> {
-            let key = format!("jobs/{job_id}/results/result.{output_format}").to_string();
-            sign_url(
-                Method::GET,
-                &self.access_key,
-                &self.secret_key,
-                self.is_ssl,
-                false,
-                0,
+
+    pub async fn sign_upload_url_v2(
+        &self,
+        job_id: &str,
+        upload_kind: UploadKind,
+    ) -> Result<String> {
+        let key = format!("jobs/{job_id}/inputs/{}", upload_object_name(upload_kind));
+        sign_url(
+            Method::PUT,
+            &self.access_key,
+            &self.secret_key,
+            self.is_ssl,
+            false,
+            0,
+            None,
+            &self.bucket,
+            &key,
+            &self.endpoint,
+            10000,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn sign_result_object_url(
+        &self,
+        job_id: &str,
+        key_name: &str,
+        method: Method,
+        duration: i64,
+        disposition: Option<String>,
+    ) -> Result<String> {
+        let key = format!("jobs/{job_id}/results/{key_name}");
+        sign_url(
+            method,
+            &self.access_key,
+            &self.secret_key,
+            self.is_ssl,
+            false,
+            0,
+            None,
+            &self.bucket,
+            &key,
+            &self.endpoint,
+            duration,
+            disposition,
+            None,
+        )
+        .await
+    }
+
+    async fn sign_result_download_object(
+        &self,
+        job_id: &str,
+        key_name: &str,
+        download_name: String,
+    ) -> Result<String> {
+        self.sign_result_object_url(
+            job_id,
+            key_name,
+            Method::GET,
+            RESULT_DOWNLOAD_DURATION_SECONDS,
+            Some(download_name),
+        )
+        .await
+    }
+
+    async fn result_object_exists(&self, job_id: &str, key_name: &str) -> Result<bool> {
+        let url = self
+            .sign_result_object_url(
+                job_id,
+                key_name,
+                Method::HEAD,
+                RESULT_EXISTENCE_CHECK_DURATION_SECONDS,
                 None,
-                &self.bucket,
-                &key,
-                &self.endpoint,
-                6 * 86400, // 6 days
-                Some(format!("{name}.{output_format}")),
             )
+            .await?;
+
+        let response = self.client.head(url).send().await?;
+        match response.status() {
+            StatusCode::OK => Ok(true),
+            StatusCode::NOT_FOUND => Ok(false),
+            status => Err(anyhow!(
+                "Failed to check result file existence for {key_name}: {status}"
+            )),
+        }
+    }
+
+    /// Counts the sequences and bases of the input FASTA of a genome job. The
+    /// file is read as a stream (gzip when it starts with the gzip magic
+    /// bytes), at most `limit` bytes, and at most `limit` bytes after gzip.
+    /// The counting runs outside the async threads, and the whole read
+    /// within `INPUT_READ_TIMEOUT`. `None` when it does not exist. Errors do
+    /// not show the signed URL.
+    pub async fn count_input_fasta(&self, job_id: &str, limit: u64) -> Result<Option<FastaCount>> {
+        let key = format!("jobs/{job_id}/inputs/fastadata.fasta");
+        let url = sign_url(
+            Method::GET,
+            &self.access_key,
+            &self.secret_key,
+            self.is_ssl,
+            false,
+            0,
+            None,
+            &self.bucket,
+            &key,
+            &self.endpoint,
+            RESULT_EXISTENCE_CHECK_DURATION_SECONDS,
+            None,
+            None,
+        )
+        .await?;
+        let read = async {
+            let mut response = self
+                .client
+                .get(url)
+                .timeout(INPUT_READ_TIMEOUT)
+                .send()
+                .await
+                .map_err(reqwest::Error::without_url)?;
+            match response.status() {
+                StatusCode::OK => {}
+                StatusCode::NOT_FOUND => return Ok(None),
+                status => return Err(anyhow!("Failed to read the input file: {status}")),
+            }
+            let (chunks, received) = tokio::sync::mpsc::channel(8);
+            let counting = tokio::task::spawn_blocking(move || FastaSink::count(received, limit));
+            let mut read = 0;
+            let mut failed = None;
+            loop {
+                match response.chunk().await.map_err(reqwest::Error::without_url) {
+                    Ok(Some(chunk)) => {
+                        read += chunk.len() as u64;
+                        if read > limit {
+                            failed = Some(anyhow!("The input file is larger than {limit} bytes"));
+                            break;
+                        }
+                        // A closed channel means the counting stopped with an error.
+                        if chunks.send(chunk.to_vec()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        failed = Some(error.into());
+                        break;
+                    }
+                }
+            }
+            drop(chunks);
+            let counted = counting.await?;
+            match failed {
+                Some(error) => Err(error),
+                None => Ok(Some(counted?)),
+            }
         };
+        tokio::time::timeout(INPUT_READ_TIMEOUT, read)
+            .await
+            .map_err(|_| anyhow!("Reading the input file timed out"))?
+    }
+
+    /// Reads a small result file as text. `None` when it does not exist.
+    pub async fn read_result_text(&self, job_id: &str, key_name: &str) -> Result<Option<String>> {
+        let url = self
+            .sign_result_object_url(
+                job_id,
+                key_name,
+                Method::GET,
+                RESULT_EXISTENCE_CHECK_DURATION_SECONDS,
+                None,
+            )
+            .await?;
+
+        // the timeout covers the body too, so a stalled read cannot block the caller;
+        // errors drop the URL, which carries a usable signature
+        let response = self
+            .client
+            .get(url)
+            .timeout(RESULT_READ_TIMEOUT)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
+        match response.status() {
+            StatusCode::OK => Ok(Some(
+                response.text().await.map_err(reqwest::Error::without_url)?,
+            )),
+            StatusCode::NOT_FOUND => Ok(None),
+            status => Err(anyhow!("Failed to read result file {key_name}: {status}")),
+        }
+    }
+
+    async fn sign_result_download_url(
+        &self,
+        job_id: &str,
+        name: &str,
+        output_format: &str,
+    ) -> Result<String> {
+        self.sign_result_download_object(
+            job_id,
+            &format!("result.{output_format}"),
+            format!("{name}.{output_format}"),
+        )
+        .await
+    }
+
+    async fn sign_optional_result_download_url(
+        &self,
+        job_id: &str,
+        name: &str,
+        output_format: &str,
+    ) -> Result<Option<String>> {
+        let key_name = format!("result.{output_format}");
+        if !self.result_object_exists(job_id, &key_name).await? {
+            return Ok(None);
+        }
+
+        self.sign_result_download_object(job_id, &key_name, format!("{name}.{output_format}"))
+            .await
+            .map(Some)
+    }
+
+    async fn sign_required_result_download_url(
+        &self,
+        job_id: &str,
+        name: &str,
+        output_format: &str,
+    ) -> Result<String> {
+        let key_name = format!("result.{output_format}");
+        if !self.result_object_exists(job_id, &key_name).await? {
+            return Err(anyhow!("Missing required result file: {key_name}"));
+        }
+
+        self.sign_result_download_object(job_id, &key_name, format!("{name}.{output_format}"))
+            .await
+    }
+
+    pub async fn sign_download_urls(&self, job_id: &str, name: &str) -> Result<ResultFiles> {
         Ok(ResultFiles {
-            embl: get_download_url("embl")?,
-            faa: get_download_url("faa")?,
-            faa_hypothetical: get_download_url("hypotheticals.faa")?,
-            ffn: get_download_url("ffn")?,
-            fna: get_download_url("fna")?,
-            gbff: get_download_url("gbff")?,
-            gff3: get_download_url("gff3")?,
-            json: get_download_url("json")?,
-            tsv: get_download_url("tsv")?,
-            tsv_hypothetical: get_download_url("hypotheticals.tsv")?,
-            tsv_inference: get_download_url("inference.tsv")?,
-            txt_logs: get_download_url("txt")?,
-            png_circular_plot: get_download_url("png")?,
-            svg_circular_plot: get_download_url("svg")?,
+            embl: self.sign_result_download_url(job_id, name, "embl").await?,
+            faa: self.sign_result_download_url(job_id, name, "faa").await?,
+            faa_hypothetical: self
+                .sign_result_download_url(job_id, name, "hypotheticals.faa")
+                .await?,
+            ffn: self.sign_result_download_url(job_id, name, "ffn").await?,
+            fna: self.sign_result_download_url(job_id, name, "fna").await?,
+            gbff: self.sign_result_download_url(job_id, name, "gbff").await?,
+            gff3: self.sign_result_download_url(job_id, name, "gff3").await?,
+            json: self.sign_result_download_url(job_id, name, "json").await?,
+            tsv: self.sign_result_download_url(job_id, name, "tsv").await?,
+            tsv_hypothetical: self
+                .sign_result_download_url(job_id, name, "hypotheticals.tsv")
+                .await?,
+            tsv_inference: self
+                .sign_result_download_url(job_id, name, "inference.tsv")
+                .await?,
+            txt_logs: self.sign_result_download_url(job_id, name, "txt").await?,
+            png_circular_plot: self.sign_result_download_url(job_id, name, "png").await?,
+            svg_circular_plot: self.sign_result_download_url(job_id, name, "svg").await?,
         })
     }
+
+    pub async fn sign_download_urls_v2(
+        &self,
+        job_id: &str,
+        name: &str,
+        result_kind: ResultKind,
+    ) -> Result<V2ResultFiles> {
+        Ok(match result_kind {
+            ResultKind::Bakta => V2ResultFiles::Bakta(BaktaResultFiles {
+                embl: self
+                    .sign_optional_result_download_url(job_id, name, "embl")
+                    .await?,
+                faa: self
+                    .sign_optional_result_download_url(job_id, name, "faa")
+                    .await?,
+                hypotheticals_faa: self
+                    .sign_optional_result_download_url(job_id, name, "hypotheticals.faa")
+                    .await?,
+                ffn: self
+                    .sign_optional_result_download_url(job_id, name, "ffn")
+                    .await?,
+                fna: self
+                    .sign_optional_result_download_url(job_id, name, "fna")
+                    .await?,
+                gbff: self
+                    .sign_optional_result_download_url(job_id, name, "gbff")
+                    .await?,
+                gff3: self
+                    .sign_optional_result_download_url(job_id, name, "gff3")
+                    .await?,
+                json: self
+                    .sign_required_result_download_url(job_id, name, "json")
+                    .await?,
+                tsv: self
+                    .sign_optional_result_download_url(job_id, name, "tsv")
+                    .await?,
+                hypotheticals_tsv: self
+                    .sign_optional_result_download_url(job_id, name, "hypotheticals.tsv")
+                    .await?,
+                logs_txt: self
+                    .sign_optional_result_download_url(job_id, name, "txt")
+                    .await?,
+                inference_tsv: self
+                    .sign_optional_result_download_url(job_id, name, "inference.tsv")
+                    .await?,
+                circular_plot_png: self
+                    .sign_optional_result_download_url(job_id, name, "png")
+                    .await?,
+                circular_plot_svg: self
+                    .sign_optional_result_download_url(job_id, name, "svg")
+                    .await?,
+            }),
+            ResultKind::BaktaProteins => V2ResultFiles::BaktaProteins(BaktaProteinsResultFiles {
+                tsv: self
+                    .sign_optional_result_download_url(job_id, name, "tsv")
+                    .await?,
+                faa: self
+                    .sign_optional_result_download_url(job_id, name, "faa")
+                    .await?,
+                hypotheticals_tsv: self
+                    .sign_optional_result_download_url(job_id, name, "hypotheticals.tsv")
+                    .await?,
+                json: self
+                    .sign_required_result_download_url(job_id, name, "json")
+                    .await?,
+            }),
+            ResultKind::Baktfold => V2ResultFiles::Baktfold(BaktfoldResultFiles {
+                embl: self
+                    .sign_optional_result_download_url(job_id, name, "embl")
+                    .await?,
+                faa: self
+                    .sign_optional_result_download_url(job_id, name, "faa")
+                    .await?,
+                hypotheticals_faa: self
+                    .sign_optional_result_download_url(job_id, name, "hypotheticals.faa")
+                    .await?,
+                ffn: self
+                    .sign_optional_result_download_url(job_id, name, "ffn")
+                    .await?,
+                fna: self
+                    .sign_optional_result_download_url(job_id, name, "fna")
+                    .await?,
+                gbff: self
+                    .sign_optional_result_download_url(job_id, name, "gbff")
+                    .await?,
+                gff3: self
+                    .sign_optional_result_download_url(job_id, name, "gff3")
+                    .await?,
+                json: self
+                    .sign_required_result_download_url(job_id, name, "json")
+                    .await?,
+                tsv: self
+                    .sign_optional_result_download_url(job_id, name, "tsv")
+                    .await?,
+                hypotheticals_tsv: self
+                    .sign_optional_result_download_url(job_id, name, "hypotheticals.tsv")
+                    .await?,
+                logs_txt: self
+                    .sign_optional_result_download_url(job_id, name, "txt")
+                    .await?,
+                inference_tsv: self
+                    .sign_optional_result_download_url(job_id, name, "inference.tsv")
+                    .await?,
+            }),
+        })
+    }
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Upper limit of list pages for one purge, so a broken listing cannot loop forever.
+const MAX_LIST_PAGES: usize = 100;
+
+impl S3Handler {
+    fn bucket_url(&self) -> String {
+        let protocol = if self.is_ssl { "https://" } else { "http://" };
+        let endpoint = self
+            .endpoint
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        format!("{protocol}{}.{endpoint}/", self.bucket)
+    }
+
+    /// URL of the object `key` below `prefix`. Rejects keys with empty, `.` or
+    /// `..` segments (also percent-encoded) and backslashes, because the URL
+    /// library would normalize them to another object. Each segment is
+    /// percent-encoded, so the URL path is exactly the key.
+    fn object_url(&self, prefix: &str, key: &str) -> Result<Url> {
+        let is_dot_segment = |segment: &str| {
+            matches!(
+                segment.to_ascii_lowercase().replace("%2e", ".").as_str(),
+                "." | ".."
+            )
+        };
+        let valid = key.starts_with(prefix)
+            && !key.contains('\\')
+            && key
+                .split('/')
+                .all(|segment| !segment.is_empty() && !is_dot_segment(segment));
+        if !valid {
+            return Err(anyhow!("Refusing to delete unsafe object key: {key}"));
+        }
+        let mut url = Url::parse(&self.bucket_url())?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow!("Invalid bucket URL"))?
+            .pop_if_empty()
+            .extend(key.split('/'));
+        Ok(url)
+    }
+
+    /// Deletes all objects of a job (inputs and results) and returns how many were deleted.
+    pub async fn purge_job_objects(&self, job_id: &str) -> Result<u64> {
+        lazy_static::lazy_static! {
+            static ref KEY: regex::Regex = regex::Regex::new("<Key>([^<]*)</Key>").unwrap();
+            static ref TOKEN: regex::Regex =
+                regex::Regex::new("<NextContinuationToken>([^<]*)</NextContinuationToken>").unwrap();
+        }
+        let prefix = format!("jobs/{job_id}/");
+        let mut keys = Vec::new();
+        let mut continuation: Option<String> = None;
+        for _ in 0..MAX_LIST_PAGES {
+            let mut url = Url::parse(&self.bucket_url())?;
+            url.query_pairs_mut()
+                .append_pair("list-type", "2")
+                .append_pair("prefix", &prefix);
+            if let Some(token) = &continuation {
+                url.query_pairs_mut()
+                    .append_pair("continuation-token", token);
+            }
+            let signed = presign(
+                &self.access_key,
+                &self.secret_key,
+                Method::GET,
+                url.as_str(),
+            )
+            .await?;
+            let body = self
+                .client
+                .get(signed)
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await?;
+            keys.extend(
+                KEY.captures_iter(&body)
+                    .map(|capture| xml_unescape(&capture[1]))
+                    .filter(|key| key.starts_with(&prefix)),
+            );
+            continuation = TOKEN
+                .captures(&body)
+                .map(|capture| xml_unescape(&capture[1]));
+            if continuation.is_none() || !body.contains("<IsTruncated>true</IsTruncated>") {
+                break;
+            }
+        }
+
+        // Check all keys first, so a bad listing deletes nothing.
+        let mut urls = Vec::with_capacity(keys.len());
+        for key in &keys {
+            urls.push(self.object_url(&prefix, key)?);
+        }
+
+        let mut deleted = 0;
+        for url in urls {
+            let signed = presign(
+                &self.access_key,
+                &self.secret_key,
+                Method::DELETE,
+                url.as_str(),
+            )
+            .await?;
+            if Url::parse(&signed)?.path() != url.path() {
+                return Err(anyhow!("Signed URL path differs from the object key"));
+            }
+            self.client
+                .delete(signed)
+                .send()
+                .await?
+                .error_for_status()?;
+            deleted += 1;
+        }
+        Ok(deleted)
+    }
+
+    /// Sends all requests for the bucket host to `address`. Only for tests
+    /// with a local mock server.
+    #[cfg(test)]
+    pub fn with_bucket_host_address(mut self, address: std::net::SocketAddr) -> Self {
+        let host = Url::parse(&self.bucket_url())
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_string();
+        self.client = Client::builder().resolve(&host, address).build().unwrap();
+        self
+    }
+}
+
+async fn presign(access_key: &str, secret_key: &str, method: Method, url: &str) -> Result<String> {
+    let signer = aws::default_signer("s3", "RegionOne")
+        .with_credential_provider(StaticCredentialProvider::new(access_key, secret_key));
+    let mut parts = http::Request::builder()
+        .method(method)
+        .uri(url)
+        .body(())?
+        .into_parts()
+        .0;
+    signer
+        .sign(&mut parts, Some(std::time::Duration::from_secs(300)))
+        .await?;
+    Ok(parts.uri.to_string())
 }
 
 /// Creates a fully customized presigned S3 url.
@@ -117,7 +762,7 @@ impl S3Handler {
 /// * `` -
 ///
 #[allow(clippy::too_many_arguments)]
-fn sign_url(
+async fn sign_url(
     method: Method,
     access_key: &str,
     secret_key: &str,
@@ -130,8 +775,10 @@ fn sign_url(
     endpoint: &str,
     duration: i64,
     disposition: Option<String>,
+    content_type: Option<&str>,
 ) -> Result<String> {
-    let signer = AwsV4Signer::new("s3", "RegionOne");
+    let signer = aws::default_signer("s3", "RegionOne")
+        .with_credential_provider(StaticCredentialProvider::new(access_key, secret_key));
 
     // Set protocol depending if ssl
     let protocol = if ssl { "https://" } else { "http://" };
@@ -153,11 +800,12 @@ fn sign_url(
             "{}{}.{}/{}?partNumber={}&uploadId={}",
             protocol, bucket, endpoint_sanitized, key, part_number, upload_id
         ))?
-    } else if disposition.is_some() && method == &Method::GET {
+    } else if disposition.is_some() && method == Method::GET {
         let url_encoded_disposition = url::form_urlencoded::byte_serialize(
             format!(r#"attachment; filename="{}""#, disposition.unwrap()).as_bytes(),
         )
-        .collect::<String>();
+        .collect::<String>()
+        .replace('+', "%20");
         Url::parse(&format!(
             "{}{}.{}/{}?response-content-disposition={}",
             protocol, bucket, endpoint_sanitized, key, url_encoded_disposition
@@ -169,18 +817,415 @@ fn sign_url(
         ))?
     };
 
-    let mut req = reqwest::Request::new(method, url);
+    let mut parts = http::Request::builder()
+        .method(method)
+        .uri(url.as_str())
+        .body(())?
+        .into_parts()
+        .0;
+
+    if let Some(content_type) = content_type {
+        parts.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_str(content_type)?,
+        );
+    }
 
     // Signing request with Signer
-    signer.sign_query(
-        &mut req,
-        std::time::Duration::new(duration as u64, 0), // Sec, nano
-        &AwsCredential {
-            access_key_id: access_key.to_string(),
-            secret_access_key: secret_key.to_string(),
-            session_token: None,
-            expires_in: None,
-        },
-    )?;
-    Ok(req.url().to_string())
+    signer
+        .sign(
+            &mut parts,
+            Some(std::time::Duration::new(duration as u64, 0)), // Sec, nano
+        )
+        .await?;
+    Ok(parts.uri.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_v2_preserves_legacy_upload_signing() {
+        let handler = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            "https://s3.example.com".to_string(),
+        );
+        let legacy = handler
+            .sign_upload_url("job", InputType::Fasta)
+            .await
+            .unwrap();
+        let v2 = handler
+            .sign_upload_url_v2("job", UploadKind::GenomeFasta)
+            .await
+            .unwrap();
+        for url in [legacy, v2] {
+            let url = Url::parse(&url).unwrap();
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(key, _)| key == "X-Amz-SignedHeaders")
+                    .unwrap()
+                    .1,
+                "host"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_disposition_encodes_spaces_for_signing() {
+        let handler = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            "https://s3.example.com".to_string(),
+        );
+        let url = handler
+            .sign_result_download_url("job", "sample", "json")
+            .await
+            .unwrap();
+        let url = Url::parse(&url).unwrap();
+        assert!(
+            url.query().unwrap().contains(
+                "response-content-disposition=attachment%3B%20filename%3D%22sample.json%22"
+            )
+        );
+    }
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    async fn fasta_server(job: &str, body: Vec<u8>) -> (wiremock::MockServer, S3Handler) {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/jobs/{job}/inputs/fastadata.fasta")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+        let handler = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            format!("http://s3.test:{}", server.address().port()),
+        )
+        .with_bucket_host_address(*server.address());
+        (server, handler)
+    }
+
+    #[tokio::test]
+    async fn test_count_input_fasta_reads_concatenated_gzip_members() {
+        let mut body = gzip(b">a\nACGT\n");
+        body.extend(gzip(b">b\nGG\n"));
+        let (_server, handler) = fasta_server("job", body).await;
+        assert_eq!(
+            handler
+                .count_input_fasta("job", INPUT_READ_LIMIT)
+                .await
+                .unwrap(),
+            Some(FastaCount {
+                sequences: 2,
+                bases: 6
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_count_input_fasta_limits_the_decompressed_size() {
+        let mut fasta = b">a\n".to_vec();
+        fasta.extend(std::iter::repeat_n(b'A', 100_000));
+        let body = gzip(&fasta);
+        assert!(body.len() < 1000);
+        let (_server, handler) = fasta_server("job", body).await;
+        let error = handler
+            .count_input_fasta("job", 1000)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("larger than 1000 bytes"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn test_count_input_fasta_reads_plain_and_gzip_files_up_to_a_limit() {
+        use std::io::Write;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let fasta = b">contig_1 some description\nACGT ACGT\nNNac\n>contig_2\r\nGG\r\n";
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(fasta).unwrap();
+        let gzip = gzip.finish().unwrap();
+        let server = MockServer::start().await;
+        for (job, body) in [("plain", fasta.to_vec()), ("gzip", gzip)] {
+            Mock::given(method("GET"))
+                .and(path(format!("/jobs/{job}/inputs/fastadata.fasta")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                .mount(&server)
+                .await;
+        }
+        let handler = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            format!("http://s3.test:{}", server.address().port()),
+        )
+        .with_bucket_host_address(*server.address());
+        let expected = FastaCount {
+            sequences: 2,
+            bases: 14,
+        };
+        for job in ["plain", "gzip"] {
+            assert_eq!(
+                handler
+                    .count_input_fasta(job, INPUT_READ_LIMIT)
+                    .await
+                    .unwrap(),
+                Some(expected),
+                "{job}"
+            );
+        }
+        assert_eq!(
+            handler
+                .count_input_fasta("missing", INPUT_READ_LIMIT)
+                .await
+                .unwrap(),
+            None
+        );
+        let error = handler
+            .count_input_fasta("plain", 10)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("larger than 10 bytes"), "{error}");
+        assert!(!error.contains("Signature"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn test_read_result_text_returns_none_for_a_missing_file() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jobs/job-1/results/result.txt"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("Length: 10\n"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jobs/job-2/results/result.txt"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jobs/job-3/results/result.txt"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jobs/job-4/results/result.txt"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(10)))
+            .mount(&server)
+            .await;
+
+        let handler = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            format!("http://s3.test:{}", server.address().port()),
+        )
+        .with_bucket_host_address(*server.address());
+        assert_eq!(
+            handler
+                .read_result_text("job-1", "result.txt")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Length: 10\n")
+        );
+        assert_eq!(
+            handler
+                .read_result_text("job-2", "result.txt")
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            handler
+                .read_result_text("job-3", "result.txt")
+                .await
+                .is_err()
+        );
+        // a stalled read ends with an error that does not show the signed URL
+        let error = handler
+            .read_result_text("job-4", "result.txt")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("Signature"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn test_purge_job_objects_lists_and_deletes_all_pages() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path, query_param, query_param_is_missing},
+        };
+        let server = MockServer::start().await;
+        let page = |keys: &[&str], next: Option<&str>| {
+            let contents: String = keys
+                .iter()
+                .map(|key| format!("<Contents><Key>{key}</Key></Contents>"))
+                .collect();
+            let next = next
+                .map(|token| {
+                    format!("<IsTruncated>true</IsTruncated><NextContinuationToken>{token}</NextContinuationToken>")
+                })
+                .unwrap_or_else(|| "<IsTruncated>false</IsTruncated>".to_string());
+            ResponseTemplate::new(200).set_body_string(format!(
+                "<ListBucketResult>{contents}{next}</ListBucketResult>"
+            ))
+        };
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .and(query_param("prefix", "jobs/job-1/"))
+            .and(query_param_is_missing("continuation-token"))
+            .respond_with(page(
+                &[
+                    "jobs/job-1/inputs/fastadata.fasta",
+                    "jobs/job-1/results/result.json",
+                ],
+                Some("a&amp;b"),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .and(query_param("continuation-token", "a&b"))
+            .respond_with(page(&["jobs/job-1/results/result.tsv"], None))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let handler = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            format!("http://s3.test:{}", server.address().port()),
+        )
+        .with_bucket_host_address(*server.address());
+        assert_eq!(handler.purge_job_objects("job-1").await.unwrap(), 3);
+
+        let requests = server.received_requests().await.unwrap();
+        let deleted: Vec<_> = requests
+            .iter()
+            .filter(|request| request.method.as_str() == "DELETE")
+            .map(|request| request.url.path().to_string())
+            .collect();
+        assert_eq!(
+            deleted,
+            [
+                "/jobs/job-1/inputs/fastadata.fasta",
+                "/jobs/job-1/results/result.json",
+                "/jobs/job-1/results/result.tsv"
+            ]
+        );
+        assert!(requests.iter().all(|request| {
+            request
+                .url
+                .query()
+                .unwrap_or_default()
+                .contains("X-Amz-Signature")
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_purge_job_objects_rejects_keys_that_leave_the_job_prefix() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let handler = |server: &MockServer| {
+            S3Handler::new(
+                "access".to_string(),
+                "secret".to_string(),
+                "bucket".to_string(),
+                format!("http://s3.test:{}", server.address().port()),
+            )
+            .with_bucket_host_address(*server.address())
+        };
+        for bad_key in [
+            "jobs/A/../B/results/file",
+            "jobs/A/./results/file",
+            "jobs/A//results/file",
+            "jobs/A/%2e%2E/B/file",
+            "jobs/A/.%2e/B/file",
+            "jobs/A/results\\..\\file",
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                    "<ListBucketResult><Contents><Key>jobs/A/inputs/ok</Key></Contents><Contents><Key>{bad_key}</Key></Contents><IsTruncated>false</IsTruncated></ListBucketResult>"
+                )))
+                .mount(&server)
+                .await;
+            Mock::given(method("DELETE"))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(0)
+                .mount(&server)
+                .await;
+            assert!(
+                handler(&server).purge_job_objects("A").await.is_err(),
+                "{bad_key}"
+            );
+        }
+
+        // Special characters are percent-encoded, so the path stays the key.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "<ListBucketResult><Contents><Key>jobs/A/results/a%2e b?#.json</Key></Contents><IsTruncated>false</IsTruncated></ListBucketResult>",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        assert_eq!(handler(&server).purge_job_objects("A").await.unwrap(), 1);
+        let requests = server.received_requests().await.unwrap();
+        let deleted = requests
+            .iter()
+            .find(|request| request.method.as_str() == "DELETE")
+            .unwrap();
+        assert_eq!(deleted.url.path(), "/jobs/A/results/a%252e%20b%3F%23.json");
+    }
+
+    #[test]
+    fn test_upload_object_name_mapping() {
+        assert_eq!(
+            upload_object_name(UploadKind::GenomeFasta),
+            "fastadata.fasta"
+        );
+        assert_eq!(
+            upload_object_name(UploadKind::TrustedProteinsFile),
+            "trusted_proteins.faa"
+        );
+        assert_eq!(upload_object_name(UploadKind::BaktaJson), "bakta.json");
+    }
 }

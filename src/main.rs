@@ -1,76 +1,212 @@
 use axum::{
+    Router, middleware,
     response::Redirect,
     routing::{delete, get, post},
-    Router,
 };
 use bakta_handler::BaktaHandler;
 use std::{net::SocketAddr, sync::Arc};
 use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-mod api_paths;
+mod admin;
+#[cfg(test)]
+mod admin_api_tests;
+#[cfg(test)]
+mod admin_operations_tests;
+#[allow(clippy::upper_case_acronyms)]
 mod api_structs;
 mod argo;
+#[cfg(test)]
+mod argo_and_catalog_tests;
+mod backfill;
 mod bakta_handler;
+mod informer;
+#[cfg(test)]
+mod informer_tests;
+#[cfg(test)]
+mod job_secret_tests;
+mod metrics;
+mod openapi;
+mod retention;
 mod s3_handler;
+mod stats;
+#[cfg(test)]
+mod stats_recording_tests;
+#[cfg(test)]
+mod test_support;
+mod v1;
+#[cfg(test)]
+mod v1_api_tests;
+mod v2;
+#[cfg(test)]
+mod v2_api_tests;
+#[cfg(test)]
+mod v2_job_api_tests;
+mod workflow_catalog;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::from_filename(".env")?;
 
-    let socket_address: SocketAddr = dotenvy::var("SOCKET_ADDR")
-        .unwrap_or("127.0.0.1:8080".to_string())
-        .parse()?;
-    let listener = tokio::net::TcpListener::bind(socket_address).await.unwrap();
-    let swagger = SwaggerUi::new("/swagger-ui")
-        .url("/api-docs/openapi.json", api_structs::BaktaApi::openapi());
-
-    let bakta_handler = Arc::new(
-        BaktaHandler::new(
-            dotenvy::var("ARGO_TOKEN")?,
-            dotenvy::var("ARGO_URL")?,
-            dotenvy::var("ARGO_NAMESPACE")?,
-            dotenvy::var("S3_ACCESS_KEY")?,
-            dotenvy::var("S3_SECRET_KEY")?,
-            dotenvy::var("S3_BUCKET")?,
-            dotenvy::var("S3_ENDPOINT")?,
-            dotenvy::var("BAKTA_VERSION")?,
-            dotenvy::var("DATABASE_VERSION")?,
-            dotenvy::var("BACKEND_VERSION")?,
-        )
-        .await,
-    );
-
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or("none".into())
-        .add_directive("tower_http=debug".parse()?)
-        .add_directive("bakta_web_backend=trace".parse()?);
+        .unwrap_or_else(|_| EnvFilter::new("bakta_web_backend=info"));
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    // `bakta-web-backend backfill` imports the job history once and exits.
+    if std::env::args().nth(1).as_deref() == Some("backfill") {
+        return Ok(backfill::run().await?);
+    }
+
+    let socket_address: SocketAddr = dotenvy::var("SOCKET_ADDR")
+        .unwrap_or("127.0.0.1:8080".to_string())
+        .parse()?;
+    let metrics_socket_address: SocketAddr = dotenvy::var("METRICS_SOCKET_ADDR")
+        .unwrap_or("127.0.0.1:9090".to_string())
+        .parse()?;
+    let listener = tokio::net::TcpListener::bind(socket_address).await.unwrap();
+    let metrics_listener = tokio::net::TcpListener::bind(metrics_socket_address)
+        .await
+        .unwrap();
+    let swagger = SwaggerUi::new("/swagger-ui")
+        .url(
+            "/api-docs/openapi.json",
+            openapi::BaktaServiceApi::openapi(),
+        )
+        .url(
+            "/api-docs/openapi-v1.json",
+            api_structs::BaktaApi::openapi(),
+        )
+        .url(
+            "/api-docs/openapi-v2.json",
+            v2::api_structs::BaktaApiV2::openapi(),
+        );
+
+    let environment = dotenvy::var("ENVIRONMENT").unwrap_or_else(|_| "production".to_string());
+    if !regex::Regex::new(r"^[A-Za-z0-9._-]{1,63}$")?.is_match(&environment) {
+        return Err(format!("Invalid ENVIRONMENT value: {environment}").into());
+    }
+    // Off by default: see docs/admin-api.md, "Environment of a workflow".
+    let manage_legacy_production = match dotenvy::var("MANAGE_LEGACY_PRODUCTION_WORKFLOWS") {
+        Ok(value) if !value.is_empty() => value
+            .parse::<bool>()
+            .map_err(|_| format!("Invalid MANAGE_LEGACY_PRODUCTION_WORKFLOWS value: {value}"))?,
+        _ => false,
+    };
+    let stats = match dotenvy::var("STATS_DATABASE_URL") {
+        Ok(url) if !url.is_empty() => {
+            let db = stats::StatsDb::connect_lazy(&url)?;
+            let migration_db = db.clone();
+            tokio::spawn(async move {
+                while let Err(error) = migration_db.migrate().await {
+                    tracing::warn!(%error, "stats_migration_failed, retrying in 30 seconds");
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+                tracing::info!("Statistics database is ready");
+            });
+            let optional = |name: &str| dotenvy::var(name).ok().filter(|value| !value.is_empty());
+            stats::StatsRecorder::new(
+                db,
+                stats::JobVersions {
+                    bakta_version: optional("BAKTA_VERSION"),
+                    bakta_db_version: optional("DATABASE_VERSION"),
+                    baktfold_version: optional("BAKTFOLD_VERSION"),
+                    baktfold_db_version: optional("BAKTFOLD_DATABASE_VERSION"),
+                },
+            )
+        }
+        _ => {
+            tracing::info!("STATS_DATABASE_URL is not set, job statistics are disabled");
+            stats::StatsRecorder::disabled()
+        }
+    };
+
+    let argo_token = dotenvy::var("ARGO_TOKEN")?;
+    let argo_namespace = dotenvy::var("ARGO_NAMESPACE")?;
+    // The ARGO_TOKEN service account may list and watch the workflows.
+    let kube = informer::KubeApi::from_env(argo_token.clone(), &argo_namespace)?;
+    let mut bakta_handler = BaktaHandler::new(
+        argo_token,
+        dotenvy::var("ARGO_URL")?,
+        argo_namespace,
+        dotenvy::var("S3_ACCESS_KEY")?,
+        dotenvy::var("S3_SECRET_KEY")?,
+        dotenvy::var("S3_BUCKET")?,
+        dotenvy::var("S3_ENDPOINT")?,
+        dotenvy::var("BAKTA_VERSION")?,
+        dotenvy::var("DATABASE_VERSION")?,
+        dotenvy::var("BAKTFOLD_VERSION").unwrap_or_default(),
+        dotenvy::var("BAKTFOLD_DATABASE_VERSION").unwrap_or_default(),
+        dotenvy::var("BACKEND_VERSION")?,
+        environment,
+        manage_legacy_production,
+        stats,
+        kube,
+    )
+    .await;
+    bakta_handler.admin_auth = match dotenvy::var("ADMIN_OIDC_ISSUER") {
+        Ok(issuer) if !issuer.is_empty() => Some(Arc::new(admin::auth::AdminAuth::new(
+            admin::auth::AdminAuthConfig {
+                issuer,
+                client_id: dotenvy::var("ADMIN_OIDC_CLIENT_ID")
+                    .unwrap_or_else(|_| "bakta-admin".to_string()),
+                group: dotenvy::var("ADMIN_GROUP").unwrap_or_else(|_| "bakta-admin".to_string()),
+            },
+        ))),
+        _ => {
+            tracing::info!("ADMIN_OIDC_ISSUER is not set, the admin API is disabled");
+            None
+        }
+    };
+    if let Ok(days) = dotenvy::var("DATA_RETENTION_DAYS")
+        && !days.is_empty()
+    {
+        bakta_handler.data_retention_days = match days.parse::<i64>() {
+            Ok(days) if days > 0 => days,
+            _ => return Err(format!("Invalid DATA_RETENTION_DAYS value: {days}").into()),
+        };
+    }
+    let bakta_handler = Arc::new(bakta_handler);
+
     tracing::info!(?socket_address, "Starting bakta web backend");
+    tracing::info!(?metrics_socket_address, "Starting private metrics endpoint");
+
+    let metrics_state = bakta_handler.clone();
+    let metrics_app = Router::new()
+        .route("/metrics", get(metrics::metrics))
+        .with_state(metrics_state.clone());
 
     let app = Router::new()
         .merge(swagger)
         .route("/", get(|| async { Redirect::permanent("/swagger-ui") }))
-        .route("/api/v1/job/delete", delete(api_paths::delete_job))
-        .route("/api/v1/job/logs", get(api_paths::job_logs))
-        .route("/api/v1/job/init", post(api_paths::init_job))
-        .route("/api/v1/job/list", post(api_paths::list_jobs))
-        .route("/api/v1/job/result", post(api_paths::query_result))
-        .route("/api/v1/job/start", post(api_paths::start_job))
-        .route("/api/v1/version", get(api_paths::version))
+        .route("/ready", get(metrics::ready))
+        .route("/api/v1/job/delete", delete(v1::api_paths::delete_job))
+        .route("/api/v1/job/logs", get(v1::api_paths::job_logs))
+        .route("/api/v1/job/init", post(v1::api_paths::init_job))
+        .route("/api/v1/job/list", post(v1::api_paths::list_jobs))
+        .route("/api/v1/job/result", post(v1::api_paths::query_result))
+        .route("/api/v1/job/start", post(v1::api_paths::start_job))
+        .route("/api/v1/version", get(v1::api_paths::version))
+        .route("/api/v2/workflows", get(v2::api_paths::workflows))
+        .route("/api/v2/job/delete", delete(v2::api_paths::delete_job))
+        .route("/api/v2/job/logs", get(v2::api_paths::job_logs))
+        .route("/api/v2/job/init", post(v2::api_paths::init_job))
+        .route("/api/v2/job/list", post(v2::api_paths::list_jobs))
+        .route("/api/v2/job/result", post(v2::api_paths::query_result))
+        .route("/api/v2/job/start", post(v2::api_paths::start_job))
+        .route("/api/v2/version", get(v2::api_paths::version))
+        .nest("/api/admin", admin::router())
         .with_state(bakta_handler)
-        .layer(CorsLayer::very_permissive())
-        .layer(
-            TraceLayer::new_for_http()
-                .on_response(())
-                .on_body_chunk(())
-                .on_eos(()),
-        );
-    axum::serve(listener, app.into_make_service()).await?;
+        .layer(middleware::from_fn_with_state(
+            metrics_state,
+            metrics::track_http_metrics,
+        ))
+        .layer(CorsLayer::very_permissive());
+    tokio::try_join!(
+        axum::serve(listener, app.into_make_service()),
+        axum::serve(metrics_listener, metrics_app.into_make_service())
+    )?;
     Ok(())
 }

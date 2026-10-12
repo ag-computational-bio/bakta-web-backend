@@ -122,7 +122,35 @@ pub struct SimpleStatusList {
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimpleStatus {
     pub metadata: StatusMetadata,
+    #[serde(default)]
+    pub spec: ArgoWorkflowSpec,
     pub status: SimpleStatusStatus,
+    /// The `parameter` argument (the Bakta command line), when the workflow
+    /// came from the Kubernetes API. Used to fill the job details.
+    #[serde(skip)]
+    pub parameter: Option<String>,
+}
+
+impl From<&SimpleStatus> for ArgoWorkflow {
+    /// The polled fields of a workflow, without nodes.
+    fn from(item: &SimpleStatus) -> Self {
+        ArgoWorkflow {
+            metadata: ArgoWorkflowMetadata {
+                name: item.metadata.name.clone(),
+                labels: item.metadata.labels.clone(),
+                creation_timestamp: item.metadata.creation_timestamp,
+                resource_version: item.metadata.resource_version.clone(),
+            },
+            spec: item.spec.clone(),
+            status: ArgoWorkflowStatus {
+                phase: item.status.phase.clone(),
+                started_at: Some(item.status.started_at),
+                finished_at: item.status.finished_at,
+                message: item.status.message.clone(),
+                nodes: HashMap::new(),
+            },
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +159,8 @@ pub struct StatusMetadata {
     pub uid: Uuid,
     #[serde(rename = "resourceVersion")]
     pub resource_version: Option<String>,
+    #[serde(rename = "creationTimestamp", default)]
+    pub creation_timestamp: Option<DateTime<Utc>>,
     pub labels: HashMap<String, String>,
 }
 
@@ -141,6 +171,8 @@ pub struct SimpleStatusStatus {
     pub started_at: chrono::DateTime<Utc>,
     #[serde(rename = "finishedAt")]
     pub finished_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,9 +190,117 @@ pub struct SubmitResultMetadata {
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Content {
     pub content: String,
+    #[serde(rename = "podName", default)]
+    pub pod_name: Option<String>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct LogResult {
     pub result: Content,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowDetails {
+    pub status: WorkflowDetailStatus,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowDetailStatus {
+    #[serde(default)]
+    pub nodes: HashMap<String, WorkflowNodeStatus>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowNodeStatus {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub template_name: String,
+    #[serde(rename = "type", default)]
+    pub node_type: String,
+    #[serde(default)]
+    pub phase: String,
+    #[serde(rename = "startedAt", default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(rename = "finishedAt", default)]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Workflow as returned by the Argo workflow endpoints, reduced to the
+/// fields the admin API uses.
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArgoWorkflow {
+    #[serde(default)]
+    pub metadata: ArgoWorkflowMetadata,
+    #[serde(default)]
+    pub spec: ArgoWorkflowSpec,
+    #[serde(default)]
+    pub status: ArgoWorkflowStatus,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArgoWorkflowMetadata {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub creation_timestamp: Option<DateTime<Utc>>,
+    /// Kubernetes resource version of this state.
+    #[serde(default)]
+    pub resource_version: Option<String>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArgoWorkflowSpec {
+    #[serde(default)]
+    pub workflow_template_ref: Option<WorkflowTemplateRef>,
+    #[serde(default)]
+    pub suspend: Option<bool>,
+}
+
+impl ArgoWorkflow {
+    /// A running workflow is suspended when `spec.suspend` is set or a
+    /// suspend node is still running.
+    pub fn is_suspended(&self) -> bool {
+        self.status.phase == "Running"
+            && (self.spec.suspend == Some(true)
+                || self
+                    .status
+                    .nodes
+                    .values()
+                    .any(|node| node.node_type == "Suspend" && node.phase == "Running"))
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArgoWorkflowStatus {
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub nodes: HashMap<String, WorkflowNodeStatus>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgoWorkflowList {
+    #[serde(default)]
+    pub items: Option<Vec<ArgoWorkflow>>,
 }

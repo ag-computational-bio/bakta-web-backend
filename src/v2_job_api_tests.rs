@@ -1,0 +1,415 @@
+//! Router-level tests for the V2 job log, result and delete endpoints with mock Argo and S3 servers.
+
+use crate::{
+    api_structs::ArgoStatus,
+    bakta_handler::ApiVersion,
+    test_support::*,
+    v2::api_structs::{ResultKind, WorkflowKind},
+};
+use axum::http::StatusCode;
+use serde_json::json;
+use uuid::Uuid;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path, query_param},
+};
+
+#[tokio::test]
+async fn logs_for_unstarted_job_list_pending_stages() {
+    let handler = test_handler("http://127.0.0.1:1", "https://s3.example.com");
+    let id = v2_state(&handler, WorkflowKind::BaktaBaktfold, None).await;
+    let router = test_router(handler);
+    let (status, body) = call(
+        &router,
+        "GET",
+        &format!("/api/v2/job/logs?job_id={id}&secret={TEST_SECRET}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse(&body);
+    assert_eq!(v["workflow_kind"], "bakta_baktfold");
+    assert_eq!(v["stages"][0]["stage"], "bakta");
+    assert_eq!(v["stages"][0]["status"], "pending");
+    assert_eq!(v["stages"][1]["stage"], "baktfold");
+    assert_eq!(v["stages"][1]["content"], "");
+}
+
+#[tokio::test]
+async fn logs_group_pod_output_by_stage() {
+    let argo = MockServer::start().await;
+    let wf = "wf-1";
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/workflows/bakta/{wf}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": {"nodes": {
+                "a": {"id": "a", "name": "wf-1.bakta", "displayName": "bakta",
+                      "templateName": "bakta", "type": "Pod", "phase": "Succeeded"},
+                "b": {"id": "wf-1-baktfold-pod", "name": "wf-1.baktfold",
+                      "displayName": "baktfold", "templateName": "baktfold",
+                      "type": "Pod", "phase": "Running"}
+            }}
+        })))
+        .mount(&argo)
+        .await;
+    let line1 = json!({"result": {"content": "bakta done", "podName": "a"}}).to_string();
+    let line2 =
+        json!({"result": {"content": "fold busy", "podName": "wf-1-baktfold-pod"}}).to_string();
+    let noise = json!({"result": {"content": "argo=true", "podName": "a"}}).to_string();
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/workflows/bakta/{wf}/log")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(format!("{line1}\n{noise}\n\n{line2}\n")),
+        )
+        .mount(&argo)
+        .await;
+
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let mut state = job_state(
+        ApiVersion::V2,
+        WorkflowKind::BaktaBaktfold,
+        ResultKind::Bakta,
+        Some(ArgoStatus::Running),
+    );
+    state.workflowname = Some(wf.to_string());
+    let id = insert_state(&handler, state).await;
+    let router = test_router(handler);
+    let (status, body) = call(
+        &router,
+        "GET",
+        &format!("/api/v2/job/logs?job_id={id}&secret={TEST_SECRET}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v = parse(&body);
+    assert_eq!(v["stages"][0]["status"], "succeeded");
+    assert_eq!(v["stages"][0]["content"], "bakta done");
+    assert_eq!(v["stages"][1]["status"], "running");
+    assert_eq!(v["stages"][1]["content"], "fold busy");
+}
+
+#[tokio::test]
+async fn logs_fail_when_argo_is_unreachable_or_job_is_invalid() {
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let mut state = job_state(
+        ApiVersion::V2,
+        WorkflowKind::Bakta,
+        ResultKind::Bakta,
+        Some(ArgoStatus::Running),
+    );
+    state.workflowname = Some("wf".to_string());
+    let id = insert_state(&handler, state).await;
+    let router = test_router(handler);
+
+    let (status, body) = call(
+        &router,
+        "GET",
+        &format!("/api/v2/job/logs?job_id={id}&secret={TEST_SECRET}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("Failed to retrieve workflow logs"));
+
+    let (status, body) = call(
+        &router,
+        "GET",
+        &format!("/api/v2/job/logs?job_id={id}&secret=wrong"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("Unauthorized"));
+
+    let (status, body) = call(
+        &router,
+        "GET",
+        &format!("/api/v2/job/logs?job_id={}&secret=x", Uuid::new_v4()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("Job not found"));
+
+    let (status, _) = call(&router, "GET", "/api/v2/job/logs", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn result_requires_finished_job_and_correct_secret() {
+    let handler = test_handler("http://127.0.0.1:1", "https://s3.example.com");
+    let running = v2_state(&handler, WorkflowKind::Bakta, Some(ArgoStatus::Running)).await;
+    let router = test_router(handler);
+    for (id, secret, expected) in [
+        (running, TEST_SECRET, "Job not finished"),
+        (running, "wrong", "Unauthorized"),
+        (Uuid::new_v4(), TEST_SECRET, "Job not found"),
+    ] {
+        let (status, body) = call(
+            &router,
+            "POST",
+            "/api/v2/job/result",
+            Some(json!({"job_id": id, "secret": secret})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains(expected), "{body}");
+    }
+}
+
+#[tokio::test]
+async fn delete_removes_state_and_calls_argo() {
+    let argo = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-del"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let mut state = job_state(
+        ApiVersion::V2,
+        WorkflowKind::Bakta,
+        ResultKind::Bakta,
+        Some(ArgoStatus::Running),
+    );
+    state.workflowname = Some("wf-del".to_string());
+    let id = insert_state(&handler, state).await;
+    let router = test_router(handler.clone());
+
+    let (status, body) = call(
+        &router,
+        "DELETE",
+        &format!("/api/v2/job/delete?job_id={id}&secret=wrong"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("Unauthorized"));
+    assert!(
+        handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
+
+    let (status, _) = call(
+        &router,
+        "DELETE",
+        &format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
+}
+
+#[tokio::test]
+async fn delete_keeps_state_when_argo_fails() {
+    let argo = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let mut state = job_state(
+        ApiVersion::V2,
+        WorkflowKind::Bakta,
+        ResultKind::Bakta,
+        Some(ArgoStatus::Running),
+    );
+    state.workflowname = Some("wf".to_string());
+    let id = insert_state(&handler, state).await;
+    let router = test_router(handler.clone());
+    let (status, _) = call(
+        &router,
+        "DELETE",
+        &format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
+}
+
+#[tokio::test]
+async fn delete_is_refused_while_a_submission_is_unknown() {
+    let argo = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let id = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    handler
+        .state_handler
+        .unknown_submissions
+        .lock()
+        .unwrap()
+        .insert(
+            id,
+            crate::bakta_handler::UnknownSubmission::new(chrono::Utc::now()),
+        );
+    let router = test_router(handler.clone());
+    for uri in [
+        format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+        format!("/api/v1/job/delete?jobID={id}&secret={TEST_SECRET}"),
+    ] {
+        let (status, body) = call(&router, "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("not known yet"), "{body}");
+    }
+    assert!(
+        handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
+}
+
+#[tokio::test]
+async fn delete_of_unknown_job_succeeds() {
+    let router = test_router(test_handler("http://127.0.0.1:1", "https://s3.example.com"));
+    let (status, _) = call(
+        &router,
+        "DELETE",
+        &format!("/api/v2/job/delete?job_id={}&secret=x", Uuid::new_v4()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn delete_removes_a_workflow_the_job_state_does_not_know() {
+    let argo = MockServer::start().await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let id = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .and(query_param("listOptions.labelSelector", format!("jobid={id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [
+            {"metadata": {"name": "wf-unknown", "labels": {"jobid": id.to_string()}}, "status": {"phase": "Running"}}
+        ]})))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-unknown"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let router = test_router(handler.clone());
+    let (status, body) = call(
+        &router,
+        "DELETE",
+        &format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
+}
+
+#[tokio::test]
+async fn a_slow_delete_does_not_block_other_jobs() {
+    let argo = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"items": []}))
+                .set_delay(std::time::Duration::from_secs(3)),
+        )
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let handler = test_handler(&argo.uri(), "https://s3.example.com");
+    let slow = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    let other = v2_state(&handler, WorkflowKind::Bakta, None).await;
+    let router = test_router(handler.clone());
+    let delete = tokio::spawn({
+        let router = router.clone();
+        async move {
+            call(
+                &router,
+                "DELETE",
+                &format!("/api/v2/job/delete?job_id={slow}&secret={TEST_SECRET}"),
+                None,
+            )
+            .await
+        }
+    });
+    // Wait until the delete holds the reservation and waits on Argo.
+    while argo.received_requests().await.unwrap().is_empty() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let state = &handler.state_handler;
+    let others = async {
+        let (new_job, _) = state
+            .init_job_v2("x".to_string(), WorkflowKind::Bakta)
+            .await;
+        let workflow: crate::argo::structs::SimpleStatus = serde_json::from_value(json!({
+            "metadata": {"name": "wf-slow", "uid": Uuid::new_v4(),
+                         "labels": {"jobid": slow.to_string(), "secret": TEST_SECRET}},
+            "status": {"phase": "Running", "startedAt": chrono::Utc::now().to_rfc3339()}
+        }))
+        .unwrap();
+        state
+            .apply_workflow_statuses(vec![workflow], chrono::Utc::now())
+            .await;
+        let list = state
+            .get_job_states_v2(vec![crate::v2::api_structs::JobReference {
+                job_id: other,
+                secret: TEST_SECRET.to_string(),
+            }])
+            .await
+            .unwrap();
+        assert!(list.failed_jobs.is_empty());
+        new_job
+    };
+    let new_job = tokio::time::timeout(std::time::Duration::from_secs(1), others)
+        .await
+        .expect("other jobs were blocked by the delete");
+    // The poll did not change the job that is being deleted.
+    assert!(state.job_state.read().await[&slow].workflowname.is_none());
+    assert!(state.job_state.read().await.contains_key(&new_job));
+
+    let (status, body) = delete.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!state.job_state.read().await.contains_key(&slow));
+}

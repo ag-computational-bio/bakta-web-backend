@@ -1,6 +1,6 @@
-use crate::api_paths::*;
-use anyhow::anyhow;
+use crate::v1::api_paths::*;
 use anyhow::Result;
+use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -10,9 +10,12 @@ use uuid::Uuid;
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "Bakta Web API",
-        description = "API for the Bakta Web Service, see: [https://bakta.readthedocs.io](https://bakta.readthedocs.io) for full documentation",
+        title = "Bakta Web API V1",
+        description = "Stable V1 API for the original Bakta genome annotation workflow. This surface is preserved for backward compatibility.",
         license(name = "MIT", url = "https://opensource.org/license/mit/")
+    ),
+    tags(
+        (name = "v1", description = "Stable V1 Bakta API.")
     ),
     paths(
         delete_job,
@@ -44,14 +47,18 @@ use uuid::Uuid;
 )]
 pub struct BaktaApi;
 
+/// Shared V1 job handle used for authenticated job operations.
 #[derive(ToSchema, Serialize, Deserialize, IntoParams)]
 #[into_params(style = Form, parameter_in = Query)]
 pub struct Job {
+    /// Secret returned during job initialization and required for later job operations.
     pub secret: String,
+    /// Unique job identifier returned during job initialization.
     #[serde(rename = "jobID")]
     pub id: Uuid,
 }
 
+/// Upload format for the optional replicon table used in V1 job initialization.
 #[derive(ToSchema, Serialize, Deserialize, Default)]
 pub enum RepliconTableType {
     #[default]
@@ -59,13 +66,17 @@ pub enum RepliconTableType {
     TSV,
 }
 
+/// Request body for creating a new V1 Bakta job and receiving upload URLs.
 #[derive(ToSchema, Serialize, Deserialize)]
 pub struct InitRequest {
+    /// Human-readable name shown in job listings and used as the download filename prefix.
     pub name: String,
+    /// Preferred replicon table upload format.
     #[serde(rename = "repliconTableType")]
     pub replicon_type: RepliconTableType,
 }
 
+/// Upload URLs and job credentials returned by the V1 initialization endpoint.
 #[derive(ToSchema, Serialize, Deserialize)]
 pub struct InitResponse {
     #[serde(rename = "uploadLinkFasta")]
@@ -77,11 +88,13 @@ pub struct InitResponse {
     pub job: Job,
 }
 
+/// Request body for listing multiple V1 jobs at once.
 #[derive(ToSchema, Serialize, Deserialize)]
 pub struct ListRequest {
     pub jobs: Vec<Job>,
 }
 
+/// Current external lifecycle status returned for a V1 job.
 #[derive(ToSchema, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum JobStatusEnum {
     INIT,
@@ -146,6 +159,7 @@ pub struct JobStatus {
     pub name: String,
 }
 
+/// Failure details for requested jobs that could not be listed.
 #[derive(ToSchema, Serialize, Deserialize)]
 pub struct FailedJobStatus {
     #[serde(rename = "jobID")]
@@ -154,6 +168,7 @@ pub struct FailedJobStatus {
     pub status: FailedJobStatusEnum,
 }
 
+/// V1 response body for listing job states in bulk.
 #[derive(ToSchema, Serialize, Deserialize)]
 pub struct ListResponse {
     pub jobs: Vec<JobStatus>,
@@ -161,6 +176,7 @@ pub struct ListResponse {
     pub failed: Vec<FailedJobStatus>,
 }
 
+/// Fixed set of Bakta result artifact download URLs returned by V1.
 #[derive(ToSchema, Serialize, Deserialize)]
 pub struct ResultFiles {
     #[serde(rename = "EMBL")]
@@ -193,6 +209,7 @@ pub struct ResultFiles {
     pub svg_circular_plot: String,
 }
 
+/// V1 response body for a finished Bakta job.
 #[derive(ToSchema, Serialize, Deserialize)]
 pub struct ResultResponse {
     #[serde(rename = "jobID")]
@@ -215,6 +232,7 @@ fn default_replicons() -> bool {
     true
 }
 
+/// V1 Bakta job configuration exposed by the start endpoint.
 #[derive(ToSchema, Serialize, Deserialize, Default)]
 pub struct JobConfig {
     #[serde(rename = "prodigalTrainingFile")]
@@ -265,44 +283,44 @@ impl JobConfig {
             parameters.push("--complete".to_string());
         }
 
-        if let Some(locus) = self.locus {
-            if !locus.is_empty() {
-                parameters.push(format!("--locus {}", sanitize_input(locus)));
-            }
+        if let Some(locus) = self.locus
+            && !locus.is_empty()
+        {
+            parameters.push(format!("--locus {}", sanitize_input(locus)));
         }
 
-        if let Some(locus_tag) = self.locus_tag {
-            if !locus_tag.is_empty() {
-                parameters.push(format!("--locus-tag {}", sanitize_input(locus_tag)));
-            }
+        if let Some(locus_tag) = self.locus_tag
+            && !locus_tag.is_empty()
+        {
+            parameters.push(format!("--locus-tag {}", sanitize_input(locus_tag)));
         }
 
         if self.headers {
             parameters.push("--keep-contig-headers".to_string());
         }
 
-        if let Some(genus) = self.genus {
-            if !genus.is_empty() {
-                parameters.push(format!("--genus {}", sanitize_input(genus)));
-            }
+        if let Some(genus) = self.genus
+            && !genus.is_empty()
+        {
+            parameters.push(format!("--genus {}", sanitize_input(genus)));
         }
 
-        if let Some(species) = self.species {
-            if !species.is_empty() {
-                parameters.push(format!("--species {}", sanitize_input(species)));
-            }
+        if let Some(species) = self.species
+            && !species.is_empty()
+        {
+            parameters.push(format!("--species {}", sanitize_input(species)));
         }
 
-        if let Some(strain) = self.strain {
-            if !strain.is_empty() {
-                parameters.push(format!("--strain {}", sanitize_input(strain)));
-            }
+        if let Some(strain) = self.strain
+            && !strain.is_empty()
+        {
+            parameters.push(format!("--strain {}", sanitize_input(strain)));
         }
 
-        if let Some(plasmid) = self.plasmid {
-            if !plasmid.is_empty() {
-                parameters.push(format!("--plasmid {}", sanitize_input(plasmid)));
-            }
+        if let Some(plasmid) = self.plasmid
+            && !plasmid.is_empty()
+        {
+            parameters.push(format!("--plasmid {}", sanitize_input(plasmid)));
         }
 
         if self.compliant {
@@ -324,12 +342,14 @@ impl JobConfig {
     }
 }
 
+/// Request body for starting a V1 Bakta job after uploads are complete.
 #[derive(ToSchema, Serialize, Deserialize)]
 pub struct StartRequest {
     pub job: Job,
     pub config: JobConfig,
 }
 
+/// Version information exposed by the V1 compatibility API.
 #[derive(ToSchema, Serialize, Deserialize, Clone)]
 pub struct VersionResponse {
     #[serde(rename = "toolVersion")]
@@ -365,9 +385,9 @@ mod test {
 
         assert_eq!(
             params.into_parameters(),
-            "--prodigal /data/prodigal.tf --replicons /data/replicons.tsv --complete --locus BSU_00010 --locus-tag BSU00010 --keep-contig-headers --genus Bacillus --species subtilis --strain 168 --plasmid pBS32 --compliant --translation-table 4 --gram +"
+            "--prodigal /data/prodigal.tf --replicons /data/replicons.tsv --complete --locus 'BSU_00010' --locus-tag 'BSU00010' --keep-contig-headers --genus 'Bacillus' --species 'subtilis' --strain '168' --plasmid 'pBS32' --compliant --translation-table 4 --gram +"
         );
 
-        assert_eq!(JobConfig::default().into_parameters(), "--derm ?");
+        assert_eq!(JobConfig::default().into_parameters(), "--gram ?");
     }
 }
