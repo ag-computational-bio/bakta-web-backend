@@ -29,6 +29,8 @@ use crate::{
 struct JobTarget {
     in_memory: Option<FullJobState>,
     workflow_name: Option<String>,
+    /// The job record has status `deleted`.
+    deleted: bool,
 }
 
 async fn find_job(state: &BaktaHandler, id: Uuid) -> Result<JobTarget, AdminError> {
@@ -37,6 +39,7 @@ async fn find_job(state: &BaktaHandler, id: Uuid) -> Result<JobTarget, AdminErro
         return Ok(JobTarget {
             workflow_name: job.workflowname.clone(),
             in_memory: Some(job),
+            deleted: false,
         });
     }
     let record = match handler.stats.db() {
@@ -46,13 +49,40 @@ async fn find_job(state: &BaktaHandler, id: Uuid) -> Result<JobTarget, AdminErro
     .ok_or_else(|| AdminError::NotFound("Job not found".to_string()))?;
     Ok(JobTarget {
         in_memory: None,
+        deleted: record.status == "deleted",
         workflow_name: record.workflow_name,
     })
+}
+
+/// True when the job was deleted: it is in the backend's list of deleted
+/// jobs, or it is not in memory and its record has status `deleted`. A
+/// failed database lookup counts as not deleted.
+async fn job_deleted(state: &BaktaHandler, id: Uuid) -> bool {
+    let handler = &state.state_handler;
+    if handler.is_deleted(&id) {
+        return true;
+    }
+    if handler.job_state.read().await.contains_key(&id) {
+        return false;
+    }
+    match handler.stats.db() {
+        Some(db) => db
+            .get_job(id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, job_id = %id, "admin_deleted_lookup_failed");
+                None
+            })
+            .is_some_and(|record| record.status == "deleted"),
+        None => false,
+    }
 }
 
 const INPUT_DATA_DELETED: &str = "Input data was deleted after the retention period";
 /// A start, delete or resubmit of the job is in progress.
 const JOB_BUSY: &str = "Job is busy, try again later";
+/// The job was deleted. A resubmit would add it back.
+const JOB_DELETED: &str = "Job was deleted";
 
 /// True while the job's S3 data exists. The reference time comes from the
 /// job record, or from the in-memory state when there is no record.
@@ -266,7 +296,13 @@ pub async fn resubmit_job(
     if handler.is_submission_unknown(&id) {
         return Err(AdminError::Conflict(SubmissionUnknown.to_string()));
     }
+    if handler.is_deleted(&id) {
+        return Err(AdminError::Conflict(JOB_DELETED.to_string()));
+    }
     let target = find_job(&state, id).await?;
+    if target.deleted {
+        return Err(AdminError::Conflict(JOB_DELETED.to_string()));
+    }
     let old_name = require_workflow(&target)?;
     if !job_data_available(&state, id, target.in_memory.as_ref()).await {
         return Err(AdminError::Conflict(INPUT_DATA_DELETED.to_string()));
@@ -825,6 +861,17 @@ pub async fn bulk_workflows(
                 Ok(reservation) => _reservation = Some(reservation),
                 Err(_) => reason = Some(JOB_BUSY.to_string()),
             }
+        }
+        if reason.is_none()
+            && action == BulkAction::Resubmit
+            && let Some(id) = workflow
+                .metadata
+                .labels
+                .get("jobid")
+                .and_then(|value| value.parse::<Uuid>().ok())
+            && job_deleted(&state, id).await
+        {
+            reason = Some(JOB_DELETED.to_string());
         }
         // An earlier start or resubmit may have created a workflow that is
         // not known yet.

@@ -1710,6 +1710,15 @@ impl StateHandler {
             .insert(job_id, Utc::now());
     }
 
+    /// True when the job was deleted or expired within the last
+    /// `JOB_RETENTION_DAYS` while the backend ran.
+    pub(crate) fn is_deleted(&self, job_id: &Uuid) -> bool {
+        self.deleted_jobs
+            .lock()
+            .expect("deleted jobs lock poisoned")
+            .contains_key(job_id)
+    }
+
     fn record_expired(&self, expired: Vec<(Uuid, Option<String>)>) {
         for (id, workflow_name) in expired {
             self.record_deleted(id);

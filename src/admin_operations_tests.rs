@@ -2286,3 +2286,90 @@ async fn an_unknown_bulk_resubmit_blocks_the_job_until_enough_polls_found_nothin
         Some("wf-old")
     );
 }
+
+const JOB_DELETED: &str = "Job was deleted";
+
+/// Checks that a single and a bulk resubmit (dry and real run) refuse the
+/// deleted job `id`, whose workflow `name` Argo still lists.
+async fn assert_resubmit_refuses_deleted_job(
+    setup: &crate::admin_api_tests::AdminSetup,
+    argo: &MockServer,
+    id: Uuid,
+    name: &str,
+) {
+    let listed = listed_workflow(name, "Failed", Some(&id.to_string()), Some(1));
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [listed]})))
+        .mount(argo)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(workflow("wf-new", "Pending"))
+        .expect(0)
+        .mount(argo)
+        .await;
+    let (status, body) = admin_call(
+        setup,
+        "POST",
+        &format!("/api/admin/jobs/{id}/resubmit"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], JOB_DELETED);
+    for dry_run in [true, false] {
+        let (status, body) = admin_call(
+            setup,
+            "POST",
+            "/api/admin/workflows/bulk",
+            Some(json!({"action": "resubmit", "dry_run": dry_run})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["items"][0]["applicable"], false, "{body}");
+        assert_eq!(body["items"][0]["reason"], JOB_DELETED, "{body}");
+    }
+    let states = setup.handler.state_handler.job_state.read().await;
+    assert!(!states.contains_key(&id));
+}
+
+#[tokio::test]
+async fn resubmit_refuses_a_job_deleted_in_memory() {
+    let argo = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-old"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    let id = job_with_workflow(&setup.handler, "wf-old", ArgoStatus::Failed).await;
+    let (status, body) = call(
+        &setup.router,
+        "DELETE",
+        &format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_resubmit_refuses_deleted_job(&setup, &argo, id, "wf-old").await;
+}
+
+#[tokio::test]
+async fn resubmit_refuses_a_job_deleted_in_the_database() {
+    let Some(db) = test_db("resubmit_refuses_a_job_deleted_in_the_database").await else {
+        return;
+    };
+    let now = Utc::now();
+    let id = aged_job(
+        &db,
+        &unique_environment(),
+        now - Duration::days(1),
+        Some(now - Duration::hours(1)),
+    )
+    .await;
+    db.apply(&StatsEvent::Deleted { id }).await.unwrap();
+    let argo = MockServer::start().await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", Some(db.clone())).await;
+    assert_resubmit_refuses_deleted_job(&setup, &argo, id, &format!("wf-{id}")).await;
+}

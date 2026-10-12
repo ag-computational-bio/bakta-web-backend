@@ -297,6 +297,7 @@ Argo retry of a failed or errored workflow (reruns failed steps). `409` if the w
 Argo resubmit: a new workflow with the same parameters. The job record points to the new `workflow_name` and goes back to `submitted`. `409` with `{ "error": "Input data was deleted after the retention period" }` when `data_available` is false. Response: `{ "workflow_name": "...", "phase": "Pending" }`.
 `409` with `{ "error": "Job is busy, try again later" }` while the job is being started, deleted or resubmitted. While the resubmit runs, start and delete requests for the job are refused with `409`.
 A retry needs no such check: it reruns the same workflow and creates no new one, so a delete at the same time removes it.
+`409` with `{ "error": "Job was deleted" }` when the job was deleted: it is in the backend's in-memory list of deleted and expired jobs, or it is not in memory and its record has status `deleted`. A resubmit never adds a deleted job back.
 When the resubmit answer times out or cannot be read, the response is `502` and the job is marked as unresolved (see Unresolved start requests). Retry and resubmit answer `409` with `{ "error": "The result of an earlier start request is not known yet, try again later" }` while a job is unresolved.
 
 ### `POST /jobs/{id}/stop`
@@ -360,6 +361,7 @@ Runs one action on all live workflows that match a filter.
 - `retry` and `resubmit` only apply to the job's current workflow. An older workflow of a job that was resubmitted is not applicable (`reason` names the current workflow).
 - When the job's current workflow cannot be determined (for example the job is not in memory after a restart and the statistics database fails or is not configured, or the job's workflow is not recorded yet), `retry` and `resubmit` do not apply: `applicable` is false and `reason` is `Current workflow unknown, try again later`. A workflow without a `jobid` label, or whose job has no record, counts as current. The single `retry` and `resubmit` endpoints answer `503` when the job lookup fails.
 - `retry` and `resubmit` do not apply when the input data is gone: `applicable` is false and `reason` is `Input data deleted after the retention period`. The reference time is the job's `finished_at` or `created_at` (see Data retention). For a workflow without a job record, it is the workflow's finish time or, if it has none, its creation time.
+- `resubmit` does not apply to a workflow of a deleted job (same rule as the single resubmit): `applicable` is false and `reason` is `Job was deleted`.
 - In a real run, `resubmit` is skipped while the job is being started, deleted or resubmitted: `applicable` is false and `reason` is `Job is busy, try again later`. A dry run does not check this. A real `resubmit` reserves the job before it checks which workflow is current, and keeps it reserved until the result is recorded. While a bulk run holds the reservation, other start, delete and resubmit requests for the job are refused with `409`.
 - Workflows are processed one by one. One failure does not stop the others. Each action is logged with the admin user name.
 
