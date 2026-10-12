@@ -16,7 +16,7 @@ Both sides implement exactly what is described here. Changes to the contract are
 |---|---|---|
 | `ENVIRONMENT` | `production` | Environment name written to every job record and to the `bakta-environment` workflow label. Default `production`. |
 | `STATS_DATABASE_URL` | `postgres://bakta_stats:...@bakta-stats-postgres:5432/bakta_stats` | Statistics database. If unset, job recording and the statistics endpoints are disabled, and finished jobs are kept in memory for 35 days instead of being served from the database (see "Workflow watch"). |
-| `MANAGE_LEGACY_PRODUCTION_WORKFLOWS` | `false` | Default `false`. When `true`, a backend whose `ENVIRONMENT` is not `production` also manages workflows without a `bakta-environment` label whose derived environment is `production` (see "Environment of a workflow"). Only for the time while production still runs the old backend, which records nothing. Turn it off when the production backend runs this version. |
+| `MANAGE_LEGACY_PRODUCTION_WORKFLOWS` | `false` | Default `false`. When `true`, a backend whose `ENVIRONMENT` is not `production` also manages workflows without a `bakta-environment` label whose derived environment is `production` (see "Environment of a workflow"). Only for the time while production still runs the old backend, which records nothing. It must be `false` on staging **before or together with** the upgrade of the production backend to this version, see "Operator note" below. |
 | `KUBERNETES_API_URL` | `https://127.0.0.1:6443` | Kubernetes API server for the workflow watch. Default in a pod: `https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT`. One of them must be set. The token is `ARGO_TOKEN`: its service account needs `get`, `list` and `watch` on `workflows.argoproj.io` in `ARGO_NAMESPACE`. |
 | `KUBERNETES_CA_FILE` | `/etc/kube/ca.crt` | CA certificate of the API server. Default: the service account CA of the pod when it exists, else the system certificates. |
 | `ADMIN_OIDC_ISSUER` | `https://auth.bakta.computational.bio/realms/bakta` | Keycloak realm issuer. If unset, the admin API is disabled. |
@@ -168,6 +168,15 @@ The web UI fills it from the parsed FASTA input. The backend stores it in `seque
 - For succeeded `bakta` and `bakta_baktfold` jobs, `total_length`, `sequence_count` and `bakta_db_version` come from Bakta's summary `jobs/<id>/results/result.txt` in S3, if it still exists.
 - `secret_hash`, `result_kind` and `argo_uid` are filled like the other columns.
 - Running it again changes nothing that is already filled. Errors of single jobs are logged and skipped. It logs progress every 1000 jobs and a final summary (`inserted`, `filled`, `skipped`, `s3_missing`, `errors`).
+
+### Operator note: `MANAGE_LEGACY_PRODUCTION_WORKFLOWS`
+
+Turn `MANAGE_LEGACY_PRODUCTION_WORKFLOWS` off on staging **before or in the same rollout as** the production backend upgrade to this version. An upgraded production backend owns all workflows that count as `production`, including the unlabelled old ones. If staging still has the switch on, both backends own these jobs: both write their records, serve them and apply admin changes, and their states can overwrite each other. Order of the rollout:
+
+1. Set `MANAGE_LEGACY_PRODUCTION_WORKFLOWS=false` (or remove it) on staging and restart staging.
+2. Deploy the production backend of this version.
+
+Rolling both in one change is fine, as long as staging does not run with the switch on next to an upgraded production backend.
 
 ## Workflow watch
 

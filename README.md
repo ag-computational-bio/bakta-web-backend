@@ -42,7 +42,7 @@ The container accepts the following settings via env-vars or `.env`:
 - `KUBERNETES_API_URL=https://127.0.0.1:6443` (only outside a pod; in a pod the service variables are used)
 - `KUBERNETES_CA_FILE=/path/to/ca.crt` (optional)
 - `STATS_DATABASE_URL=postgres://...` (optional)
-- `MANAGE_LEGACY_PRODUCTION_WORKFLOWS=false` (optional; see `docs/admin-api.md`)
+- `MANAGE_LEGACY_PRODUCTION_WORKFLOWS=false` (optional, default `false`). Only for staging while production still runs the old backend. Switch it off on staging **before or together with** the production upgrade to this version, otherwise both backends own the unlabelled production workflows. See "Operator note" in `docs/admin-api.md`.
 
 Notes:
 - `SOCKET_ADDR` is the public API listener.
