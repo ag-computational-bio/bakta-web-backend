@@ -2140,3 +2140,149 @@ async fn resubmit_is_refused_while_a_bulk_resubmit_checks_the_job() {
     let states = setup.handler.state_handler.job_state.read().await;
     assert_eq!(states[&id].workflowname.as_deref(), Some("wf-new"));
 }
+
+/// A polled workflow of a job with a creation time.
+fn polled_workflow(
+    id: Uuid,
+    name: &str,
+    phase: &str,
+    created: chrono::DateTime<Utc>,
+) -> SimpleStatus {
+    serde_json::from_value(json!({
+        "metadata": {"name": name, "uid": Uuid::new_v4(),
+                     "creationTimestamp": created.to_rfc3339(),
+                     "labels": {"jobid": id.to_string(), "secret": TEST_SECRET, "api-version": "v2"}},
+        "status": {"phase": phase, "startedAt": created.to_rfc3339()}
+    }))
+    .unwrap()
+}
+
+const SUBMISSION_UNKNOWN: &str =
+    "The result of an earlier start request is not known yet, try again later";
+
+/// Argo creates the new workflow, but its resubmit answer cannot be read.
+async fn mount_unreadable_resubmit(argo: &MockServer, name: &str) {
+    Mock::given(method("PUT"))
+        .and(path(format!("/api/v1/workflows/bakta/{name}/resubmit")))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .expect(1)
+        .mount(argo)
+        .await;
+}
+
+#[tokio::test]
+async fn an_unknown_resubmit_blocks_the_job_until_a_poll_finds_the_new_workflow() {
+    let argo = MockServer::start().await;
+    mount_unreadable_resubmit(&argo, "wf-old").await;
+    // Only the new workflow is deleted in the end.
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-new"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(0)
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    let state = &setup.handler.state_handler;
+    let id = job_with_workflow(&setup.handler, "wf-old", ArgoStatus::Failed).await;
+    let resubmit = format!("/api/admin/jobs/{id}/resubmit");
+    let requested = Utc::now();
+    let (status, body) = admin_call(&setup, "POST", &resubmit, None).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+
+    // Delete, resubmit and retry are refused.
+    let (status, body) = admin_call(&setup, "DELETE", &format!("/api/admin/jobs/{id}"), None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], SUBMISSION_UNKNOWN);
+    let (status, body) = call(
+        &setup.router,
+        "DELETE",
+        &format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    for action in ["resubmit", "retry"] {
+        let (status, body) = admin_call(
+            &setup,
+            "POST",
+            &format!("/api/admin/jobs/{id}/{action}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], SUBMISSION_UNKNOWN);
+    }
+
+    // A poll that only lists the old workflow does not resolve the job.
+    let old = polled_workflow(id, "wf-old", "Failed", requested - Duration::hours(1));
+    let now = Utc::now() + Duration::seconds(1);
+    state.apply_workflow_statuses(vec![old.clone()], now).await;
+    assert!(state.is_submission_unknown(&id));
+    assert_eq!(
+        state.job_state.read().await[&id].workflowname.as_deref(),
+        Some("wf-old")
+    );
+
+    // A poll that lists the new workflow resolves it.
+    let new = polled_workflow(id, "wf-new", "Running", requested);
+    state.apply_workflow_statuses(vec![old, new], now).await;
+    assert!(!state.is_submission_unknown(&id));
+    assert_eq!(
+        state.job_state.read().await[&id].workflowname.as_deref(),
+        Some("wf-new")
+    );
+    let (status, body) = admin_call(&setup, "DELETE", &format!("/api/admin/jobs/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn an_unknown_bulk_resubmit_blocks_the_job_until_enough_polls_found_nothing() {
+    let argo = MockServer::start().await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    let state = &setup.handler.state_handler;
+    let id = job_with_workflow(&setup.handler, "wf-old", ArgoStatus::Failed).await;
+    let listed = listed_workflow("wf-old", "Failed", Some(&id.to_string()), Some(1));
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [listed]})))
+        .mount(&argo)
+        .await;
+    mount_unreadable_resubmit(&argo, "wf-old").await;
+    let bulk = json!({"action": "resubmit", "dry_run": false});
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        "/api/admin/workflows/bulk",
+        Some(bulk.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"][0]["result"], "failed", "{body}");
+
+    // A second bulk run skips the job.
+    let (status, body) = admin_call(&setup, "POST", "/api/admin/workflows/bulk", Some(bulk)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"][0]["applicable"], false, "{body}");
+    assert_eq!(body["items"][0]["reason"], SUBMISSION_UNKNOWN);
+    let (status, _) = admin_call(&setup, "DELETE", &format!("/api/admin/jobs/{id}"), None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Polls that only list the old workflow count as empty.
+    let old = polled_workflow(id, "wf-old", "Failed", Utc::now() - Duration::hours(1));
+    for minutes in [4, 8, 11] {
+        assert!(state.is_submission_unknown(&id));
+        state
+            .apply_workflow_statuses(vec![old.clone()], Utc::now() + Duration::minutes(minutes))
+            .await;
+    }
+    assert!(!state.is_submission_unknown(&id));
+    assert_eq!(
+        state.job_state.read().await[&id].workflowname.as_deref(),
+        Some("wf-old")
+    );
+}

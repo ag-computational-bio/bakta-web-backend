@@ -201,6 +201,10 @@ pub async fn retry_job(
     State(state): State<Arc<BaktaHandler>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WorkflowActionResponse>, AdminError> {
+    // A resubmit may have created a newer workflow that is not known yet.
+    if state.state_handler.is_submission_unknown(&id) {
+        return Err(AdminError::Conflict(SubmissionUnknown.to_string()));
+    }
     let target = find_job(&state, id).await?;
     let workflow_name = require_workflow(&target)?;
     if !job_data_available(&state, id, target.in_memory.as_ref()).await {
@@ -256,17 +260,25 @@ pub async fn resubmit_job(
         .state_handler
         .reserve_start(id)
         .map_err(|_| AdminError::Conflict(JOB_BUSY.to_string()))?;
+    let handler = &state.state_handler;
+    // An earlier start or resubmit may have created a workflow that is not
+    // known yet.
+    if handler.is_submission_unknown(&id) {
+        return Err(AdminError::Conflict(SubmissionUnknown.to_string()));
+    }
     let target = find_job(&state, id).await?;
     let old_name = require_workflow(&target)?;
     if !job_data_available(&state, id, target.in_memory.as_ref()).await {
         return Err(AdminError::Conflict(INPUT_DATA_DELETED.to_string()));
     }
-    let handler = &state.state_handler;
+    let requested_at = Utc::now();
     let workflow = handler
         .argo_client
         .resubmit_workflow(&old_name)
         .await
-        .map_err(AdminError::argo)?;
+        .map_err(|error| {
+            AdminError::argo(handler.recover_failed_resubmit(id, &old_name, requested_at, error))
+        })?;
     let new_name = workflow.metadata.name.clone();
     tracing::info!(
         user = %user.username, job_id = %id, workflow_name = %old_name,
@@ -726,7 +738,19 @@ async fn run_bulk_action(
             }
         }
         BulkAction::Resubmit => {
-            let new_workflow = argo.resubmit_workflow(name).await?;
+            let requested_at = Utc::now();
+            let new_workflow =
+                argo.resubmit_workflow(name)
+                    .await
+                    .map_err(|error| match job_id {
+                        Some(id) => state.state_handler.recover_failed_resubmit(
+                            id,
+                            name,
+                            requested_at,
+                            error,
+                        ),
+                        None => error,
+                    })?;
             if let Some(id) = job_id {
                 after_resubmit(state, id, name, &new_workflow).await;
             }
@@ -801,6 +825,19 @@ pub async fn bulk_workflows(
                 Ok(reservation) => _reservation = Some(reservation),
                 Err(_) => reason = Some(JOB_BUSY.to_string()),
             }
+        }
+        // An earlier start or resubmit may have created a workflow that is
+        // not known yet.
+        if reason.is_none()
+            && matches!(action, BulkAction::Retry | BulkAction::Resubmit)
+            && workflow
+                .metadata
+                .labels
+                .get("jobid")
+                .and_then(|value| value.parse::<Uuid>().ok())
+                .is_some_and(|id| state.state_handler.is_submission_unknown(&id))
+        {
+            reason = Some(SubmissionUnknown.to_string());
         }
         // Retry and resubmit only act on the job's current workflow, and
         // not when it cannot be determined.

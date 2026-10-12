@@ -70,12 +70,27 @@ const UNKNOWN_SUBMISSION_EMPTY_POLLS: u32 = 3;
 /// having created nothing. Argo may still be creating the workflow.
 const UNKNOWN_SUBMISSION_WAIT_MINUTES: i64 = 10;
 
+/// Allowed clock difference between the backend and Argo when a poll checks
+/// whether a workflow was created by a resubmit. Argo creation times are
+/// whole seconds.
+const RESUBMIT_CLOCK_TOLERANCE_SECONDS: i64 = 30;
+
 /// A submission that may have created a workflow that was not found yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownSubmission {
     pub marked_at: DateTime<Utc>,
     /// Polls fetched after `marked_at` that found no workflow for the job.
     pub empty_polls: u32,
+    /// Set when the submission was a resubmit. `None` for a start.
+    pub resubmit: Option<UnknownResubmit>,
+}
+
+/// The workflow that a resubmit with an unknown result resubmitted, and the
+/// time of the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownResubmit {
+    pub previous_workflow: String,
+    pub requested_at: DateTime<Utc>,
 }
 
 impl UnknownSubmission {
@@ -83,7 +98,23 @@ impl UnknownSubmission {
         Self {
             marked_at,
             empty_polls: 0,
+            resubmit: None,
         }
+    }
+
+    /// True when `item`, a workflow of the job, can be the workflow the
+    /// submission created. After a start, every workflow of the job can be.
+    /// After a resubmit, only a workflow other than the resubmitted one that
+    /// was created at or after the request can be.
+    fn resolved_by(&self, item: &SimpleStatus) -> bool {
+        let Some(resubmit) = &self.resubmit else {
+            return true;
+        };
+        item.metadata.name != resubmit.previous_workflow
+            && item.metadata.creation_timestamp.is_some_and(|created| {
+                created
+                    >= resubmit.requested_at - Duration::seconds(RESUBMIT_CLOCK_TOLERANCE_SECONDS)
+            })
     }
 
     /// Counts a poll from `now` that found no workflow for the job and
@@ -1013,7 +1044,7 @@ impl StateHandler {
     ) {
         let recorded_in_db = self.recorded_workflow_names(&items).await;
         let mut write_lock = self.job_state.write().await;
-        let current = current_workflows(&write_lock, &recorded_in_db, &items);
+        let mut current = current_workflows(&write_lock, &recorded_in_db, &items);
         // Jobs that are being started, deleted or resubmitted keep their
         // state until that is done. The next poll updates them.
         let reserved = self
@@ -1025,13 +1056,37 @@ impl StateHandler {
         // to the job state below. A reserved job keeps its mark, because the
         // workflow is not applied. An empty list does not prove that none was
         // created, because Argo may still be creating it, so several empty
-        // polls are needed.
-        self.unknown_submissions
-            .lock()
-            .expect("unknown submissions lock poisoned")
-            .retain(|id, marker| {
-                reserved.contains(id) || current.contains_key(id) || marker.still_unknown(now)
+        // polls are needed. After a resubmit, the job state still names the
+        // old workflow, which never resolves the mark. The newest workflow
+        // that the resubmit may have created becomes current instead.
+        let by_job = workflows_by_job(&items);
+        let mut resolved = HashSet::new();
+        {
+            let mut markers = self
+                .unknown_submissions
+                .lock()
+                .expect("unknown submissions lock poisoned");
+            for (id, marker) in markers.iter() {
+                let created = by_job.get(id).and_then(|workflows| {
+                    workflows
+                        .iter()
+                        .filter(|item| marker.resolved_by(item))
+                        .max_by_key(|item| (item.metadata.creation_timestamp, &item.metadata.name))
+                });
+                let Some(created) = created else {
+                    continue;
+                };
+                if marker.resubmit.is_some() {
+                    current.insert(*id, created.metadata.name.clone());
+                }
+                if current.get(id) == Some(&created.metadata.name) {
+                    resolved.insert(*id);
+                }
+            }
+            markers.retain(|id, marker| {
+                reserved.contains(id) || resolved.contains(id) || marker.still_unknown(now)
             });
+        }
         let deleted = {
             let mut deleted = self
                 .deleted_jobs
@@ -1080,10 +1135,29 @@ impl StateHandler {
             };
             // The workflow is applied (or the job expires) in this step, so
             // the job state now knows whether a workflow exists.
-            self.unknown_submissions
-                .lock()
-                .expect("unknown submissions lock poisoned")
-                .remove(&state.id);
+            let marker = resolved
+                .contains(&state.id)
+                .then(|| {
+                    self.unknown_submissions
+                        .lock()
+                        .expect("unknown submissions lock poisoned")
+                        .remove(&state.id)
+                })
+                .flatten();
+            // Recorded before the poll result, like a resubmit that
+            // succeeded at once.
+            if let Some(UnknownResubmit {
+                previous_workflow,
+                requested_at,
+            }) = marker.and_then(|marker| marker.resubmit)
+            {
+                self.stats.record(StatsEvent::Resubmitted {
+                    id: state.id,
+                    previous_workflow_name: previous_workflow,
+                    workflow_name: item.metadata.name.clone(),
+                    submitted_at: requested_at,
+                });
+            }
             if is_state_expired(&state, now) {
                 if write_lock.remove(&state.id).is_some() {
                     expired.push((state.id, state.workflowname.clone()));
@@ -1587,6 +1661,36 @@ impl StateHandler {
                 .await?;
         }
         Ok(deleted)
+    }
+
+    /// Handles a failed resubmit of `previous_workflow`, requested at
+    /// `requested_at`, and returns the error. When Argo may still have
+    /// created the new workflow, marks the job like an unknown start. Starts,
+    /// deletes, retries and resubmits of the job are then refused until a
+    /// poll finds a newer workflow of the job or enough polls found none.
+    pub(crate) fn recover_failed_resubmit(
+        &self,
+        job_id: Uuid,
+        previous_workflow: &str,
+        requested_at: DateTime<Utc>,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        if is_indeterminate_submit_error(&error) {
+            tracing::warn!(
+                job_id = %job_id, workflow_name = %previous_workflow, %error,
+                "workflow_resubmit_unknown"
+            );
+            let mut marker = UnknownSubmission::new(Utc::now());
+            marker.resubmit = Some(UnknownResubmit {
+                previous_workflow: previous_workflow.to_string(),
+                requested_at,
+            });
+            self.unknown_submissions
+                .lock()
+                .expect("unknown submissions lock poisoned")
+                .insert(job_id, marker);
+        }
+        error
     }
 
     fn mark_submission_unknown(&self, job_id: Uuid) {

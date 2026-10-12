@@ -112,6 +112,11 @@ While a job is unresolved, start and delete requests for it are refused with `40
 - A polled workflow list that contains a workflow with the job's `jobid` label resolves it at once. The job then uses that workflow. A poll that runs while the job is being started, deleted or resubmitted skips the job and keeps the mark. A later poll resolves it.
 - Otherwise it stays unresolved until at least 3 polls fetched after the mark found no such workflow and at least 10 minutes have passed since the mark. Then a new start is allowed.
 
+An admin resubmit (single or bulk) can fail in the same way: Argo may have created the new workflow, but the answer timed out or could not be read. The backend then marks the job as unresolved too, without a lookup. The same `409` message is used. While the mark is set, start, delete, retry and resubmit requests for the job are refused, and bulk `retry` and `resubmit` skip the job with that message as `reason`. The old workflow of the job never resolves the mark:
+
+- A polled workflow of the job resolves it only when it is not the resubmitted workflow and Argo created it at or after the resubmit request (30 seconds of tolerance for clock differences). The newest such workflow becomes the job's workflow, and the job record points to it like after a successful resubmit.
+- Otherwise the same rule applies: 3 polls over 10 minutes without such a workflow. The job then keeps the old workflow.
+
 ## Common query parameters
 
 - `environment`: `production` (default), `staging` or `all`.
@@ -292,6 +297,7 @@ Argo retry of a failed or errored workflow (reruns failed steps). `409` if the w
 Argo resubmit: a new workflow with the same parameters. The job record points to the new `workflow_name` and goes back to `submitted`. `409` with `{ "error": "Input data was deleted after the retention period" }` when `data_available` is false. Response: `{ "workflow_name": "...", "phase": "Pending" }`.
 `409` with `{ "error": "Job is busy, try again later" }` while the job is being started, deleted or resubmitted. While the resubmit runs, start and delete requests for the job are refused with `409`.
 A retry needs no such check: it reruns the same workflow and creates no new one, so a delete at the same time removes it.
+When the resubmit answer times out or cannot be read, the response is `502` and the job is marked as unresolved (see Unresolved start requests). Retry and resubmit answer `409` with `{ "error": "The result of an earlier start request is not known yet, try again later" }` while a job is unresolved.
 
 ### `POST /jobs/{id}/stop`
 
