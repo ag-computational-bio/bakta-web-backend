@@ -123,9 +123,9 @@ impl StatsDb {
 
     /// Resource versions of the stored live rows of the named workflows
     /// whose state is complete in the database: the workflow has no job, or
-    /// its job record is deleted or expired, or has this workflow in a final
-    /// state with the secret hash, result kind and Argo uid, or has a newer
-    /// workflow. Other workflows are missing, so the reconcile fetches them.
+    /// its job record is deleted or expired, or has this workflow in the
+    /// final state of the row (same status and finish time) with the secret
+    /// hash, result kind and Argo uid, or has a newer workflow. Other workflows are missing, so the reconcile fetches them.
     pub async fn workflow_versions(
         &self,
         namespace: &str,
@@ -141,7 +141,9 @@ impl StatsDb {
                  AND (workflows.job_id IS NULL
                       OR jobs.status IN ('deleted', 'expired')
                       OR (jobs.workflow_name = workflows.name
-                          AND jobs.status IN ('succeeded', 'failed', 'error')
+                          AND jobs.status = CASE workflows.phase WHEN 'Succeeded' THEN 'succeeded'
+                              WHEN 'Failed' THEN 'failed' WHEN 'Error' THEN 'error' END
+                          AND jobs.finished_at IS NOT DISTINCT FROM workflows.finished_at
                           AND jobs.secret_hash IS NOT NULL AND jobs.result_kind IS NOT NULL
                           AND jobs.argo_uid IS NOT NULL)
                       OR (jobs.workflow_name <> workflows.name

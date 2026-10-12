@@ -1431,3 +1431,75 @@ async fn the_reconcile_adopts_a_newer_completed_attempt_than_the_recorded_one() 
         ));
     }
 }
+
+#[tokio::test]
+async fn a_retry_recorded_by_another_backend_is_applied_after_a_restart() {
+    let Some(db) = test_db("a_retry_recorded_by_another_backend").await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    // The owner recorded the failed attempt before it went down.
+    let failed = kube_workflow("wf-x", id, "Failed", true, 5);
+    record_final_state(&db, &failed).await;
+    // The retry ran while the owner was down. Another backend wrote the
+    // completed state to the shared table, but not the job record.
+    let mut succeeded = kube_workflow("wf-x", id, "Succeeded", true, 9);
+    succeeded["metadata"]["creationTimestamp"] = failed["metadata"]["creationTimestamp"].clone();
+    let mut row: crate::argo::structs::ArgoWorkflow =
+        serde_json::from_value(succeeded.clone()).unwrap();
+    row.metadata.labels.remove("secret");
+    db.upsert_workflows("bakta", Utc::now(), &[row])
+        .await
+        .unwrap();
+    let kube = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", LIVE))
+        .and(query_param_is_missing("watch"))
+        .respond_with(page(Vec::new(), "", "10"))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("watch", "true"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .respond_with(page(
+            vec![json!({"metadata": succeeded["metadata"]})],
+            "",
+            "10",
+        ))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{WORKFLOWS}/wf-x")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(succeeded.clone()))
+        .mount(&kube)
+        .await;
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new((*db).clone(), JobVersions::default()),
+    );
+    start(
+        handler.state_handler.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the reconcile", || async {
+        handler
+            .state_handler
+            .reconciled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    })
+    .await;
+    assert_eq!(job_status(&db, id).await.as_deref(), Some("succeeded"));
+}
