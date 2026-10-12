@@ -104,7 +104,12 @@ impl StatsDb {
         .bind(
             workflows
                 .iter()
-                .map(|workflow| Json(workflow.metadata.labels.clone()))
+                .map(|workflow| {
+                    // The job secret grants access to the results and is never stored here.
+                    let mut labels = workflow.metadata.labels.clone();
+                    labels.remove("secret");
+                    Json(labels)
+                })
                 .collect::<Vec<_>>(),
         )
         .execute(self.pool())
@@ -277,7 +282,12 @@ mod tests {
         let t0 = chrono::SubsecRound::trunc_subsecs(Utc::now(), 6) - chrono::Duration::minutes(5);
         let t1 = t0 + chrono::Duration::seconds(15);
         let failed = workflow(&listed("wf-1", "Failed", "production"));
-        db.upsert_workflows("bakta", t0, std::slice::from_ref(&failed))
+        let mut with_secret = failed.clone();
+        with_secret
+            .metadata
+            .labels
+            .insert("secret".to_string(), "not-a-real-secret".to_string());
+        db.upsert_workflows("bakta", t0, std::slice::from_ref(&with_secret))
             .await
             .unwrap();
         let stored = db
