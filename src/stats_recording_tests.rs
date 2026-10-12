@@ -62,7 +62,7 @@ fn workflow_item(
             "uid": Uuid::new_v4(),
             "labels": {
                 "jobid": id.to_string(), "secret": secret, "name": "sample",
-                "api-version": "v2", "workflow-kind": "bakta", "bakta-environment": "staging"
+                "api-version": "v2", "workflow-kind": "bakta", "bakta-environment": "production"
             }
         },
         "status": {
@@ -213,6 +213,8 @@ async fn v2_job_lifecycle_is_recorded() {
         Some("OOMKilled")
     );
     assert!(row.get::<Option<f64>, _>("runtime_seconds").is_some());
+    // The poll keeps the environment the job was recorded with at start.
+    assert_eq!(row.get::<String, _>("environment"), "production");
 
     let (status, _) = call(
         &router,

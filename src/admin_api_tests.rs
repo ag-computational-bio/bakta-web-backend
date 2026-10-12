@@ -462,6 +462,7 @@ async fn admin_job_logs_do_not_need_the_secret() {
 }
 
 fn polled(
+    env: &str,
     id: Uuid,
     name: &str,
     phase: &str,
@@ -470,7 +471,8 @@ fn polled(
     let started = (Utc::now() - Duration::minutes(started_minutes_ago)).to_rfc3339();
     serde_json::from_value(json!({
         "metadata": {"name": name, "uid": Uuid::new_v4(), "creationTimestamp": started,
-                     "labels": {"jobid": id.to_string(), "secret": "x", "api-version": "v2"}},
+                     "labels": {"jobid": id.to_string(), "secret": "x", "api-version": "v2",
+                                "bakta-environment": env}},
         "status": {"phase": phase, "startedAt": started}
     }))
     .unwrap()
@@ -496,9 +498,9 @@ async fn admin_job_list_shows_live_workflows_from_the_poll() {
         .state_handler
         .apply_workflow_statuses(
             vec![
-                polled(running, "wf-old", "Failed", 60),
-                polled(running, "wf-new", "Running", 5),
-                polled(failed, "wf-f", "Failed", 30),
+                polled(&env, running, "wf-old", "Failed", 60),
+                polled(&env, running, "wf-new", "Running", 5),
+                polled(&env, failed, "wf-f", "Failed", 30),
             ],
             Utc::now(),
         )

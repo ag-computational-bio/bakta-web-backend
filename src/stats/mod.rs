@@ -63,7 +63,8 @@ pub struct SubmittedJob {
 /// State of a job's current workflow, as seen by the polling loop.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowState {
-    /// Written only when the job has no record yet.
+    /// Written only when the job has no record yet, except for the
+    /// environment, which is also corrected on existing records.
     pub job: NewJob,
     pub workflow_name: String,
     /// `submitted`, `running`, `succeeded`, `failed` or `error`.
@@ -186,11 +187,12 @@ impl StatsDb {
         sqlx::query(
             "WITH polled AS (
                  SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::timestamptz[],
-                                      $5::timestamptz[], $6::timestamptz[], $7::text[])
-                     AS polled(id, workflow_name, status, created_at, started_at, finished_at, error_message)
+                                      $5::timestamptz[], $6::timestamptz[], $7::text[], $8::text[])
+                     AS polled(id, workflow_name, status, created_at, started_at, finished_at, error_message,
+                               environment)
              ), target AS (
                  SELECT jobs.id, polled.workflow_name, polled.status, polled.started_at,
-                     polled.finished_at, polled.error_message,
+                     polled.finished_at, polled.error_message, polled.environment,
                      COALESCE(jobs.submitted_at, polled.created_at) AS submitted_at,
                      CASE WHEN polled.status IN ('succeeded', 'failed', 'error')
                          THEN polled.status ELSE jobs.outcome END AS outcome
@@ -211,16 +213,17 @@ impl StatsDb {
                  outcome = wanted.outcome, submitted_at = wanted.submitted_at,
                  started_at = wanted.started_at, finished_at = wanted.finished_at,
                  runtime_seconds = wanted.runtime_seconds, queue_seconds = wanted.queue_seconds,
-                 error_message = wanted.error_message, updated_at = now()
+                 error_message = wanted.error_message, environment = wanted.environment,
+                 updated_at = now()
              FROM wanted
              WHERE jobs.id = wanted.id
                  AND (jobs.workflow_name, jobs.status, jobs.outcome, jobs.submitted_at,
                       jobs.started_at, jobs.finished_at, jobs.runtime_seconds,
-                      jobs.queue_seconds, jobs.error_message)
+                      jobs.queue_seconds, jobs.error_message, jobs.environment)
                  IS DISTINCT FROM
                      (wanted.workflow_name, wanted.status, wanted.outcome, wanted.submitted_at,
                       wanted.started_at, wanted.finished_at, wanted.runtime_seconds,
-                      wanted.queue_seconds, wanted.error_message)",
+                      wanted.queue_seconds, wanted.error_message, wanted.environment)",
         )
         .bind(&ids)
         .bind(column(|state| Some(state.workflow_name.clone())))
@@ -229,6 +232,7 @@ impl StatsDb {
         .bind(times(|state| state.started_at))
         .bind(times(|state| state.finished_at))
         .bind(column(|state| state.error_message.clone()))
+        .bind(column(|state| Some(state.job.environment.clone())))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1004,6 +1008,31 @@ mod tests {
             record
                 .get::<Option<DateTime<Utc>>, _>("finished_at")
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_poll_corrects_the_environment() {
+        let Some(db) = test_db("test_poll_corrects_the_environment").await else {
+            return;
+        };
+        let t0 = Utc::now() - ChronoDuration::hours(1);
+        let mut job = new_job("staging", t0);
+        let id = job.id;
+        db.apply(&polled(&job, "wf-a", "running", Some(t0), None))
+            .await
+            .unwrap();
+        assert_eq!(
+            row(&db, id).await.get::<String, _>("environment"),
+            "staging"
+        );
+        job.environment = "production".to_string();
+        db.apply(&polled(&job, "wf-a", "running", Some(t0), None))
+            .await
+            .unwrap();
+        assert_eq!(
+            row(&db, id).await.get::<String, _>("environment"),
+            "production"
         );
     }
 
