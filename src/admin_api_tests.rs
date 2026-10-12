@@ -222,8 +222,19 @@ async fn admin_stats_endpoints_return_the_contract_shapes() {
     };
     let env = unique_environment();
     finished_job(&db, &env, "bakta", "succeeded").await;
-    finished_job(&db, &env, "bakta", "failed").await;
-    finished_job(&db, &env, "baktfold", "succeeded").await;
+    let without_origin = finished_job(&db, &env, "bakta", "failed").await;
+    let other_origin = finished_job(&db, &env, "baktfold", "succeeded").await;
+    for (id, origin) in [
+        (without_origin, None),
+        (other_origin, Some("a.example.org")),
+    ] {
+        sqlx::query("UPDATE jobs SET origin = $2 WHERE id = $1")
+            .bind(id)
+            .bind(origin)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
     let setup = admin_setup(
         "http://127.0.0.1:1",
         "https://s3.example.com",
@@ -244,6 +255,14 @@ async fn admin_stats_endpoints_return_the_contract_shapes() {
     assert_eq!(summary["runtime_seconds"]["p50"], 100.0);
     assert_eq!(summary["total_input_bp"], 3000);
     assert_eq!(summary["by_workflow_kind"][0]["workflow_kind"], "bakta");
+    assert_eq!(
+        summary["by_origin"],
+        json!([
+            {"origin": "a.example.org", "jobs_total": 1},
+            {"origin": "bakta.computational.bio", "jobs_total": 1},
+            {"origin": null, "jobs_total": 1}
+        ])
+    );
 
     let (status, empty) = admin_call(
         &setup,
@@ -255,6 +274,7 @@ async fn admin_stats_endpoints_return_the_contract_shapes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(empty["success_rate"], Value::Null);
     assert_eq!(empty["runtime_seconds"]["avg"], Value::Null);
+    assert_eq!(empty["by_origin"], json!([]));
 
     let (status, series) = admin_call(
         &setup,
@@ -355,6 +375,7 @@ async fn admin_job_list_filters_and_pages() {
     assert_eq!(list["items"].as_array().unwrap().len(), 1);
     assert_eq!(list["items"][0]["organism"], "Escherichia coli");
     assert_eq!(list["items"][0]["total_length"], 1000);
+    assert_eq!(list["items"][0]["origin"], "bakta.computational.bio");
 
     let prefix = &first.to_string()[..8];
     let (_, found) = admin_call(
@@ -409,6 +430,7 @@ async fn admin_job_detail_includes_the_live_workflow() {
     assert_eq!(detail["job"]["status"], "succeeded");
     assert_eq!(detail["job"]["config"]["complete_genome"], true);
     assert_eq!(detail["job"]["runtime_seconds"], 100.0);
+    assert_eq!(detail["job"]["origin"], "bakta.computational.bio");
     let workflow = &detail["workflow"];
     assert_eq!(workflow["phase"], "Succeeded");
     assert_eq!(workflow["suspended"], false);

@@ -78,6 +78,52 @@ fn filter(environment: &str) -> StatsFilter {
 }
 
 #[tokio::test]
+async fn summary_counts_jobs_by_origin_with_the_filters() {
+    let Some(db) = test_db("summary_counts_jobs_by_origin").await else {
+        return;
+    };
+    let env = unique_environment();
+    let jobs = [
+        (env.as_str(), day(9, 1), Some("b.example.org")),
+        (env.as_str(), day(9, 2), Some("b.example.org")),
+        (env.as_str(), day(9, 3), Some("a.example.org")),
+        (env.as_str(), day(9, 4), None),
+        // Outside the time range and the environment.
+        (env.as_str(), day(8, 1), Some("a.example.org")),
+        ("other", day(9, 1), Some("c.example.org")),
+    ];
+    for (environment, created, origin) in jobs {
+        let id = insert(&db, environment, row("bakta", "succeeded", created)).await;
+        sqlx::query("UPDATE jobs SET origin = $2 WHERE id = $1")
+            .bind(id)
+            .bind(origin)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+    let summary = db
+        .summary(&StatsFilter {
+            from: Some(day(9, 1)),
+            ..filter(&env)
+        })
+        .await
+        .unwrap();
+    let by_origin: Vec<(Option<&str>, i64)> = summary
+        .by_origin
+        .iter()
+        .map(|item| (item.origin.as_deref(), item.jobs_total))
+        .collect();
+    assert_eq!(
+        by_origin,
+        [
+            (Some("b.example.org"), 2),
+            (Some("a.example.org"), 1),
+            (None, 1)
+        ]
+    );
+}
+
+#[tokio::test]
 async fn summary_counts_by_outcome_and_computes_percentiles() {
     let Some(db) = test_db("summary_counts_by_outcome").await else {
         return;

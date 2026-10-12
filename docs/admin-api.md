@@ -38,7 +38,8 @@ Migrations are embedded in the backend and run at startup. Table `jobs`, one row
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid, primary key | Job ID |
-| `environment` | text | `production` or `staging` |
+| `environment` | text | `production` or `staging`, see "Environment of a workflow" below |
+| `origin` | text, null | Request origin: the `Origin` header of the start request without `https://`, other characters than letters, digits, `_` and `.` replaced by `_`, or `Unknown` when the header is missing. Same value as the `origin` workflow label. Null for jobs that were never started or polled since migration `20261012000000_add_jobs_origin`. |
 | `workflow_kind` | text | `bakta`, `bakta_baktfold`, `bakta_proteins`, `baktfold` |
 | `api_version` | text | `v1` or `v2` |
 | `status` | text | `created`, `submitted`, `running`, `succeeded`, `failed`, `error`, `deleted`, `expired` |
@@ -72,9 +73,21 @@ The workflow state in a job record follows the job's current workflow in Argo:
 - On every poll (every 15 seconds), the backend takes the current workflow of each job: the workflow recorded for the job, else the one recorded in the database if it is listed, else the newest by creation time and then by name.
 - From that workflow it sets `workflow_name`, `status` (`Pending` is `submitted`, `Running` is `running`, a final phase is `succeeded`, `failed` or `error`), `started_at` (null while `submitted`), `finished_at`, `runtime_seconds`, `queue_seconds`, `error_message` and, for a final phase, `outcome`.
 - A record is only written when it differs from this state. The comparison is made against the database, so a wrong or outdated record is corrected by the next poll.
+- A poll also sets `environment` (see below) and `origin` (from the `origin` label; a workflow without this label keeps the stored value).
 - Records with status `deleted` or `expired` are not changed by polls.
 - A resubmit records the new workflow for the job at once, also for a job that is only in the database (for example after a restart). So the next poll takes the new workflow as current, even before the database write of the resubmit is done.
 - Other writes only set what polls cannot see: the job init, the start request (input options, input statistics, versions, `submitted_at`), the request time of a retry or resubmit (`submitted_at`), user and admin deletes, and expiry. They never overwrite the workflow state of a newer poll. A resubmit only points the record to the new workflow (and resets its state to `submitted`) when no poll has seen that workflow yet.
+
+### Environment of a workflow
+
+Production and staging backends watch the same Argo namespace. A poll takes the environment of a workflow from its labels:
+
+1. The `bakta-environment` label, when it is a valid environment name.
+2. Else `staging` when the workflow has an `api-version` label. Before workflows were labelled with their environment, only the staging backend set `api-version`.
+3. Else `staging` when the `origin` label starts with `staging.`, `http_localhost` or `http_127.0.0.1` (the staging and local development UIs).
+4. Else `production` (workflows of the old production backend).
+
+Polls correct the `environment` of existing records with this rule.
 
 ### Input statistics in the V2 start request
 
@@ -151,9 +164,15 @@ All paths start with `/api/admin`. All responses are JSON. Errors use `{ "error"
   "total_input_bp": 5123456789,
   "by_workflow_kind": [
     { "workflow_kind": "bakta", "jobs_total": 1000, "jobs_finished": 990, "jobs_succeeded": 960, "jobs_failed": 25, "jobs_error": 5, "runtime_seconds": { "avg": 400.0, "p50": 370.0, "p90": 700.0, "p99": 1400.0 } }
+  ],
+  "by_origin": [
+    { "origin": "bakta.computational.bio", "jobs_total": 900 },
+    { "origin": null, "jobs_total": 12 }
   ]
 }
 ```
+
+`by_origin` counts jobs per `origin`, ordered by `jobs_total` (descending) and then by `origin`. Jobs without an origin form one item with `origin` null.
 
 `jobs_finished`, `jobs_succeeded`, `jobs_failed` and `jobs_error` count by `outcome`, also in the `by_workflow_kind` items. `jobs_active` counts jobs with status `submitted` or `running`.
 `success_rate` is `jobs_succeeded / jobs_finished` (null when nothing finished). Percentiles use `percentile_cont`.
@@ -248,7 +267,7 @@ Input statistics over jobs with a non-null `total_length`. `workflow_kind` is op
   "total": 1234,
   "items": [
     {
-      "id": "...", "environment": "production", "workflow_kind": "bakta", "status": "succeeded", "outcome": "succeeded",
+      "id": "...", "environment": "production", "origin": "bakta.computational.bio", "workflow_kind": "bakta", "status": "succeeded", "outcome": "succeeded",
       "organism": "Escherichia coli Sakai", "sequence_count": 3, "total_length": 5594605,
       "created_at": "...", "finished_at": "...", "runtime_seconds": 401.2,
       "data_expires_at": "...", "data_available": true,
@@ -267,7 +286,7 @@ The full database record plus the live Argo state (null if the workflow no longe
 
 ```json
 {
-  "job": { "id": "...", "environment": "production", "workflow_kind": "bakta", "api_version": "v2", "status": "succeeded", "outcome": "succeeded",
+  "job": { "id": "...", "environment": "production", "origin": "bakta.computational.bio", "workflow_kind": "bakta", "api_version": "v2", "status": "succeeded", "outcome": "succeeded",
            "name": "...", "genus": "...", "species": "...", "strain": "...", "sequence_count": 3, "total_length": 5594605,
            "config": { }, "bakta_version": "1.12.2", "bakta_db_version": "6.0", "baktfold_version": null, "baktfold_db_version": null,
            "workflow_name": "bakta-job-1.12.2-...", "created_at": "...", "submitted_at": "...", "started_at": "...", "finished_at": "...",

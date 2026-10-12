@@ -66,6 +66,13 @@ pub struct WorkflowKindStats {
     pub runtime_seconds: DurationStats,
 }
 
+/// Number of jobs per request origin. `origin` is null for jobs without a known origin.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, FromRow)]
+pub struct OriginStats {
+    pub origin: Option<String>,
+    pub jobs_total: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct StatsSummary {
     pub jobs_total: i64,
@@ -79,6 +86,7 @@ pub struct StatsSummary {
     pub queue_seconds: DurationStats,
     pub total_input_bp: i64,
     pub by_workflow_kind: Vec<WorkflowKindStats>,
+    pub by_origin: Vec<OriginStats>,
 }
 
 #[derive(FromRow)]
@@ -249,6 +257,7 @@ pub struct JobListQuery {
 pub struct JobListItem {
     pub id: Uuid,
     pub environment: String,
+    pub origin: Option<String>,
     pub workflow_kind: String,
     pub status: String,
     pub outcome: Option<String>,
@@ -283,6 +292,7 @@ pub struct JobList {
 pub struct JobRecord {
     pub id: Uuid,
     pub environment: String,
+    pub origin: Option<String>,
     pub workflow_kind: String,
     pub api_version: String,
     pub status: String,
@@ -400,6 +410,11 @@ impl StatsDb {
         builder.push(" GROUP BY workflow_kind ORDER BY workflow_kind");
         let kinds: Vec<KindRow> = builder.build_query_as().fetch_all(self.pool()).await?;
 
+        let mut builder = QueryBuilder::new("SELECT origin, count(*) AS jobs_total FROM jobs");
+        push_filter(&mut builder, filter);
+        builder.push(" GROUP BY origin ORDER BY jobs_total DESC, origin");
+        let by_origin = builder.build_query_as().fetch_all(self.pool()).await?;
+
         Ok(StatsSummary {
             jobs_total: row.jobs_total,
             jobs_finished: row.jobs_finished,
@@ -439,6 +454,7 @@ impl StatsDb {
                     },
                 })
                 .collect(),
+            by_origin,
         })
     }
 
@@ -500,7 +516,7 @@ impl StatsDb {
         let total: i64 = builder.build_query_scalar().fetch_one(self.pool()).await?;
 
         let mut builder = QueryBuilder::new(
-            "SELECT id, environment, workflow_kind, status, outcome,
+            "SELECT id, environment, origin, workflow_kind, status, outcome,
                 NULLIF(concat_ws(' ', genus, species, strain), '') AS organism,
                 sequence_count, total_length, created_at, finished_at, runtime_seconds
              FROM jobs",

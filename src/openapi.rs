@@ -136,6 +136,7 @@ impl Modify for AdminSecurity {
         crate::admin::structs::BulkResponse,
         crate::stats::queries::DurationStats,
         crate::stats::queries::WorkflowKindStats,
+        crate::stats::queries::OriginStats,
         crate::stats::queries::StatsSummary,
         crate::stats::queries::Interval,
         crate::stats::queries::GroupBy,
