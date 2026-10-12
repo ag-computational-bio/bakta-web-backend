@@ -100,7 +100,7 @@ async fn assert_denied(handler: &BaktaHandler, id: Uuid, secret: &str) {
     .unwrap();
     unauthorized(state.start_job_v2(start, None).await, "v2 start");
     unauthorized(state.delete_job((id, secret.to_string())).await, "delete");
-    assert!(state.job_state.read().await.contains_key(&id));
+    assert!(state.user_job_state(id, secret).await.is_some());
 }
 
 async fn assert_allowed(handler: &BaktaHandler, id: Uuid) {
@@ -220,4 +220,136 @@ async fn the_owner_secret_survives_a_resubmit_without_secret_label() {
     );
     assert_allowed(&setup.handler, id).await;
     assert_denied(&setup.handler, id, "Unknown").await;
+}
+
+/// A finished job that is only in the statistics database, with the hash
+/// of `TEST_SECRET`, workflow `wf-done` and Argo uid `uid`.
+async fn recorded_job(
+    db: &crate::stats::StatsDb,
+    finished_at: chrono::DateTime<Utc>,
+) -> (Uuid, Uuid) {
+    use crate::stats::{NewJob, StatsEvent, WorkflowState, secret_hash};
+    let id = Uuid::new_v4();
+    let uid = Uuid::new_v4();
+    let job = NewJob {
+        id,
+        environment: crate::stats::test_db::unique_environment(),
+        workflow_kind: "bakta".to_string(),
+        api_version: "v2".to_string(),
+        name: Some("genome".to_string()),
+        created_at: finished_at - chrono::Duration::minutes(10),
+        secret_hash: Some(secret_hash(TEST_SECRET)),
+        result_kind: Some("bakta".to_string()),
+    };
+    db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
+    db.apply(&StatsEvent::Polled(vec![WorkflowState {
+        job,
+        workflow_name: "wf-done".to_string(),
+        status: "succeeded",
+        created_at: Some(finished_at - chrono::Duration::minutes(10)),
+        started_at: Some(finished_at - chrono::Duration::minutes(5)),
+        finished_at: Some(finished_at),
+        error_message: None,
+        origin: None,
+        argo_uid: Some(uid),
+    }]))
+    .await
+    .unwrap();
+    (id, uid)
+}
+
+#[tokio::test]
+async fn finished_jobs_are_served_from_the_database_with_their_secret() {
+    let Some(db) =
+        crate::stats::test_db::test_db("finished_jobs_are_served_from_the_database").await
+    else {
+        return;
+    };
+    let argo = MockServer::start().await;
+    let (id, uid) = recorded_job(&db, Utc::now() - chrono::Duration::hours(1)).await;
+    let (expired, _) = recorded_job(&db, Utc::now() - chrono::Duration::days(40)).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/archived-workflows/{uid}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": {"nodes": {}}})))
+        .mount(&argo)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/artifact-files/bakta/archived-workflows/{uid}/wf-done/outputs/main-logs"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_string("archived log"))
+        .mount(&argo)
+        .await;
+    let s3 = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&s3)
+        .await;
+    let s3_url = format!("http://s3.test:{}", s3.address().port());
+    let (stats, _events) = crate::stats::StatsRecorder::capturing_with_db((*db).clone());
+    let handler = test_handler_with_stats(&argo.uri(), &s3_url, stats);
+    let state = &handler.state_handler;
+    assert!(state.job_state.read().await.is_empty());
+
+    // The owner secret is accepted.
+    let list = state
+        .get_job_states(vec![Job {
+            id,
+            secret: TEST_SECRET.to_string(),
+        }])
+        .await;
+    assert_eq!(list.jobs.len(), 1);
+    assert!(matches!(
+        list.jobs[0].status,
+        crate::api_structs::JobStatusEnum::SUCCESSFUL
+    ));
+    assert_allowed(&handler, id).await;
+    let reference = JobReference {
+        job_id: id,
+        secret: TEST_SECRET.to_string(),
+    };
+    let results = state
+        .get_results_v2(reference.clone(), &handler.s3_handler)
+        .await
+        .unwrap();
+    assert_eq!(results.name, "genome");
+    let logs = state.get_logs((id, TEST_SECRET.to_string())).await.unwrap();
+    assert!(logs.contains("archived log"), "{logs}");
+
+    // Any other secret is denied.
+    for secret in ["Unknown", "", &crate::stats::secret_hash(TEST_SECRET)] {
+        assert_denied(&handler, id, secret).await;
+    }
+
+    // Jobs past the 35 day job retention are not found.
+    let list = state
+        .get_job_states_v2(vec![JobReference {
+            job_id: expired,
+            secret: TEST_SECRET.to_string(),
+        }])
+        .await;
+    assert!(list.jobs.is_empty());
+    assert!(matches!(
+        list.failed_jobs[0].status,
+        crate::v2::api_structs::FailedJobStatusKind::NotFound
+    ));
+
+    // A delete removes the live and the archived workflow and the job.
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-done"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/v1/archived-workflows/{uid}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    state
+        .delete_job((id, TEST_SECRET.to_string()))
+        .await
+        .unwrap();
+    assert!(state.user_job_state(id, TEST_SECRET).await.is_none());
 }

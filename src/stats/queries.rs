@@ -287,6 +287,25 @@ pub struct JobList {
     pub items: Vec<JobListItem>,
 }
 
+/// The columns of a job record that the user API needs, with the hash of
+/// the job secret. Never sent to clients.
+#[derive(Debug, Clone, FromRow)]
+pub struct UserJob {
+    pub id: Uuid,
+    pub status: String,
+    pub name: Option<String>,
+    pub workflow_kind: String,
+    pub api_version: String,
+    pub result_kind: Option<String>,
+    pub workflow_name: Option<String>,
+    pub argo_uid: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub submitted_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub secret_hash: Option<String>,
+}
+
 /// Full statistics record of one job.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, FromRow)]
 pub struct JobRecord {
@@ -569,6 +588,20 @@ impl StatsDb {
         .fetch_all(self.pool())
         .await?;
         Ok(rows.into_iter().collect())
+    }
+
+    /// Records of the jobs in `ids` that the user API serves when the job
+    /// is not live: all but `created`, `deleted` and `expired` ones.
+    pub async fn user_jobs(&self, ids: &[Uuid]) -> Result<Vec<UserJob>> {
+        Ok(sqlx::query_as(
+            "SELECT id, status, name, workflow_kind, api_version, result_kind, workflow_name, argo_uid,
+                 created_at, submitted_at, started_at, finished_at, secret_hash
+             FROM jobs
+             WHERE id = ANY($1) AND status NOT IN ('created', 'deleted', 'expired')",
+        )
+        .bind(ids.to_vec())
+        .fetch_all(self.pool())
+        .await?)
     }
 
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobRecord>> {

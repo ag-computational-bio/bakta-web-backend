@@ -999,6 +999,82 @@ fn into_v2_failed_status(id: Uuid, status: FailedJobStatusEnum) -> V2FailedJobSt
     }
 }
 
+/// A job that is not live, from the statistics database. The secret is
+/// only known as a hash.
+pub(crate) struct RecordedJob {
+    state: FullJobState,
+    secret_hash: Option<String>,
+}
+
+impl RecordedJob {
+    /// The job state for a request with `secret`. Its secret is set only
+    /// when `secret` matches the stored hash.
+    fn for_secret(&self, secret: &str) -> FullJobState {
+        let mut state = self.state.clone();
+        state.secret = self
+            .secret_hash
+            .as_deref()
+            .is_some_and(|hash| stats::secret_has_hash(secret, hash))
+            .then(|| secret.to_string());
+        state
+    }
+}
+
+/// The answer to a start of a job that is not live: a recorded job was
+/// started already, other jobs get `unknown`.
+fn recorded_start_result(
+    recorded: &HashMap<Uuid, RecordedJob>,
+    id: Uuid,
+    secret: &str,
+    unknown: Result<()>,
+) -> Result<()> {
+    match recorded.get(&id) {
+        Some(job) if job.for_secret(secret).secret_matches(secret) => Err(JobAlreadyStarted.into()),
+        Some(_) => Err(anyhow!("Unauthorized")),
+        None => unknown,
+    }
+}
+
+/// The job state of a database record, or `None` for a status without one.
+fn recorded_job(record: stats::queries::UserJob, now: DateTime<Utc>) -> Option<RecordedJob> {
+    let status = match record.status.as_str() {
+        "submitted" => ArgoStatus::Pending,
+        "running" => ArgoStatus::Running,
+        "succeeded" => ArgoStatus::Succeeded,
+        "failed" => ArgoStatus::Failed,
+        "error" => ArgoStatus::Error,
+        _ => return None,
+    };
+    let terminal = is_terminal_status(Some(&status));
+    let started = record
+        .started_at
+        .or(record.submitted_at)
+        .unwrap_or(record.created_at);
+    Some(RecordedJob {
+        state: FullJobState {
+            id: record.id,
+            argo_uid: record.argo_uid,
+            argo_ressource_version: None,
+            name: record.name.unwrap_or_else(|| "Unknown name".to_string()),
+            status: Some(status),
+            started: Some(started),
+            updated: Some(if terminal {
+                record.finished_at.unwrap_or(started)
+            } else {
+                now
+            }),
+            workflowname: record.workflow_name,
+            secret: None,
+            // Argo archives finished workflows. The archive needs the uid.
+            archived: terminal && record.argo_uid.is_some(),
+            api_version: ApiVersion::from_label_value(Some(&record.api_version)),
+            workflow_kind: workflow_kind_from_label_value(Some(&record.workflow_kind)),
+            result_kind: result_kind_from_label_value(record.result_kind.as_deref()),
+        },
+        secret_hash: record.secret_hash,
+    })
+}
+
 impl FullJobState {
     /// True when `given` is the job secret. Always false when the job has no
     /// known secret.
@@ -1447,13 +1523,67 @@ impl StateHandler {
         }
     }
 
+    /// Jobs in `ids` that are not live, from the statistics database.
+    /// Deleted and expired jobs are missing. Empty without a database or
+    /// when it fails.
+    pub(crate) async fn recorded_jobs(&self, ids: &[Uuid]) -> HashMap<Uuid, RecordedJob> {
+        let Some(db) = self.stats.db() else {
+            return HashMap::new();
+        };
+        let ids: Vec<Uuid> = {
+            let job_state = self.job_state.read().await;
+            ids.iter()
+                .filter(|id| !job_state.contains_key(id) && !self.is_deleted(id))
+                .copied()
+                .collect()
+        };
+        if ids.is_empty() {
+            return HashMap::new();
+        }
+        let records =
+            match tokio::time::timeout(std::time::Duration::from_secs(5), db.user_jobs(&ids)).await
+            {
+                Ok(Ok(records)) => records,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "recorded_jobs_lookup_failed");
+                    return HashMap::new();
+                }
+                Err(_) => {
+                    tracing::warn!("recorded_jobs_lookup_timed_out");
+                    return HashMap::new();
+                }
+            };
+        let now = Utc::now();
+        records
+            .into_iter()
+            .filter_map(|record| recorded_job(record, now))
+            .filter(|job| !is_state_expired(&job.state, now))
+            .map(|job| (job.state.id, job))
+            .collect()
+    }
+
+    /// The state of a job for a user request with `secret`: the live state,
+    /// or else the database record. `None` when the job is not found.
+    pub(crate) async fn user_job_state(&self, id: Uuid, secret: &str) -> Option<FullJobState> {
+        if let Some(state) = self.job_state.read().await.get(&id) {
+            return Some(state.clone());
+        }
+        self.recorded_jobs(&[id])
+            .await
+            .get(&id)
+            .map(|job| job.for_secret(secret))
+    }
+
     pub async fn get_job_states(&self, request_jobs: Vec<Job>) -> ListResponse {
+        let ids: Vec<Uuid> = request_jobs.iter().map(|job| job.id).collect();
+        let recorded = self.recorded_jobs(&ids).await;
         let read_lock = self.job_state.read().await;
         let mut jobs = vec![];
         let mut failed = vec![];
 
         for Job { id, secret } in request_jobs {
-            if let Some(state) = read_lock.get(&id) {
+            let recorded = recorded.get(&id).map(|job| job.for_secret(&secret));
+            if let Some(state) = read_lock.get(&id).or(recorded.as_ref()) {
                 if !state.secret_matches(&secret) {
                     failed.push(FailedJobStatus {
                         id,
@@ -1500,12 +1630,15 @@ impl StateHandler {
     }
 
     pub async fn get_job_states_v2(&self, request_jobs: Vec<JobReference>) -> V2ListResponse {
+        let ids: Vec<Uuid> = request_jobs.iter().map(|job| job.job_id).collect();
+        let recorded = self.recorded_jobs(&ids).await;
         let read_lock = self.job_state.read().await;
         let mut jobs = vec![];
         let mut failed_jobs = vec![];
 
         for JobReference { job_id, secret } in request_jobs {
-            if let Some(state) = read_lock.get(&job_id) {
+            let recorded = recorded.get(&job_id).map(|job| job.for_secret(&secret));
+            if let Some(state) = read_lock.get(&job_id).or(recorded.as_ref()) {
                 if !state.secret_matches(&secret) {
                     failed_jobs.push(into_v2_failed_status(
                         job_id,
@@ -1526,17 +1659,12 @@ impl StateHandler {
     }
 
     pub async fn get_logs(&self, (job_id, secret): (Uuid, String)) -> Result<String> {
-        let state = {
-            let read_lock = self.job_state.read().await;
-            if let Some(state) = read_lock.get(&job_id) {
-                if !state.secret_matches(&secret) {
-                    return Err(anyhow!("Unauthorized"));
-                }
-                state.clone()
-            } else {
-                return Err(anyhow!("Job not found"));
-            }
+        let Some(state) = self.user_job_state(job_id, &secret).await else {
+            return Err(anyhow!("Job not found"));
         };
+        if !state.secret_matches(&secret) {
+            return Err(anyhow!("Unauthorized"));
+        }
 
         tracing::info!(
             job_id = %job_id,
@@ -1569,8 +1697,7 @@ impl StateHandler {
         JobReference { job_id, secret }: JobReference,
     ) -> Result<V2LogsResponse> {
         let (workflow_kind, workflow_name, overall_status, archived, argo_uid) = {
-            let read_lock = self.job_state.read().await;
-            let Some(state) = read_lock.get(&job_id) else {
+            let Some(state) = self.user_job_state(job_id, &secret).await else {
                 return Err(anyhow!("Job not found"));
             };
 
@@ -1580,8 +1707,8 @@ impl StateHandler {
 
             (
                 state.workflow_kind,
-                state.workflowname.clone(),
-                state.status.clone(),
+                state.workflowname,
+                state.status,
                 state.archived,
                 state.argo_uid,
             )
@@ -1694,9 +1821,11 @@ impl StateHandler {
         // The Argo calls run without the job state lock, so a slow Argo does
         // not block other jobs. The reservation keeps starts and polls of
         // this job out until the delete is done.
+        let recorded = self.recorded_jobs(&[job_id]).await;
         let (state, _reservation) = {
             let read_lock = self.job_state.read().await;
-            let Some(state) = read_lock.get(&job_id) else {
+            let recorded = recorded.get(&job_id).map(|job| job.for_secret(&secret));
+            let Some(state) = read_lock.get(&job_id).or(recorded.as_ref()) else {
                 return Ok(());
             };
             if !state.secret_matches(&secret) {
@@ -1718,7 +1847,7 @@ impl StateHandler {
         }
         let mut job_state = self.job_state.write().await;
         self.record_deleted(job_id);
-        if job_state.remove(&job_id).is_some() {
+        if job_state.remove(&job_id).is_some() || recorded.contains_key(&job_id) {
             self.stats.record(StatsEvent::Deleted { id: job_id });
         }
         Ok(())
@@ -2007,10 +2136,11 @@ impl StateHandler {
         let parameters = start_settings.config.into_parameters();
         let template_name = format!("bakta-job-{}", bakta_version);
 
+        let recorded = self.recorded_jobs(&[id]).await;
         let (labels, api_version, workflow_kind, _reservation) = {
             let read_lock = self.job_state.read().await;
             let Some(state) = read_lock.get(&id) else {
-                return Ok(());
+                return recorded_start_result(&recorded, id, secret, Ok(()));
             };
             if !state.secret_matches(secret) {
                 return Err(anyhow!("Unauthorized"));
@@ -2115,10 +2245,16 @@ impl StateHandler {
         let template_name =
             workflow_template_name(workflow_kind, &self.bakta_version, &self.baktfold_version)?;
 
+        let recorded = self.recorded_jobs(&[job_id]).await;
         let (labels, api_version, _reservation) = {
             let read_lock = self.job_state.read().await;
             let Some(state) = read_lock.get(&job_id) else {
-                return Err(anyhow!("Job not found"));
+                return recorded_start_result(
+                    &recorded,
+                    job_id,
+                    &secret,
+                    Err(anyhow!("Job not found")),
+                );
             };
 
             if !state.secret_matches(&secret) {
@@ -2219,8 +2355,7 @@ impl StateHandler {
         s3_handler: &S3Handler,
     ) -> Result<V2ResultResponse> {
         let (workflow_kind, result_kind, started, updated, name) = {
-            let read_lock = self.job_state.read().await;
-            let Some(state) = read_lock.get(&job_id) else {
+            let Some(state) = self.user_job_state(job_id, &secret).await else {
                 return Err(anyhow!("Job not found"));
             };
 
@@ -2260,7 +2395,7 @@ impl StateHandler {
         Job { id, secret }: Job,
         s3_handler: &S3Handler,
     ) -> Result<ResultResponse> {
-        if let Some(state) = self.job_state.read().await.get(&id) {
+        if let Some(state) = self.user_job_state(id, &secret).await {
             if !state.secret_matches(&secret) {
                 return Err(anyhow!("Unauthorized"));
             }

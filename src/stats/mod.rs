@@ -137,6 +137,12 @@ pub fn secret_hash(secret: &str) -> String {
         .collect()
 }
 
+/// True when `secret` has the hash `hash`, compared in constant time.
+pub fn secret_has_hash(secret: &str, hash: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    !secret.is_empty() && bool::from(secret_hash(secret).as_bytes().ct_eq(hash.as_bytes()))
+}
+
 pub fn is_terminal_status(status: &str) -> bool {
     matches!(status, "succeeded" | "failed" | "error")
 }
