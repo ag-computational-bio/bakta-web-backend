@@ -522,7 +522,27 @@ fn current_workflows(
                     .cloned(),
             };
             let name = match recorded {
-                Some(recorded) => in_list(&recorded).then_some(recorded)?,
+                Some(recorded) if in_list(&recorded) => recorded,
+                // A finished job whose workflow is no longer listed adopts a
+                // newer attempt: one created after the job finished, for
+                // example a resubmit from Argo.
+                Some(_) => {
+                    let state = job_state.get(&id)?;
+                    let finished = state
+                        .updated
+                        .filter(|_| is_terminal_status(state.status.as_ref()))?;
+                    workflows
+                        .iter()
+                        .filter(|item| {
+                            item.metadata
+                                .creation_timestamp
+                                .is_some_and(|created| created > finished)
+                        })
+                        .max_by_key(|item| (item.metadata.creation_timestamp, &item.metadata.name))?
+                        .metadata
+                        .name
+                        .clone()
+                }
                 None => workflows
                     .iter()
                     .max_by_key(|item| (item.metadata.creation_timestamp, &item.metadata.name))?

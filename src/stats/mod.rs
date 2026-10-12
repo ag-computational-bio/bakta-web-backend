@@ -271,6 +271,7 @@ impl StatsDb {
                                environment, origin, secret_hash, result_kind, argo_uid)
              ), target AS (
                  SELECT jobs.id, polled.workflow_name, polled.status, polled.started_at,
+                     COALESCE(polled.created_at, jobs.workflow_created_at) AS workflow_created_at,
                      polled.finished_at, polled.error_message, polled.environment,
                      COALESCE(polled.origin, jobs.origin) AS origin,
                      COALESCE(jobs.secret_hash, polled.secret_hash) AS secret_hash,
@@ -281,6 +282,11 @@ impl StatsDb {
                          THEN polled.status ELSE jobs.outcome END AS outcome
                  FROM jobs JOIN polled ON jobs.id = polled.id
                  WHERE jobs.status NOT IN ('deleted', 'expired')
+                     -- An older attempt never replaces a newer recorded one,
+                     -- for example from a backend that still has it.
+                     AND (jobs.workflow_name IS NULL OR jobs.workflow_name = polled.workflow_name
+                          OR jobs.workflow_created_at IS NULL OR polled.created_at IS NULL
+                          OR polled.created_at >= jobs.workflow_created_at)
              ), wanted AS (
                  SELECT target.*,
                      -- GREATEST ignores NULL, so check for missing times first.
@@ -298,18 +304,20 @@ impl StatsDb {
                  runtime_seconds = wanted.runtime_seconds, queue_seconds = wanted.queue_seconds,
                  error_message = wanted.error_message, environment = wanted.environment,
                  origin = wanted.origin, secret_hash = wanted.secret_hash,
-                 result_kind = wanted.result_kind, argo_uid = wanted.argo_uid, updated_at = now()
+                 result_kind = wanted.result_kind, argo_uid = wanted.argo_uid,
+                 workflow_created_at = wanted.workflow_created_at, updated_at = now()
              FROM wanted
              WHERE jobs.id = wanted.id
                  AND (jobs.workflow_name, jobs.status, jobs.outcome, jobs.submitted_at,
                       jobs.started_at, jobs.finished_at, jobs.runtime_seconds,
                       jobs.queue_seconds, jobs.error_message, jobs.environment, jobs.origin,
-                      jobs.secret_hash, jobs.result_kind, jobs.argo_uid)
+                      jobs.secret_hash, jobs.result_kind, jobs.argo_uid, jobs.workflow_created_at)
                  IS DISTINCT FROM
                      (wanted.workflow_name, wanted.status, wanted.outcome, wanted.submitted_at,
                       wanted.started_at, wanted.finished_at, wanted.runtime_seconds,
                       wanted.queue_seconds, wanted.error_message, wanted.environment, wanted.origin,
-                      wanted.secret_hash, wanted.result_kind, wanted.argo_uid)",
+                      wanted.secret_hash, wanted.result_kind, wanted.argo_uid,
+                      wanted.workflow_created_at)",
         )
         .bind(&ids)
         .bind(column(|state| Some(state.workflow_name.clone())))
@@ -404,6 +412,8 @@ impl StatsDb {
                 // is set, so its state is not reset.
                 sqlx::query(
                     "UPDATE jobs SET submitted_at = $3, updated_at = now(), workflow_name = $2,
+                         workflow_created_at = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN $3
+                             ELSE workflow_created_at END,
                          status = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN 'submitted' ELSE status END,
                          started_at = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL ELSE started_at END,
                          finished_at = CASE WHEN workflow_name IS DISTINCT FROM $2 THEN NULL ELSE finished_at END,

@@ -1111,3 +1111,83 @@ async fn finished_job_records_expire_after_the_job_retention() {
     assert_eq!(status(old).await, "expired");
     assert_eq!(status(recent).await, "failed");
 }
+
+#[tokio::test]
+async fn an_older_attempt_never_replaces_a_newer_recorded_one() {
+    let Some(db) = test_db("an_older_attempt_never_replaces").await else {
+        return;
+    };
+    let (stats, mut events) = StatsRecorder::capturing_with_db((*db).clone());
+    let handler = test_handler_with_stats("http://127.0.0.1:1", "https://s3.example.com", stats);
+    let now = Utc::now();
+    let id = Uuid::new_v4();
+    let older = job_workflow(
+        id,
+        "wf-a",
+        "Succeeded",
+        now - Duration::hours(2),
+        Some(now - Duration::hours(1)),
+    );
+    let newer = job_workflow(id, "wf-b", "Running", now - Duration::minutes(5), None);
+    let state = &handler.state_handler;
+    state.apply_workflow_statuses(vec![newer], now).await;
+    for event in drain(&mut events) {
+        db.apply(&event).await.unwrap();
+    }
+    // Another backend still has the older attempt and writes it.
+    let (other_stats, mut other_events) = StatsRecorder::capturing_with_db((*db).clone());
+    let other = crate::test_support::test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        other_stats,
+    );
+    other
+        .state_handler
+        .apply_workflow_statuses(vec![older], now)
+        .await;
+    for event in drain(&mut other_events) {
+        db.apply(&event).await.unwrap();
+    }
+    let name: Option<String> = sqlx::query_scalar("SELECT workflow_name FROM jobs WHERE id = $1")
+        .bind(id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(name.as_deref(), Some("wf-b"));
+}
+
+#[tokio::test]
+async fn a_finished_job_in_memory_adopts_a_newer_attempt() {
+    let handler = test_handler("http://127.0.0.1:1", "https://s3.example.com");
+    let state = &handler.state_handler;
+    let now = Utc::now();
+    let id = Uuid::new_v4();
+    state
+        .apply_workflow_statuses(
+            vec![job_workflow(
+                id,
+                "wf-a",
+                "Failed",
+                now - Duration::hours(2),
+                Some(now - Duration::hours(1)),
+            )],
+            now,
+        )
+        .await;
+    // The finished attempt is no longer watched, a newer one appears.
+    state
+        .apply_workflow_statuses(
+            vec![job_workflow(
+                id,
+                "wf-b",
+                "Running",
+                now - Duration::minutes(5),
+                None,
+            )],
+            now,
+        )
+        .await;
+    let job = state.job_state.read().await[&id].clone();
+    assert_eq!(job.workflowname.as_deref(), Some("wf-b"));
+    assert!(matches!(job.status, Some(ArgoStatus::Running)));
+}
