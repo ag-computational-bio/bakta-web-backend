@@ -726,9 +726,12 @@ impl StatsRecorder {
 struct Writer {
     db: StatsDb,
     /// Parked events by job, oldest first. The first one failed.
-    parked: HashMap<Uuid, std::collections::VecDeque<Queued>>,
+    parked: HashMap<Uuid, std::collections::VecDeque<Parked>>,
     health: Arc<WriterHealth>,
 }
+
+/// A parked event and the confirmations that wait for it.
+type Parked = (StatsEvent, Vec<tokio::sync::oneshot::Sender<()>>);
 
 impl Writer {
     async fn run(mut self, mut receiver: mpsc::Receiver<Queued>) {
@@ -811,8 +814,23 @@ impl Writer {
         }
     }
 
-    fn park(&mut self, id: Uuid, queued: Queued) {
-        self.parked.entry(id).or_default().push_back(queued);
+    /// Keeps an event behind the parked events of its job. A workflow
+    /// update replaces the parked workflow updates of the job: it carries
+    /// the newer full state, and the same state is recorded again while it
+    /// cannot be written. Their confirmations wait for it.
+    fn park(&mut self, id: Uuid, (event, written): Queued) {
+        let events = self.parked.entry(id).or_default();
+        let mut waiting: Vec<_> = written.into_iter().collect();
+        if matches!(event, StatsEvent::Polled(_)) {
+            events.retain_mut(|(parked, parked_waiting)| {
+                let replaced = matches!(parked, StatsEvent::Polled(_));
+                if replaced {
+                    waiting.append(parked_waiting);
+                }
+                !replaced
+            });
+        }
+        events.push_back((event, waiting));
         self.count_parked();
     }
 
@@ -824,12 +842,14 @@ impl Writer {
                 tracing::debug!(job_id = %id, %error, "job_record_write_still_parked");
                 break;
             }
-            if let Some((_, Some(written))) = self
+            if let Some((_, waiting)) = self
                 .parked
                 .get_mut(&id)
                 .and_then(|events| events.pop_front())
             {
-                let _ = written.send(());
+                for written in waiting {
+                    let _ = written.send(());
+                }
             }
             if self.parked.get(&id).is_some_and(|events| events.is_empty()) {
                 self.parked.remove(&id);
@@ -1813,5 +1833,42 @@ mod tests {
             record.get::<Option<String>, _>("workflow_name").as_deref(),
             Some("wf-bad")
         );
+    }
+
+    #[tokio::test]
+    async fn test_repeated_repairs_of_a_parked_job_are_kept_once() {
+        let Some(db) = test_db("test_repeated_repairs_of_a_parked_job").await else {
+            return;
+        };
+        let job = new_job(&unique_environment(), Utc::now());
+        db.apply(&StatsEvent::Created(job.clone())).await.unwrap();
+        poison_job(&db, job.id).await;
+        let recorder = StatsRecorder::new((*db).clone(), JobVersions::default());
+        // The final state is recorded again and again while it cannot be written.
+        for _ in 0..5 {
+            recorder.record(polled(&job, "wf-1", "succeeded", None, None));
+        }
+        let other = new_job(&unique_environment(), Utc::now());
+        recorder
+            .persist(StatsEvent::Created(other), Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(recorder.parked_events(), 1);
+        sqlx::query("DROP TRIGGER poison_job ON jobs")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        recorder
+            .persist(
+                polled(&job, "wf-1", "succeeded", None, None),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            row(&db, job.id).await.get::<String, _>("status"),
+            "succeeded"
+        );
+        assert_eq!(recorder.parked_events(), 0);
     }
 }
