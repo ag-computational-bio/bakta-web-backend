@@ -49,10 +49,29 @@ struct FastaCounter {
     count: FastaCount,
     in_line: bool,
     in_header: bool,
+    /// Most bytes it counts, also after gzip.
+    limit: u64,
+    written: u64,
+}
+
+impl FastaCounter {
+    fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            ..Default::default()
+        }
+    }
 }
 
 impl std::io::Write for FastaCounter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.written += buf.len() as u64;
+        if self.written > self.limit {
+            return Err(std::io::Error::other(format!(
+                "The input file is larger than {} bytes",
+                self.limit
+            )));
+        }
         for &byte in buf {
             if byte == b'\n' {
                 self.in_line = false;
@@ -86,14 +105,40 @@ enum FastaSink {
 
 impl FastaSink {
     /// Gzip when `head` starts with the gzip magic bytes.
-    fn for_head(head: &[u8]) -> Self {
+    fn for_head(head: &[u8], limit: u64) -> Self {
         if head.starts_with(&[0x1f, 0x8b]) {
             FastaSink::Gzip(Box::new(flate2::write::MultiGzDecoder::new(
-                FastaCounter::default(),
+                FastaCounter::new(limit),
             )))
         } else {
-            FastaSink::Plain(FastaCounter::default())
+            FastaSink::Plain(FastaCounter::new(limit))
         }
+    }
+
+    /// Counts the chunks from `chunks` until it is closed. Blocking: it runs
+    /// in a thread for blocking work, so large inputs do not hold up others.
+    fn count(
+        mut chunks: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        limit: u64,
+    ) -> std::io::Result<FastaCount> {
+        let mut head = Vec::new();
+        let mut sink: Option<FastaSink> = None;
+        while let Some(chunk) = chunks.blocking_recv() {
+            match &mut sink {
+                Some(sink) => sink.write(&chunk)?,
+                None => {
+                    head.extend_from_slice(&chunk);
+                    if head.len() >= 2 {
+                        let mut new = FastaSink::for_head(&head, limit);
+                        new.write(&std::mem::take(&mut head))?;
+                        sink = Some(new);
+                    }
+                }
+            }
+        }
+        let mut sink = sink.unwrap_or_else(|| FastaSink::for_head(&head, limit));
+        sink.write(&head)?;
+        sink.finish()
     }
 
     fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
@@ -264,8 +309,10 @@ impl S3Handler {
 
     /// Counts the sequences and bases of the input FASTA of a genome job. The
     /// file is read as a stream (gzip when it starts with the gzip magic
-    /// bytes), at most `limit` bytes. `None` when it does not exist. Errors
-    /// do not show the signed URL.
+    /// bytes), at most `limit` bytes, and at most `limit` bytes after gzip.
+    /// The counting runs outside the async threads, and the whole read
+    /// within `INPUT_READ_TIMEOUT`. `None` when it does not exist. Errors do
+    /// not show the signed URL.
     pub async fn count_input_fasta(&self, job_id: &str, limit: u64) -> Result<Option<FastaCount>> {
         let key = format!("jobs/{job_id}/inputs/fastadata.fasta");
         let url = sign_url(
@@ -284,45 +331,53 @@ impl S3Handler {
             None,
         )
         .await?;
-        let mut response = self
-            .client
-            .get(url)
-            .timeout(INPUT_READ_TIMEOUT)
-            .send()
-            .await
-            .map_err(reqwest::Error::without_url)?;
-        match response.status() {
-            StatusCode::OK => {}
-            StatusCode::NOT_FOUND => return Ok(None),
-            status => return Err(anyhow!("Failed to read the input file: {status}")),
-        }
-        let mut read = 0;
-        let mut head = Vec::new();
-        let mut sink: Option<FastaSink> = None;
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(reqwest::Error::without_url)?
-        {
-            read += chunk.len() as u64;
-            if read > limit {
-                return Err(anyhow!("The input file is larger than {limit} bytes"));
+        let read = async {
+            let mut response = self
+                .client
+                .get(url)
+                .timeout(INPUT_READ_TIMEOUT)
+                .send()
+                .await
+                .map_err(reqwest::Error::without_url)?;
+            match response.status() {
+                StatusCode::OK => {}
+                StatusCode::NOT_FOUND => return Ok(None),
+                status => return Err(anyhow!("Failed to read the input file: {status}")),
             }
-            match &mut sink {
-                Some(sink) => sink.write(&chunk)?,
-                None => {
-                    head.extend_from_slice(&chunk);
-                    if head.len() >= 2 {
-                        let mut new = FastaSink::for_head(&head);
-                        new.write(&std::mem::take(&mut head))?;
-                        sink = Some(new);
+            let (chunks, received) = tokio::sync::mpsc::channel(8);
+            let counting = tokio::task::spawn_blocking(move || FastaSink::count(received, limit));
+            let mut read = 0;
+            let mut failed = None;
+            loop {
+                match response.chunk().await.map_err(reqwest::Error::without_url) {
+                    Ok(Some(chunk)) => {
+                        read += chunk.len() as u64;
+                        if read > limit {
+                            failed = Some(anyhow!("The input file is larger than {limit} bytes"));
+                            break;
+                        }
+                        // A closed channel means the counting stopped with an error.
+                        if chunks.send(chunk.to_vec()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        failed = Some(error.into());
+                        break;
                     }
                 }
             }
-        }
-        let mut sink = sink.unwrap_or_else(|| FastaSink::for_head(&head));
-        sink.write(&head)?;
-        Ok(Some(sink.finish()?))
+            drop(chunks);
+            let counted = counting.await?;
+            match failed {
+                Some(error) => Err(error),
+                None => Ok(Some(counted?)),
+            }
+        };
+        tokio::time::timeout(INPUT_READ_TIMEOUT, read)
+            .await
+            .map_err(|_| anyhow!("Reading the input file timed out"))?
     }
 
     /// Reads a small result file as text. `None` when it does not exist.
@@ -881,6 +936,21 @@ mod tests {
                 bases: 6
             })
         );
+    }
+
+    #[tokio::test]
+    async fn test_count_input_fasta_limits_the_decompressed_size() {
+        let mut fasta = b">a\n".to_vec();
+        fasta.extend(std::iter::repeat_n(b'A', 100_000));
+        let body = gzip(&fasta);
+        assert!(body.len() < 1000);
+        let (_server, handler) = fasta_server("job", body).await;
+        let error = handler
+            .count_input_fasta("job", 1000)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("larger than 1000 bytes"), "{error}");
     }
 
     #[tokio::test]
