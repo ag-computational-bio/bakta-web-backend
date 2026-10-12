@@ -27,6 +27,90 @@ const RESULT_EXISTENCE_CHECK_DURATION_SECONDS: i64 = 60;
 const RESULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
 const RESULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// Time for reading an input FASTA, which can be large.
+#[cfg(not(test))]
+const INPUT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+#[cfg(test)]
+const INPUT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Most bytes of an input FASTA that are read to count it.
+pub const INPUT_READ_LIMIT: u64 = 1 << 30;
+
+/// Number of sequences and bases of a FASTA file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FastaCount {
+    pub sequences: i64,
+    pub bases: i64,
+}
+
+/// Counts the FASTA data written to it: header lines (starting with `>`)
+/// and the characters of the other lines that are not whitespace.
+#[derive(Default)]
+struct FastaCounter {
+    count: FastaCount,
+    in_line: bool,
+    in_header: bool,
+}
+
+impl std::io::Write for FastaCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        for &byte in buf {
+            if byte == b'\n' {
+                self.in_line = false;
+                self.in_header = false;
+                continue;
+            }
+            if !self.in_line {
+                self.in_line = true;
+                if byte == b'>' {
+                    self.in_header = true;
+                    self.count.sequences += 1;
+                }
+            }
+            if !self.in_header && !byte.is_ascii_whitespace() {
+                self.count.bases += 1;
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Where the read data goes: straight to the counter, or through gzip.
+enum FastaSink {
+    Plain(FastaCounter),
+    Gzip(Box<flate2::write::GzDecoder<FastaCounter>>),
+}
+
+impl FastaSink {
+    /// Gzip when `head` starts with the gzip magic bytes.
+    fn for_head(head: &[u8]) -> Self {
+        if head.starts_with(&[0x1f, 0x8b]) {
+            FastaSink::Gzip(Box::new(flate2::write::GzDecoder::new(
+                FastaCounter::default(),
+            )))
+        } else {
+            FastaSink::Plain(FastaCounter::default())
+        }
+    }
+
+    fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        match self {
+            FastaSink::Plain(counter) => counter.write_all(data),
+            FastaSink::Gzip(decoder) => decoder.write_all(data),
+        }
+    }
+
+    fn finish(self) -> std::io::Result<FastaCount> {
+        Ok(match self {
+            FastaSink::Plain(counter) => counter.count,
+            FastaSink::Gzip(decoder) => decoder.finish()?.count,
+        })
+    }
+}
 
 pub enum InputType {
     Fasta,
@@ -176,6 +260,69 @@ impl S3Handler {
                 "Failed to check result file existence for {key_name}: {status}"
             )),
         }
+    }
+
+    /// Counts the sequences and bases of the input FASTA of a genome job. The
+    /// file is read as a stream (gzip when it starts with the gzip magic
+    /// bytes), at most `limit` bytes. `None` when it does not exist. Errors
+    /// do not show the signed URL.
+    pub async fn count_input_fasta(&self, job_id: &str, limit: u64) -> Result<Option<FastaCount>> {
+        let key = format!("jobs/{job_id}/inputs/fastadata.fasta");
+        let url = sign_url(
+            Method::GET,
+            &self.access_key,
+            &self.secret_key,
+            self.is_ssl,
+            false,
+            0,
+            None,
+            &self.bucket,
+            &key,
+            &self.endpoint,
+            RESULT_EXISTENCE_CHECK_DURATION_SECONDS,
+            None,
+            None,
+        )
+        .await?;
+        let mut response = self
+            .client
+            .get(url)
+            .timeout(INPUT_READ_TIMEOUT)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
+        match response.status() {
+            StatusCode::OK => {}
+            StatusCode::NOT_FOUND => return Ok(None),
+            status => return Err(anyhow!("Failed to read the input file: {status}")),
+        }
+        let mut read = 0;
+        let mut head = Vec::new();
+        let mut sink: Option<FastaSink> = None;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(reqwest::Error::without_url)?
+        {
+            read += chunk.len() as u64;
+            if read > limit {
+                return Err(anyhow!("The input file is larger than {limit} bytes"));
+            }
+            match &mut sink {
+                Some(sink) => sink.write(&chunk)?,
+                None => {
+                    head.extend_from_slice(&chunk);
+                    if head.len() >= 2 {
+                        let mut new = FastaSink::for_head(&head);
+                        new.write(&std::mem::take(&mut head))?;
+                        sink = Some(new);
+                    }
+                }
+            }
+        }
+        let mut sink = sink.unwrap_or_else(|| FastaSink::for_head(&head));
+        sink.write(&head)?;
+        Ok(Some(sink.finish()?))
     }
 
     /// Reads a small result file as text. `None` when it does not exist.
@@ -689,6 +836,62 @@ mod tests {
                 "response-content-disposition=attachment%3B%20filename%3D%22sample.json%22"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn test_count_input_fasta_reads_plain_and_gzip_files_up_to_a_limit() {
+        use std::io::Write;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let fasta = b">contig_1 some description\nACGT ACGT\nNNac\n>contig_2\r\nGG\r\n";
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(fasta).unwrap();
+        let gzip = gzip.finish().unwrap();
+        let server = MockServer::start().await;
+        for (job, body) in [("plain", fasta.to_vec()), ("gzip", gzip)] {
+            Mock::given(method("GET"))
+                .and(path(format!("/jobs/{job}/inputs/fastadata.fasta")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                .mount(&server)
+                .await;
+        }
+        let handler = S3Handler::new(
+            "access".to_string(),
+            "secret".to_string(),
+            "bucket".to_string(),
+            format!("http://s3.test:{}", server.address().port()),
+        )
+        .with_bucket_host_address(*server.address());
+        let expected = FastaCount {
+            sequences: 2,
+            bases: 14,
+        };
+        for job in ["plain", "gzip"] {
+            assert_eq!(
+                handler
+                    .count_input_fasta(job, INPUT_READ_LIMIT)
+                    .await
+                    .unwrap(),
+                Some(expected),
+                "{job}"
+            );
+        }
+        assert_eq!(
+            handler
+                .count_input_fasta("missing", INPUT_READ_LIMIT)
+                .await
+                .unwrap(),
+            None
+        );
+        let error = handler
+            .count_input_fasta("plain", 10)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("larger than 10 bytes"), "{error}");
+        assert!(!error.contains("Signature"), "{error}");
     }
 
     #[tokio::test]

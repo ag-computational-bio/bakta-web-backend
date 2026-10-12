@@ -152,6 +152,7 @@ dependencies = [
  "axum",
  "chrono",
  "dotenvy",
+ "flate2",
  "http-body-util",
  "jsonwebtoken",
  "lazy_static",

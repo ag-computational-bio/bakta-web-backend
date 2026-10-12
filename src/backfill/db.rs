@@ -161,6 +161,16 @@ impl StatsDb {
         })
     }
 
+    /// Jobs whose genome size is recorded, so their input is not read again.
+    pub async fn jobs_with_size(&self) -> Result<HashSet<Uuid>> {
+        let ids: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM jobs WHERE total_length IS NOT NULL AND sequence_count IS NOT NULL",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        Ok(ids.into_iter().collect())
+    }
+
     /// Jobs whose summary values are all recorded, so S3 is not read again.
     pub async fn jobs_with_summary(&self) -> Result<HashSet<Uuid>> {
         let ids: Vec<Uuid> = sqlx::query_scalar(
@@ -174,7 +184,7 @@ impl StatsDb {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::stats::{
         StatsEvent, WorkflowState,
@@ -184,7 +194,7 @@ mod tests {
     use serde_json::json;
     use sqlx::Row;
 
-    fn backfill_job(environment: &str, created_at: DateTime<Utc>) -> BackfillJob {
+    pub(crate) fn backfill_job(environment: &str, created_at: DateTime<Utc>) -> BackfillJob {
         BackfillJob {
             job: NewJob {
                 id: Uuid::new_v4(),
