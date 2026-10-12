@@ -1064,6 +1064,9 @@ impl StateHandler {
             (changed, gone)
         };
         let observed_at = batch.observed_at.unwrap_or_else(Utc::now);
+        // A deleted workflow may belong to a job that another backend
+        // deleted: its tombstone is checked at once.
+        let deleted_workflows = !gone.is_empty();
         if !self
             .record_changed_workflows(&changed, &gone, observed_at)
             .await
@@ -1072,8 +1075,83 @@ impl StateHandler {
         }
         let items = self.job_workflows(&jobs);
         let completed = batch.completed.into_values().collect();
-        self.apply_with_completions(items, &jobs, completed, Utc::now())
+        let retry = self
+            .apply_with_completions(items, &jobs, completed, Utc::now())
+            .await;
+        if deleted_workflows {
+            self.drop_deleted_jobs(Some(&jobs)).await;
+        }
+        retry
+    }
+
+    /// Removes jobs in memory (of `jobs`, or all) whose record has status
+    /// `deleted`, for example after an admin delete through the backend of
+    /// another environment, like a local delete: they go on the list of
+    /// deleted jobs, and their kept completions are dropped. Jobs that are
+    /// being started, deleted or resubmitted here are left to that action.
+    async fn drop_deleted_jobs(&self, jobs: Option<&HashSet<Uuid>>) {
+        let Some(db) = self.stats.db() else {
+            return;
+        };
+        let candidates: Vec<Uuid> = self
+            .job_state
+            .read()
             .await
+            .keys()
+            .filter(|id| jobs.is_none_or(|jobs| jobs.contains(id)))
+            .copied()
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let deleted =
+            match tokio::time::timeout(Duration::from_secs(10), db.deleted_job_ids(&candidates))
+                .await
+            {
+                Ok(Ok(deleted)) => deleted,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "deleted_jobs_check_failed");
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!("deleted_jobs_check_timed_out");
+                    return;
+                }
+            };
+        if deleted.is_empty() {
+            return;
+        }
+        let mut dropped = Vec::new();
+        {
+            let mut job_state = self.job_state.write().await;
+            let reserved = self
+                .starting_jobs
+                .lock()
+                .expect("starting jobs lock poisoned")
+                .clone();
+            for id in deleted {
+                if !reserved.contains(&id) && job_state.remove(&id).is_some() {
+                    self.record_deleted(id);
+                    dropped.push(id);
+                }
+            }
+        }
+        if dropped.is_empty() {
+            return;
+        }
+        let mut live = self
+            .live_workflows
+            .write()
+            .expect("live workflows lock poisoned");
+        let mut completions = self.completions.lock().expect("completions lock poisoned");
+        for id in &dropped {
+            live.remove(id);
+            completions.finished.remove(id);
+        }
+        completions
+            .pending
+            .retain(|_, item| job_id_label(item).is_none_or(|id| !dropped.contains(&id)));
+        tracing::info!(jobs = dropped.len(), "deleted_jobs_dropped");
     }
 
     /// Jobs with a completion that was not applied yet.
@@ -1187,6 +1265,7 @@ impl StateHandler {
                 .expect("completions lock poisoned")
                 .finished
                 .extend(finished);
+            self.drop_deleted_jobs(None).await;
         }
         self.prune_completions().await;
         self.write_unwritten().await;

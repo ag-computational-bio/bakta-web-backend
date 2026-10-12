@@ -1503,3 +1503,173 @@ async fn a_retry_recorded_by_another_backend_is_applied_after_a_restart() {
     .await;
     assert_eq!(job_status(&db, id).await.as_deref(), Some("succeeded"));
 }
+
+/// Asserts that backend `handler` no longer reports job `id`: no status and
+/// no result URLs.
+async fn assert_job_gone(handler: &crate::bakta_handler::BaktaHandler, id: Uuid) {
+    let reference = crate::v2::api_structs::JobReference {
+        job_id: id,
+        secret: TEST_SECRET.to_string(),
+    };
+    let list = handler
+        .state_handler
+        .get_job_states_v2(vec![reference.clone()])
+        .await
+        .unwrap();
+    assert!(list.jobs.is_empty(), "status still reported");
+    assert!(
+        handler
+            .state_handler
+            .get_results_v2(reference, &handler.s3_handler)
+            .await
+            .is_err()
+    );
+}
+
+/// Starts backend P with one watched running job, and returns it once the
+/// job is in memory.
+async fn running_job_on_p(
+    db: &crate::stats::StatsDb,
+    id: Uuid,
+    events: String,
+) -> (
+    std::sync::Arc<crate::bakta_handler::BaktaHandler>,
+    MockServer,
+) {
+    let kube = watch_server(
+        vec![kube_workflow("wf-run", id, "Running", false, 90)],
+        events,
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{WORKFLOWS}/wf-run")))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&kube)
+        .await;
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new((*db).clone(), JobVersions::default()),
+    );
+    start(
+        handler.state_handler.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the running job", || async {
+        job_status(db, id).await.as_deref() == Some("running")
+    })
+    .await;
+    (handler, kube)
+}
+
+#[tokio::test]
+async fn a_job_deleted_by_another_backend_leaves_memory_within_a_tick() {
+    let Some(db) = test_db("a_job_deleted_by_another_backend").await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    let (p, _kube) = running_job_on_p(&db, id, String::new()).await;
+    // Backend S deletes the job: its tombstone is in the shared database.
+    db.apply(&crate::stats::StatsEvent::Deleted { id })
+        .await
+        .unwrap();
+    wait_for("the deleted job to leave memory", || async {
+        !p.state_handler.job_state.read().await.contains_key(&id)
+    })
+    .await;
+    assert_job_gone(&p, id).await;
+    assert!(p.state_handler.is_deleted(&id));
+}
+
+#[tokio::test]
+async fn a_watched_delete_checks_the_tombstone_at_once() {
+    let Some(db) = test_db("a_watched_delete_checks_the_tombstone").await else {
+        return;
+    };
+    let id = Uuid::new_v4();
+    let kube = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", LIVE))
+        .and(query_param_is_missing("watch"))
+        .respond_with(page(
+            vec![kube_workflow("wf-run", id, "Running", false, 90)],
+            "",
+            "100",
+        ))
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("labelSelector", COMPLETED))
+        .respond_with(page(Vec::new(), "", "100"))
+        .mount(&kube)
+        .await;
+    // The workflow is deleted 3 seconds after the start.
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("watch", "true"))
+        .and(query_param("resourceVersion", "100"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(event(
+                    "DELETED",
+                    kube_workflow("wf-run", id, "Running", false, 101),
+                ))
+                .set_delay(std::time::Duration::from_secs(3)),
+        )
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(WORKFLOWS))
+        .and(query_param("watch", "true"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+        .with_priority(5)
+        .mount(&kube)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{WORKFLOWS}/wf-run")))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&kube)
+        .await;
+    let handler = test_handler_with_stats(
+        "http://127.0.0.1:1",
+        "https://s3.example.com",
+        StatsRecorder::new((*db).clone(), JobVersions::default()),
+    );
+    start(
+        handler.state_handler.clone(),
+        KubeApi::new(
+            reqwest::Client::new(),
+            &kube.uri(),
+            "token".to_string(),
+            "bakta",
+        ),
+    );
+    wait_for("the running job", || async {
+        job_status(&db, id).await.as_deref() == Some("running")
+    })
+    .await;
+    // Another backend deleted the job before P sees the workflow deleted.
+    db.apply(&crate::stats::StatsEvent::Deleted { id })
+        .await
+        .unwrap();
+    // Well before the next tick, 15 seconds after the start.
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    assert!(
+        !handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
+    assert_job_gone(&handler, id).await;
+}
