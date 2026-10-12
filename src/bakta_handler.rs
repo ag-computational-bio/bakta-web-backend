@@ -1902,7 +1902,7 @@ impl StateHandler {
     }
 
     /// The copy of a job from `memory_snapshot`, unless it was deleted since.
-    fn from_snapshot<'a>(
+    fn snapshot_job<'a>(
         &self,
         snapshot: &'a HashMap<Uuid, FullJobState>,
         id: &Uuid,
@@ -1921,7 +1921,7 @@ impl StateHandler {
         for Job { id, secret } in request_jobs {
             let recorded = recorded.get(&id).map(|job| job.for_secret(&secret));
             let found = read_lock.get(&id).or(recorded.as_ref());
-            if let Some(state) = found.or_else(|| self.from_snapshot(&snapshot, &id)) {
+            if let Some(state) = found.or_else(|| self.snapshot_job(&snapshot, &id)) {
                 if !state.secret_matches(&secret) {
                     failed.push(FailedJobStatus {
                         id,
@@ -1983,7 +1983,7 @@ impl StateHandler {
         for JobReference { job_id, secret } in request_jobs {
             let recorded = recorded.get(&job_id).map(|job| job.for_secret(&secret));
             let found = read_lock.get(&job_id).or(recorded.as_ref());
-            if let Some(state) = found.or_else(|| self.from_snapshot(&snapshot, &job_id)) {
+            if let Some(state) = found.or_else(|| self.snapshot_job(&snapshot, &job_id)) {
                 if !state.secret_matches(&secret) {
                     failed_jobs.push(into_v2_failed_status(
                         job_id,
@@ -2176,7 +2176,7 @@ impl StateHandler {
             let read_lock = self.job_state.read().await;
             let recorded = recorded.get(&job_id).map(|job| job.for_secret(&secret));
             let found = read_lock.get(&job_id).or(recorded.as_ref());
-            let Some(state) = found.or_else(|| self.from_snapshot(&snapshot, &job_id)) else {
+            let Some(state) = found.or_else(|| self.snapshot_job(&snapshot, &job_id)) else {
                 return Ok(());
             };
             if !state.secret_matches(&secret) {
