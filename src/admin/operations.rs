@@ -401,14 +401,12 @@ pub async fn delete_job(
     }
     let target = find_job(&state, id).await?;
     let deleted_workflow = match (&target.in_memory, &target.workflow_name) {
-        (Some(job), _) if job.archived => {
-            handler
-                .argo_client
-                .delete_workflow(job)
-                .await
-                .map_err(AdminError::argo)?;
-            true
-        }
+        // Deletes the live workflow and the archive record.
+        (Some(job), _) if job.archived => handler
+            .argo_client
+            .delete_workflow(job)
+            .await
+            .map_err(AdminError::argo)?,
         (_, Some(name)) => handler
             .argo_client
             .delete_workflow_by_name(name)

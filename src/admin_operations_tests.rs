@@ -1937,3 +1937,126 @@ async fn expired_jobs_are_recorded_like_deleted_jobs() {
     assert!(!state.job_state.read().await.contains_key(&id));
     assert!(state.deleted_jobs.lock().unwrap().contains_key(&id));
 }
+
+/// A job whose workflow is live and archived at the same time: Argo set the
+/// archiving label while the workflow still exists in the cluster.
+async fn live_and_archived_job(
+    handler: &crate::bakta_handler::BaktaHandler,
+    name: &str,
+    uid: Uuid,
+) -> Uuid {
+    let id = job_with_workflow(handler, name, ArgoStatus::Failed).await;
+    let mut states = handler.state_handler.job_state.write().await;
+    let job = states.get_mut(&id).unwrap();
+    job.archived = true;
+    job.argo_uid = Some(uid);
+    id
+}
+
+#[tokio::test]
+async fn deletes_remove_the_live_workflow_of_an_archived_job() {
+    let argo = MockServer::start().await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    let mut jobs = Vec::new();
+    for name in ["wf-v1", "wf-v2", "wf-admin"] {
+        let uid = Uuid::new_v4();
+        let id = live_and_archived_job(&setup.handler, name, uid).await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/api/v1/workflows/bakta/{name}")))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&argo)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/api/v1/archived-workflows/{uid}")))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&argo)
+            .await;
+        jobs.push(id);
+    }
+    // A retry keeps the cached archived flag. The delete still removes the
+    // retried live workflow.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/bakta/wf-admin"))
+        .respond_with(workflow("wf-admin", "Failed"))
+        .mount(&argo)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/bakta/wf-admin/retry"))
+        .respond_with(workflow("wf-admin", "Running"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let (status, body) = admin_call(
+        &setup,
+        "POST",
+        &format!("/api/admin/jobs/{}/retry", jobs[2]),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = call(
+        &setup.router,
+        "DELETE",
+        &format!("/api/v1/job/delete?jobID={}&secret={TEST_SECRET}", jobs[0]),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = call(
+        &setup.router,
+        "DELETE",
+        &format!("/api/v2/job/delete?job_id={}&secret={TEST_SECRET}", jobs[1]),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = admin_call(
+        &setup,
+        "DELETE",
+        &format!("/api/admin/jobs/{}", jobs[2]),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"deleted_workflow": true, "purged_objects": 0}));
+}
+
+#[tokio::test]
+async fn deleting_an_archived_job_whose_live_workflow_is_gone_succeeds() {
+    let argo = MockServer::start().await;
+    let uid = Uuid::new_v4();
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/bakta/wf-gone"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("{}"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/v1/archived-workflows/{uid}")))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(1)
+        .mount(&argo)
+        .await;
+    let setup = admin_setup(&argo.uri(), "https://s3.example.com", None).await;
+    let id = live_and_archived_job(&setup.handler, "wf-gone", uid).await;
+    let (status, body) = call(
+        &setup.router,
+        "DELETE",
+        &format!("/api/v2/job/delete?job_id={id}&secret={TEST_SECRET}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !setup
+            .handler
+            .state_handler
+            .job_state
+            .read()
+            .await
+            .contains_key(&id)
+    );
+}

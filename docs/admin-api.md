@@ -306,6 +306,7 @@ A workflow is suspended when it is `Running` and has `spec.suspend` set to true 
 ### `DELETE /jobs/{id}?purge_data=false`
 
 Deletes the Argo workflow (Argo removes its pods) and sets the job status to `deleted`. With `purge_data=true` the job's S3 objects are deleted too. Response: `{ "deleted_workflow": true, "purged_objects": 12 }`.
+A workflow can be live and archived at the same time. So every delete (admin or user) deletes the live workflow by name, and also the archive record when the job is archived. A workflow or archive record that Argo does not find counts as already deleted.
 When `data_available` is false, the S3 listing and purge are skipped and `purged_objects` is `0`. The workflow is still deleted and the job is still marked `deleted`.
 After a delete (admin or user) or an expiry, the polling loop never adds the job back, even when its workflow list was fetched before the delete or Argo still lists the workflow for a while. The backend keeps the IDs of deleted and expired jobs in memory for 35 days, the time it keeps job state. After that, a poll treats any finished workflow of the job as expired. The list is lost on a restart.
 `409` while the job is being started or resubmitted. While the delete runs, a start request for the job is refused with `409`.

@@ -212,28 +212,25 @@ impl ArgoClient {
         Ok(response)
     }
 
-    pub async fn delete_workflow(&self, state: &FullJobState) -> Result<()> {
-        let url = if state.archived {
-            if let Some(argo_uid) = &state.argo_uid {
-                get_delete_url_archived(&self.url, argo_uid)
-            } else {
-                return Ok(());
-            }
-        } else if let Some(wf_name) = &state.workflowname {
-            get_delete_url_running(&self.url, &self.namespace, wf_name)
-        } else {
-            return Ok(());
-        };
-
-        self.client
-            .delete(url)
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
-        Ok(())
+    /// Deletes the job's workflow and returns true when something was
+    /// deleted. A workflow can be live and archived at the same time (Argo
+    /// sets the archiving label while the workflow still exists), and the
+    /// archive delete does not touch the live workflow. So the live workflow
+    /// is always deleted by name, and the archive record too when the job is
+    /// archived. A workflow or record that is not found counts as already gone.
+    pub async fn delete_workflow(&self, state: &FullJobState) -> Result<bool> {
+        let mut deleted = false;
+        if let Some(wf_name) = &state.workflowname {
+            deleted |= self.delete_workflow_by_name(wf_name).await?;
+        }
+        if state.archived
+            && let Some(argo_uid) = &state.argo_uid
+        {
+            deleted |= self
+                .send_delete(get_delete_url_archived(&self.url, argo_uid))
+                .await?;
+        }
+        Ok(deleted)
     }
 
     pub async fn get_logs(&self, state: &FullJobState) -> Result<String> {
@@ -472,13 +469,19 @@ impl ArgoClient {
 
     /// Deletes a live workflow. Returns `false` when it does not exist.
     pub async fn delete_workflow_by_name(&self, workflow_name: &str) -> Result<bool> {
+        self.send_delete(get_delete_url_running(
+            &self.url,
+            &self.namespace,
+            workflow_name,
+        ))
+        .await
+    }
+
+    /// Sends a delete request. Returns false when Argo answers 404.
+    async fn send_delete(&self, url: String) -> Result<bool> {
         let response = self
             .client
-            .delete(get_delete_url_running(
-                &self.url,
-                &self.namespace,
-                workflow_name,
-            ))
+            .delete(url)
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?;
